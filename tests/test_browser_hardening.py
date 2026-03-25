@@ -69,9 +69,9 @@ class _FakeContext:
 
 def _runtime_with_fake_page(page: _FakePage) -> BrowserRuntime:
     runtime = BrowserRuntime(state_store=InMemoryRuntimeStateStore())
-    runtime._pages["s1"] = page  # type: ignore[attr-defined]
-    runtime._contexts["s1"] = _FakeContext()  # type: ignore[attr-defined]
-    runtime._session_agents["s1"] = "agent-1"  # type: ignore[attr-defined]
+    runtime.session_manager._pages["s1"] = page
+    runtime.session_manager._contexts["s1"] = _FakeContext()
+    runtime.session_manager._session_agents["s1"] = "agent-1"
 
     async def fake_snapshot(_: _FakePage) -> StructuredPageModel:
         return StructuredPageModel(title="Example", url=page.url)
@@ -79,8 +79,8 @@ def _runtime_with_fake_page(page: _FakePage) -> BrowserRuntime:
     async def fake_stabilize(_: _FakePage) -> None:
         return None
 
-    runtime._snapshot_page = fake_snapshot  # type: ignore[method-assign]
-    runtime._stabilize_page = fake_stabilize  # type: ignore[method-assign]
+    runtime.spm_extractor.snapshot_page = fake_snapshot  # type: ignore[method-assign]
+    runtime.recovery_engine.stabilize_page = fake_stabilize  # type: ignore[method-assign]
     return runtime
 
 
@@ -112,10 +112,10 @@ def test_download_flow() -> None:
         page = _FakePage()
         runtime = _runtime_with_fake_page(page)
 
-        async def fake_capture(_: _FakePage, selector: str, timeout_ms: int) -> DownloadArtifact:
+        async def fake_capture(_: _FakePage, selector: str, timeout_ms: int, recovery=None) -> DownloadArtifact:
             return DownloadArtifact(suggested_filename="file.pdf", path="/tmp/file.pdf", status="completed")
 
-        runtime._capture_download = fake_capture  # type: ignore[method-assign]
+        runtime.download_manager.capture_download = fake_capture  # type: ignore[method-assign]
         result = await runtime.download("s1", trigger_selector="a.download")
         assert result.artifact.suggested_filename == "file.pdf"
 

@@ -7,7 +7,7 @@ from synapse.models.browser import StructuredPageModel
 from synapse.models.loop import AgentAction, AgentActionType, LoopEvaluation
 from synapse.models.task import TaskRequest
 from synapse.runtime.llm import LLMProvider
-from synapse.runtime.prompts import EVALUATOR_PROMPT, PLANNER_PROMPT
+from synapse.runtime.prompts import EVALUATOR_PROMPT, PLANNER_PROMPT, REFLECTION_PROMPT
 
 
 class NavigationPlanner:
@@ -378,3 +378,57 @@ class NavigationEvaluator:
 
         success = "page" in action_result
         return success, f"{action.type.value} completed." if success else f"{action.type.value} did not return page state."
+
+
+class NavigationReflector:
+    def __init__(self, llm: LLMProvider | None = None) -> None:
+        self.llm = llm
+
+    async def reflect(
+        self,
+        task: TaskRequest,
+        completed_actions: list[AgentAction],
+        current_page: StructuredPageModel | None,
+        memory_summary: str = "",
+    ) -> str:
+        if self.llm is None:
+            return self._heuristic_reflection(completed_actions)
+
+        page_payload = current_page.model_dump(mode="json") if current_page is not None else {}
+        previous_actions = [
+            {
+                "type": action.type.value,
+                "selector": action.selector,
+                "text": action.text,
+                "url": action.url,
+                "status": action.status,
+            }
+            for action in completed_actions
+        ]
+        prompt = REFLECTION_PROMPT.format(
+            goal=task.goal,
+            page_state=json.dumps(page_payload, ensure_ascii=True),
+            memory_summary=memory_summary or "No memory available.",
+            previous_actions=json.dumps(previous_actions, ensure_ascii=True),
+            constraints=json.dumps(task.constraints, ensure_ascii=True),
+            completed_actions=json.dumps(previous_actions, ensure_ascii=True),
+        )
+        system = "You are Synapse reflection module. Return strict JSON with summary and should_continue."
+
+        try:
+            raw = await self.llm.generate(prompt=prompt, system=system)
+        except Exception:
+            return self._heuristic_reflection(completed_actions)
+
+        decoded = NavigationPlanner._decode_llm_json(raw)
+        if decoded is None:
+            return self._heuristic_reflection(completed_actions)
+
+        summary = decoded.get("summary")
+        if isinstance(summary, str) and summary.strip():
+            return summary.strip()
+        return self._heuristic_reflection(completed_actions)
+
+    @staticmethod
+    def _heuristic_reflection(completed_actions: list[AgentAction]) -> str:
+        return f"Completed {len(completed_actions)} actions; continuing with iterative refinement."

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from synapse.models.loop import AgentAction, AgentActionType
 from synapse.models.task import TaskRequest
 from synapse.runtime.llm import AnthropicProvider, LocalModelProvider, OpenAIProvider, create_llm_provider
-from synapse.runtime.planning import NavigationEvaluator, NavigationPlanner
+from synapse.runtime.planning import NavigationEvaluator, NavigationPlanner, NavigationReflector
 
 
 def test_create_llm_provider_returns_none_when_disabled() -> None:
@@ -120,3 +120,25 @@ def test_navigation_evaluator_evaluate_action_returns_none_on_invalid_json() -> 
         )
     )
     assert result is None
+
+
+def test_navigation_reflector_uses_llm_summary() -> None:
+    class ReflectProvider:
+        async def generate(self, prompt: str, system: str | None = None) -> str:
+            return '{"summary":"Persist successful extraction strategy.","should_continue":true}'
+
+    reflector = NavigationReflector(llm=ReflectProvider())
+    task = TaskRequest(task_id="task-r1", agent_id="agent-1", goal="Collect papers")
+    summary = asyncio.run(reflector.reflect(task=task, completed_actions=[], current_page=None, memory_summary="m1"))
+    assert summary == "Persist successful extraction strategy."
+
+
+def test_navigation_reflector_falls_back_on_invalid_json() -> None:
+    class BadReflectProvider:
+        async def generate(self, prompt: str, system: str | None = None) -> str:
+            return "invalid"
+
+    reflector = NavigationReflector(llm=BadReflectProvider())
+    task = TaskRequest(task_id="task-r2", agent_id="agent-2", goal="Collect papers")
+    summary = asyncio.run(reflector.reflect(task=task, completed_actions=[], current_page=None))
+    assert "Completed 0 actions" in summary

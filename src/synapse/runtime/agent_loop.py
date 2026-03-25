@@ -10,7 +10,7 @@ from synapse.runtime.budget import AgentBudgetLimitExceeded, AgentBudgetManager
 from synapse.runtime.browser import BrowserRuntime
 from synapse.runtime.llm import LLMProvider
 from synapse.runtime.memory import AgentMemoryManager
-from synapse.runtime.planning import NavigationEvaluator, NavigationPlanner
+from synapse.runtime.planning import NavigationEvaluator, NavigationPlanner, NavigationReflector
 from synapse.runtime.security import AgentSecuritySandbox
 from synapse.runtime.safety import AgentSafetyLayer, SecurityAlertError
 from synapse.transports.websocket_manager import WebSocketManager
@@ -35,8 +35,10 @@ class EventDrivenAgentLoop:
         self.safety = safety
         self.memory_manager = memory_manager
         self.budget_manager = budget_manager
+        self.llm = llm
         self.planner = NavigationPlanner(llm=llm)
         self.evaluator = NavigationEvaluator(llm=llm)
+        self.reflector = NavigationReflector(llm=llm)
 
     async def run(self, task: TaskRequest) -> TaskResult:
         if task.session_id is None:
@@ -115,6 +117,7 @@ class EventDrivenAgentLoop:
                 )
                 await self._increment_tokens(task, evaluation.notes)
                 await self._store_evaluation_memory(task, action, evaluation, current_page)
+                await self._store_reflection_memory(task, completed_actions, current_page)
                 if remaining_actions:
                     await self._broadcast_plan(task, remaining_actions)
 
@@ -305,6 +308,31 @@ class EventDrivenAgentLoop:
             return ""
         ordered = sorted(recent, key=lambda item: item.timestamp)
         return " | ".join(item.content for item in ordered if item.content)
+
+    async def _store_reflection_memory(
+        self,
+        task: TaskRequest,
+        completed_actions: list[AgentAction],
+        current_page: StructuredPageModel | None,
+    ) -> None:
+        reflection = await self.reflector.reflect(
+            task=task,
+            completed_actions=completed_actions,
+            current_page=current_page,
+            memory_summary=await self._memory_summary(task.agent_id),
+        )
+        if not reflection:
+            return
+
+        await self.memory_manager.store(
+            MemoryStoreRequest(
+                agent_id=task.agent_id,
+                memory_type=MemoryType.LONG_TERM,
+                content=f"reflect cycle task={task.task_id} summary={reflection}",
+            )
+        )
+        await self._increment_tokens(task, reflection)
+        await self._increment_memory_write(task)
 
     async def _increment_step(self, task: TaskRequest) -> None:
         usage = self.budget_manager.increment_step(self.definition)

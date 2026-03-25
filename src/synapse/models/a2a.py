@@ -53,6 +53,10 @@ class AgentRegistrationRequest(BaseModel):
     agent_id: str
     name: str
     description: str | None = None
+    capabilities: list[str] = Field(default_factory=list)
+    endpoint: str | None = None
+    reputation: float = 0.5
+    latency: float = 0.0
     metadata: dict[str, str] = Field(default_factory=dict)
 
 

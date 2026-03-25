@@ -26,4 +26,17 @@ class AgentDefinition(BaseModel):
     description: str | None = None
     endpoint: str | None = Field(default=None, description="Optional upstream endpoint.")
     capabilities: AgentCapabilities = Field(default_factory=AgentCapabilities)
+    capability_tags: list[str] = Field(default_factory=list)
+    reputation: float = 0.5
+    latency: float = 0.0
     metadata: dict[str, str] = Field(default_factory=dict)
+
+
+class AgentDiscoveryEntry(BaseModel):
+    id: str
+    capabilities: list[str] = Field(default_factory=list)
+    endpoint: str | None = None
+    reputation: float
+    latency: float
+    availability: bool
+    score: float

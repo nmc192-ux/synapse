@@ -3,11 +3,13 @@ from fastapi.testclient import TestClient
 
 from synapse.main import app
 from synapse.models.a2a import A2AEnvelope, A2AMessageType, AgentWireMessage
+from synapse.models.agent import AgentDefinition, AgentKind
 from synapse.models.browser import BrowserState, PageButton, PageLink, PageSection, StructuredPageModel
 from synapse.models.loop import AgentAction, AgentActionType
 from synapse.models.memory import MemorySearchRequest, MemoryStoreRequest, MemoryType
 from synapse.models.plugin import ToolDescriptor
 from synapse.models.task import TaskCreateRequest, TaskRequest, TaskStatus
+from synapse.runtime.registry import AgentRegistry
 from synapse.sdk import SynapseClient
 
 
@@ -134,3 +136,46 @@ def test_codex_connector_normalizes_plan() -> None:
     assert normalized["goal"] == "Inspect homepage"
     assert normalized["actions"][0]["type"] == "click"
     connector.client.close()
+
+
+def test_agent_registry_finds_and_ranks_agents() -> None:
+    registry = AgentRegistry()
+    registry.register(
+        AgentDefinition(
+            agent_id="high-reputation",
+            kind=AgentKind.CUSTOM,
+            name="High Reputation",
+            endpoint="ws://agent-high",
+            capability_tags=["web_scraping"],
+            reputation=0.95,
+            latency=120,
+        )
+    )
+    registry.register(
+        AgentDefinition(
+            agent_id="fast-online",
+            kind=AgentKind.CUSTOM,
+            name="Fast Online",
+            endpoint="ws://agent-fast",
+            capability_tags=["web_scraping"],
+            reputation=0.6,
+            latency=20,
+        )
+    )
+    registry.register(
+        AgentDefinition(
+            agent_id="other-capability",
+            kind=AgentKind.CUSTOM,
+            name="Other Capability",
+            endpoint="ws://agent-other",
+            capability_tags=["analysis"],
+            reputation=0.99,
+            latency=1,
+        )
+    )
+
+    matches = registry.find("web_scraping", available_agent_ids={"fast-online"})
+
+    assert [match.id for match in matches] == ["fast-online", "high-reputation"]
+    assert matches[0].availability is True
+    assert matches[1].availability is False

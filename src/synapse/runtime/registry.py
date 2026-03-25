@@ -4,7 +4,7 @@ from synapse.adapters.claude_code import ClaudeCodeAdapter
 from synapse.adapters.codex import CodexAdapter
 from synapse.adapters.custom import CustomAgentAdapter
 from synapse.adapters.openclaw import OpenClawAdapter
-from synapse.models.agent import AgentDefinition, AgentKind
+from synapse.models.agent import AgentDefinition, AgentDiscoveryEntry, AgentKind
 from synapse.runtime.browser import BrowserRuntime
 from synapse.transports.websocket_manager import WebSocketManager
 
@@ -25,6 +25,40 @@ class AgentRegistry:
 
     def list(self) -> list[AgentDefinition]:
         return list(self._definitions.values())
+
+    def find(
+        self,
+        capability: str,
+        available_agent_ids: set[str] | None = None,
+    ) -> list[AgentDiscoveryEntry]:
+        normalized_capability = capability.lower()
+        entries: list[AgentDiscoveryEntry] = []
+        available_agent_ids = available_agent_ids or set()
+
+        for definition in self._definitions.values():
+            tags = [tag.lower() for tag in definition.capability_tags]
+            if normalized_capability not in tags:
+                continue
+
+            availability = definition.agent_id in available_agent_ids
+            score = (
+                definition.reputation * 100
+                + (25 if availability else 0)
+                - definition.latency
+            )
+            entries.append(
+                AgentDiscoveryEntry(
+                    id=definition.agent_id,
+                    capabilities=definition.capability_tags,
+                    endpoint=definition.endpoint,
+                    reputation=definition.reputation,
+                    latency=definition.latency,
+                    availability=availability,
+                    score=score,
+                )
+            )
+
+        return sorted(entries, key=lambda entry: (-entry.score, -entry.reputation, entry.latency, entry.id))
 
     def build_adapter(
         self,

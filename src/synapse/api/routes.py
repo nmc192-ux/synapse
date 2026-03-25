@@ -7,7 +7,7 @@ from synapse.models.a2a import (
     AgentRegistrationRequest,
     AgentWireMessage,
 )
-from synapse.models.agent import AgentDefinition
+from synapse.models.agent import AgentDefinition, AgentDiscoveryEntry
 from synapse.models.browser import (
     BrowserState,
     ClickRequest,
@@ -167,6 +167,14 @@ async def discover_a2a_agents(
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[AgentPresence]:
     return await orchestrator.discover_agents()
+
+
+@router.get("/agents/find", response_model=list[AgentDiscoveryEntry])
+async def find_agents(
+    capability: str,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> list[AgentDiscoveryEntry]:
+    return await orchestrator.find_agents(capability)
 
 
 @router.post("/agents/message", response_model=AgentWireMessage)

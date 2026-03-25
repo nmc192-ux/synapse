@@ -1,7 +1,7 @@
 import uuid
 
 from synapse.models.a2a import A2AEnvelope, A2AMessageType, AgentDelegateRequest, AgentPresence, AgentRegistrationRequest, AgentWireMessage
-from synapse.models.agent import AgentDefinition
+from synapse.models.agent import AgentDefinition, AgentDiscoveryEntry
 from synapse.models.browser import (
     BrowserState,
     ClickRequest,
@@ -218,6 +218,9 @@ class RuntimeOrchestrator:
 
     async def discover_agents(self) -> list[AgentPresence]:
         return self.a2a.list_agents()
+
+    async def find_agents(self, capability: str) -> list[AgentDiscoveryEntry]:
+        return self.a2a.find_agents(capability)
 
     async def send_a2a(self, envelope: A2AEnvelope) -> A2AEnvelope:
         response = await self.a2a.handle_message(envelope.sender_agent_id, envelope.model_dump(mode="json"))

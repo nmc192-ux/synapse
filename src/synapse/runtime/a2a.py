@@ -4,7 +4,7 @@ from collections.abc import Awaitable, Callable
 from fastapi import WebSocket
 
 from synapse.models.a2a import A2AEnvelope, A2AMessageType, AgentPresence, AgentRegistrationRequest, AgentWireMessage
-from synapse.models.agent import AgentDefinition, AgentKind
+from synapse.models.agent import AgentDefinition, AgentDiscoveryEntry, AgentKind
 from synapse.models.task import TaskRequest, TaskResult
 from synapse.runtime.registry import AgentRegistry
 
@@ -27,6 +27,10 @@ class A2AHub:
             kind=AgentKind.A2A,
             name=request.name,
             description=request.description,
+            endpoint=request.endpoint,
+            capability_tags=request.capabilities,
+            reputation=request.reputation,
+            latency=request.latency,
             metadata=request.metadata,
         )
         return self.agents.register(definition)
@@ -52,6 +56,9 @@ class A2AHub:
             AgentPresence(agent=agent, connected=agent.agent_id in connected_ids)
             for agent in self.agents.list()
         ]
+
+    def find_agents(self, capability: str) -> list[AgentDiscoveryEntry]:
+        return self.agents.find(capability, available_agent_ids=set(self._connections))
 
     async def handle_message(self, sender_agent_id: str, payload: dict[str, object]) -> A2AEnvelope | None:
         envelope = A2AEnvelope.model_validate(

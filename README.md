@@ -52,9 +52,21 @@ ui/              Next.js operator interface
 ## Python SDK
 
 ```python
+from synapse.models.agent import AgentDefinition, AgentKind, AgentSecurityPolicy
 from synapse.sdk import SynapseClient
 
-with SynapseClient("http://127.0.0.1:8000") as client:
+with SynapseClient("http://127.0.0.1:8000", agent_id="codex") as client:
+    client.register_agent(
+        AgentDefinition(
+            agent_id="codex",
+            kind=AgentKind.CODEX,
+            name="Codex",
+            security=AgentSecurityPolicy(
+                allowed_domains=["example.com"],
+                allowed_tools=["web.search"],
+            ),
+        )
+    )
     browser = client.browser
     page = browser.open("https://example.com")
     data = browser.extract("h1")
@@ -62,6 +74,9 @@ with SynapseClient("http://127.0.0.1:8000") as client:
 ```
 
 Example agents are available in `examples/` for OpenClaw, Codex, and Claude Code.
+
+Agent actions are sandboxed by default. Register each agent with explicit
+`allowed_domains`, `allowed_tools`, and rate limits before issuing browser or tool calls.
 
 ## Next.js UI
 

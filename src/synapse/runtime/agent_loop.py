@@ -6,13 +6,20 @@ from synapse.models.events import EventType, RuntimeEvent
 from synapse.models.loop import AgentAction, AgentActionType, LoopObservation, LoopPlan, LoopReflection
 from synapse.models.task import TaskRequest, TaskResult, TaskStatus
 from synapse.runtime.browser import BrowserRuntime
+from synapse.runtime.security import AgentSecuritySandbox
 from synapse.transports.websocket_manager import WebSocketManager
 
 
 class EventDrivenAgentLoop:
-    def __init__(self, browser: BrowserRuntime, sockets: WebSocketManager) -> None:
+    def __init__(
+        self,
+        browser: BrowserRuntime,
+        sockets: WebSocketManager,
+        sandbox: AgentSecuritySandbox,
+    ) -> None:
         self.browser = browser
         self.sockets = sockets
+        self.sandbox = sandbox
 
     async def run(self, task: TaskRequest) -> TaskResult:
         if task.session_id is None:
@@ -104,28 +111,38 @@ class EventDrivenAgentLoop:
         if action.type == AgentActionType.OPEN:
             if not action.url:
                 raise ValueError("open action requires url")
+            self.sandbox.authorize_domain(task.agent_id, action.url)
+            self.sandbox.consume_browser_action(task.agent_id)
             result = await self.browser.open(task.session_id, action.url)
             return result.model_dump(mode="json")
 
         if action.type == AgentActionType.CLICK:
             if not action.selector:
                 raise ValueError("click action requires selector")
+            self.sandbox.authorize_domain(task.agent_id, self.browser.current_url(task.session_id))
+            self.sandbox.consume_browser_action(task.agent_id)
             result = await self.browser.click(task.session_id, action.selector)
             return result.model_dump(mode="json")
 
         if action.type == AgentActionType.TYPE:
             if not action.selector:
                 raise ValueError("type action requires selector")
+            self.sandbox.authorize_domain(task.agent_id, self.browser.current_url(task.session_id))
+            self.sandbox.consume_browser_action(task.agent_id)
             result = await self.browser.type(task.session_id, action.selector, action.text or "")
             return result.model_dump(mode="json")
 
         if action.type == AgentActionType.EXTRACT:
             if not action.selector:
                 raise ValueError("extract action requires selector")
+            self.sandbox.authorize_domain(task.agent_id, self.browser.current_url(task.session_id))
+            self.sandbox.consume_browser_action(task.agent_id)
             result = await self.browser.extract(task.session_id, action.selector, action.attribute)
             return result.model_dump(mode="json")
 
         if action.type == AgentActionType.SCREENSHOT:
+            self.sandbox.authorize_domain(task.agent_id, self.browser.current_url(task.session_id))
+            self.sandbox.consume_browser_action(task.agent_id)
             result = await self.browser.screenshot(task.session_id)
             return result.model_dump(mode="json")
 

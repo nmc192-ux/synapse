@@ -26,13 +26,19 @@ from synapse.runtime.session import BrowserSession
 
 
 class SynapseClient:
-    def __init__(self, base_url: str = "http://127.0.0.1:8000", timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        base_url: str = "http://127.0.0.1:8000",
+        timeout: float = 30.0,
+        agent_id: str | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self._http = httpx.Client(base_url=self.base_url, timeout=timeout)
+        self.agent_id = agent_id
 
     @property
     def browser(self) -> SynapseBrowser:
-        return SynapseBrowser(self)
+        return SynapseBrowser(self, agent_id=self.agent_id)
 
     @property
     def memory(self) -> SynapseMemory:
@@ -65,7 +71,7 @@ class SynapseClient:
     def call_tool(self, tool_name: str, arguments: dict[str, object] | None = None) -> dict[str, object]:
         response = self._http.post(
             "/api/tools/call",
-            json={"tool_name": tool_name, "arguments": arguments or {}},
+            json={"agent_id": self.agent_id, "tool_name": tool_name, "arguments": arguments or {}},
         )
         response.raise_for_status()
         return dict(response.json())
@@ -89,9 +95,15 @@ class SynapseClient:
 
 
 class SynapseBrowser:
-    def __init__(self, client: SynapseClient, session_id: str | None = None) -> None:
+    def __init__(
+        self,
+        client: SynapseClient,
+        session_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> None:
         self._client = client
         self._session_id = session_id
+        self._agent_id = agent_id
 
     @property
     def session_id(self) -> str:
@@ -100,31 +112,36 @@ class SynapseBrowser:
         return self._session_id
 
     def open(self, url: str) -> BrowserState:
-        payload = OpenRequest(session_id=self.session_id, url=url)
+        payload = OpenRequest(session_id=self.session_id, agent_id=self._agent_id, url=url)
         response = self._client._http.post("/api/browser/open", json=payload.model_dump(mode="json"))
         response.raise_for_status()
         return BrowserState.model_validate(response.json())
 
     def click(self, selector: str) -> BrowserState:
-        payload = ClickRequest(session_id=self.session_id, selector=selector)
+        payload = ClickRequest(session_id=self.session_id, agent_id=self._agent_id, selector=selector)
         response = self._client._http.post("/api/browser/click", json=payload.model_dump(mode="json"))
         response.raise_for_status()
         return BrowserState.model_validate(response.json())
 
     def type(self, selector: str, text: str) -> BrowserState:
-        payload = TypeRequest(session_id=self.session_id, selector=selector, text=text)
+        payload = TypeRequest(session_id=self.session_id, agent_id=self._agent_id, selector=selector, text=text)
         response = self._client._http.post("/api/browser/type", json=payload.model_dump(mode="json"))
         response.raise_for_status()
         return BrowserState.model_validate(response.json())
 
     def extract(self, selector: str, attribute: str | None = None) -> ExtractionResult:
-        payload = ExtractRequest(session_id=self.session_id, selector=selector, attribute=attribute)
+        payload = ExtractRequest(
+            session_id=self.session_id,
+            agent_id=self._agent_id,
+            selector=selector,
+            attribute=attribute,
+        )
         response = self._client._http.post("/api/browser/extract", json=payload.model_dump(mode="json"))
         response.raise_for_status()
         return ExtractionResult.model_validate(response.json())
 
     def screenshot(self) -> ScreenshotResult:
-        payload = ScreenshotRequest(session_id=self.session_id)
+        payload = ScreenshotRequest(session_id=self.session_id, agent_id=self._agent_id)
         response = self._client._http.post("/api/browser/screenshot", json=payload.model_dump(mode="json"))
         response.raise_for_status()
         return ScreenshotResult.model_validate(response.json())
@@ -133,19 +150,19 @@ class SynapseBrowser:
         return self._client.list_tools()
 
     def get_layout(self) -> StructuredPageModel:
-        payload = LayoutRequest(session_id=self.session_id)
+        payload = LayoutRequest(session_id=self.session_id, agent_id=self._agent_id)
         response = self._client._http.post("/api/browser/layout", json=payload.model_dump(mode="json"))
         response.raise_for_status()
         return StructuredPageModel.model_validate(response.json())
 
     def find_element(self, type: str, text: str) -> list[PageElementMatch]:
-        payload = FindElementRequest(session_id=self.session_id, type=type, text=text)
+        payload = FindElementRequest(session_id=self.session_id, agent_id=self._agent_id, type=type, text=text)
         response = self._client._http.post("/api/browser/find", json=payload.model_dump(mode="json"))
         response.raise_for_status()
         return [PageElementMatch.model_validate(item) for item in response.json()]
 
     def inspect(self, selector: str) -> PageInspection:
-        payload = InspectRequest(session_id=self.session_id, selector=selector)
+        payload = InspectRequest(session_id=self.session_id, agent_id=self._agent_id, selector=selector)
         response = self._client._http.post("/api/browser/inspect", json=payload.model_dump(mode="json"))
         response.raise_for_status()
         return PageInspection.model_validate(response.json())
@@ -168,7 +185,11 @@ class SynapseBrowser:
         )
 
     def fork(self, session_id: str | None = None) -> SynapseBrowser:
-        return SynapseBrowser(self._client, session_id=session_id or self._session_id)
+        return SynapseBrowser(
+            self._client,
+            session_id=session_id or self._session_id,
+            agent_id=self._agent_id,
+        )
 
 
 class SynapseMemory:

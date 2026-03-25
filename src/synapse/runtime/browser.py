@@ -251,6 +251,9 @@ class BrowserRuntime:
             raise KeyError(f"Unknown session: {session_id}")
         return page
 
+    def current_url(self, session_id: str) -> str:
+        return self._require_page(session_id).url
+
     async def _snapshot_page(self, page: Page) -> StructuredPageModel:
         snapshot = await page.evaluate(
             """

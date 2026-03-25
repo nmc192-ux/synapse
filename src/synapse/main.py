@@ -10,6 +10,7 @@ from synapse.runtime.memory import AgentMemoryManager
 from synapse.runtime.messaging import AgentMessageBus
 from synapse.runtime.orchestrator import RuntimeOrchestrator
 from synapse.runtime.registry import AgentRegistry
+from synapse.runtime.security import AgentSecuritySandbox
 from synapse.runtime.task_manager import TaskExecutionManager
 from synapse.runtime.tools import ToolRegistry
 from synapse.transports.websocket_manager import WebSocketManager
@@ -23,6 +24,7 @@ websocket_manager = WebSocketManager()
 a2a_hub = A2AHub(agent_registry)
 memory_manager = AgentMemoryManager()
 task_manager = TaskExecutionManager()
+sandbox = AgentSecuritySandbox(agent_registry)
 orchestrator = RuntimeOrchestrator(
     browser=browser_runtime,
     agents=agent_registry,
@@ -32,6 +34,7 @@ orchestrator = RuntimeOrchestrator(
     memory_manager=memory_manager,
     task_manager=task_manager,
     sockets=websocket_manager,
+    sandbox=sandbox,
 )
 a2a_hub.set_task_executor(orchestrator.execute_task)
 

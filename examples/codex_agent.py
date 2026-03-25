@@ -1,17 +1,22 @@
-from synapse.models.agent import AgentDefinition, AgentKind
+from synapse.models.agent import AgentDefinition, AgentKind, AgentSecurityPolicy
 from synapse.sdk import SynapseClient
 
 
 def main() -> None:
-    client = SynapseClient()
+    agent_id = "codex-example"
+    client = SynapseClient(agent_id=agent_id)
     browser = client.browser
 
     client.register_agent(
         AgentDefinition(
-            agent_id="codex-example",
+            agent_id=agent_id,
             kind=AgentKind.CODEX,
             name="Codex Example",
             description="Example Codex Synapse SDK agent.",
+            security=AgentSecurityPolicy(
+                allowed_domains=["example.com"],
+                allowed_tools=["github.search"],
+            ),
         )
     )
 

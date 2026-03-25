@@ -3,13 +3,14 @@ from fastapi.testclient import TestClient
 
 from synapse.main import app
 from synapse.models.a2a import A2AEnvelope, A2AMessageType, AgentWireMessage
-from synapse.models.agent import AgentDefinition, AgentKind
+from synapse.models.agent import AgentDefinition, AgentKind, AgentRateLimits, AgentSecurityPolicy
 from synapse.models.browser import BrowserState, PageButton, PageLink, PageSection, StructuredPageModel
 from synapse.models.loop import AgentAction, AgentActionType
 from synapse.models.memory import MemorySearchRequest, MemoryStoreRequest, MemoryType
 from synapse.models.plugin import ToolDescriptor
 from synapse.models.task import TaskCreateRequest, TaskRequest, TaskStatus
 from synapse.runtime.registry import AgentRegistry
+from synapse.runtime.security import AgentSecuritySandbox, SandboxPermissionError, SandboxRateLimitError
 from synapse.sdk import SynapseClient
 
 
@@ -179,3 +180,71 @@ def test_agent_registry_finds_and_ranks_agents() -> None:
     assert [match.id for match in matches] == ["fast-online", "high-reputation"]
     assert matches[0].availability is True
     assert matches[1].availability is False
+
+
+def test_agent_security_sandbox_blocks_unapproved_domain_and_tool() -> None:
+    registry = AgentRegistry()
+    registry.register(
+        AgentDefinition(
+            agent_id="sandboxed-agent",
+            kind=AgentKind.CUSTOM,
+            name="Sandboxed Agent",
+            security=AgentSecurityPolicy(
+                allowed_domains=["github.com", "arxiv.org"],
+                allowed_tools=["github.search"],
+            ),
+        )
+    )
+    sandbox = AgentSecuritySandbox(registry)
+
+    sandbox.authorize_domain("sandboxed-agent", "https://github.com/openai")
+    sandbox.authorize_tool("sandboxed-agent", "github.search")
+
+    try:
+        sandbox.authorize_domain("sandboxed-agent", "https://example.com")
+    except SandboxPermissionError:
+        pass
+    else:
+        raise AssertionError("Expected unauthorized domain to be blocked.")
+
+    try:
+        sandbox.authorize_tool("sandboxed-agent", "web.search")
+    except SandboxPermissionError:
+        pass
+    else:
+        raise AssertionError("Expected unauthorized tool to be blocked.")
+
+
+def test_agent_security_sandbox_rate_limits_actions() -> None:
+    registry = AgentRegistry()
+    registry.register(
+        AgentDefinition(
+            agent_id="rate-limited-agent",
+            kind=AgentKind.CUSTOM,
+            name="Rate Limited Agent",
+            security=AgentSecurityPolicy(
+                allowed_domains=["github.com"],
+                allowed_tools=["github.search"],
+                rate_limits=AgentRateLimits(browser_actions_per_minute=1, tool_calls_per_minute=1),
+            ),
+        )
+    )
+    current_time = 100.0
+    sandbox = AgentSecuritySandbox(registry, clock=lambda: current_time)
+
+    sandbox.consume_browser_action("rate-limited-agent")
+    sandbox.consume_tool_call("rate-limited-agent")
+
+    try:
+        sandbox.consume_browser_action("rate-limited-agent")
+    except SandboxRateLimitError:
+        pass
+    else:
+        raise AssertionError("Expected browser rate limit to trigger.")
+
+    try:
+        sandbox.consume_tool_call("rate-limited-agent")
+    except SandboxRateLimitError:
+        pass
+    else:
+        raise AssertionError("Expected tool rate limit to trigger.")

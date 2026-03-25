@@ -19,6 +19,18 @@ class AgentCapabilities(BaseModel):
     execute_tasks: bool = True
 
 
+class AgentRateLimits(BaseModel):
+    browser_actions_per_minute: int = 30
+    tool_calls_per_minute: int = 15
+
+
+class AgentSecurityPolicy(BaseModel):
+    allowed_domains: list[str] = Field(default_factory=list)
+    allowed_tools: list[str] = Field(default_factory=list)
+    rate_limits: AgentRateLimits = Field(default_factory=AgentRateLimits)
+    block_unsafe_actions: bool = True
+
+
 class AgentDefinition(BaseModel):
     agent_id: str = Field(..., description="Runtime identifier for the agent instance.")
     kind: AgentKind
@@ -29,6 +41,7 @@ class AgentDefinition(BaseModel):
     capability_tags: list[str] = Field(default_factory=list)
     reputation: float = 0.5
     latency: float = 0.0
+    security: AgentSecurityPolicy = Field(default_factory=AgentSecurityPolicy)
     metadata: dict[str, str] = Field(default_factory=dict)
 
 

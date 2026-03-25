@@ -18,16 +18,19 @@ class TaskStatus(str, Enum):
 
 class NavigationRequest(BaseModel):
     session_id: str
+    agent_id: str | None = None
     url: HttpUrl
 
 
 class ExtractionRequest(BaseModel):
     session_id: str
+    agent_id: str | None = None
     selector: str = Field(..., description="CSS selector to extract from the current page.")
     attribute: str | None = Field(default=None, description="Optional attribute to read.")
 
 
 class ToolCallRequest(BaseModel):
+    agent_id: str | None = None
     tool_name: str
     arguments: dict[str, object] = Field(default_factory=dict)
 

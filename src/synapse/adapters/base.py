@@ -4,6 +4,7 @@ from synapse.models.agent import AgentDefinition
 from synapse.models.task import TaskRequest, TaskResult
 from synapse.runtime.agent_loop import EventDrivenAgentLoop
 from synapse.runtime.browser import BrowserRuntime
+from synapse.runtime.security import AgentSecuritySandbox
 from synapse.transports.websocket_manager import WebSocketManager
 
 
@@ -13,9 +14,10 @@ class AgentAdapter(ABC):
         definition: AgentDefinition,
         browser: BrowserRuntime,
         sockets: WebSocketManager,
+        sandbox: AgentSecuritySandbox,
     ) -> None:
         self.definition = definition
-        self.loop = EventDrivenAgentLoop(browser=browser, sockets=sockets)
+        self.loop = EventDrivenAgentLoop(browser=browser, sockets=sockets, sandbox=sandbox)
 
     @abstractmethod
     async def execute_task(self, task: TaskRequest) -> TaskResult:

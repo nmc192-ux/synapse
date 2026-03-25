@@ -29,6 +29,7 @@ from synapse.runtime.messaging import AgentMessageBus
 from synapse.runtime.a2a import A2AHub
 from synapse.runtime.memory import AgentMemoryManager
 from synapse.runtime.registry import AgentRegistry
+from synapse.runtime.security import AgentSecuritySandbox
 from synapse.runtime.session import BrowserSession
 from synapse.runtime.task_manager import TaskExecutionManager
 from synapse.runtime.tools import ToolRegistry
@@ -46,6 +47,7 @@ class RuntimeOrchestrator:
         memory_manager: AgentMemoryManager,
         task_manager: TaskExecutionManager,
         sockets: WebSocketManager,
+        sandbox: AgentSecuritySandbox,
     ) -> None:
         self.browser = browser
         self.agents = agents
@@ -55,6 +57,7 @@ class RuntimeOrchestrator:
         self.memory_manager = memory_manager
         self.task_manager = task_manager
         self.sockets = sockets
+        self.sandbox = sandbox
 
     async def create_session(self, session_id: str | None = None) -> BrowserSession:
         resolved_session_id = session_id or str(uuid.uuid4())
@@ -69,6 +72,8 @@ class RuntimeOrchestrator:
         return session
 
     async def navigate(self, request: NavigationRequest) -> BrowserSession:
+        self.sandbox.authorize_domain(request.agent_id, str(request.url))
+        self.sandbox.consume_browser_action(request.agent_id)
         session = await self.browser.navigate(request.session_id, str(request.url))
         await self.sockets.broadcast(
             RuntimeEvent(
@@ -80,6 +85,8 @@ class RuntimeOrchestrator:
         return session
 
     async def open(self, request: OpenRequest) -> BrowserState:
+        self.sandbox.authorize_domain(request.agent_id, str(request.url))
+        self.sandbox.consume_browser_action(request.agent_id)
         state = await self.browser.open(request.session_id, str(request.url))
         await self.sockets.broadcast(
             RuntimeEvent(
@@ -91,6 +98,8 @@ class RuntimeOrchestrator:
         return state
 
     async def click(self, request: ClickRequest) -> BrowserState:
+        self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
+        self.sandbox.consume_browser_action(request.agent_id)
         state = await self.browser.click(request.session_id, request.selector)
         await self.sockets.broadcast(
             RuntimeEvent(
@@ -102,6 +111,8 @@ class RuntimeOrchestrator:
         return state
 
     async def type(self, request: TypeRequest) -> BrowserState:
+        self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
+        self.sandbox.consume_browser_action(request.agent_id)
         state = await self.browser.type(request.session_id, request.selector, request.text)
         await self.sockets.broadcast(
             RuntimeEvent(
@@ -113,6 +124,8 @@ class RuntimeOrchestrator:
         return state
 
     async def extract(self, request: ExtractionRequest) -> ExtractionResult:
+        self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
+        self.sandbox.consume_browser_action(request.agent_id)
         payload = await self.browser.extract(request.session_id, request.selector, request.attribute)
         await self.sockets.broadcast(
             RuntimeEvent(
@@ -124,6 +137,8 @@ class RuntimeOrchestrator:
         return payload
 
     async def structured_extract(self, request: ExtractRequest) -> ExtractionResult:
+        self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
+        self.sandbox.consume_browser_action(request.agent_id)
         payload = await self.browser.extract(request.session_id, request.selector, request.attribute)
         await self.sockets.broadcast(
             RuntimeEvent(
@@ -135,6 +150,8 @@ class RuntimeOrchestrator:
         return payload
 
     async def screenshot(self, request: ScreenshotRequest) -> ScreenshotResult:
+        self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
+        self.sandbox.consume_browser_action(request.agent_id)
         result = await self.browser.screenshot(request.session_id)
         await self.sockets.broadcast(
             RuntimeEvent(
@@ -146,12 +163,18 @@ class RuntimeOrchestrator:
         return result
 
     async def get_layout(self, request: LayoutRequest) -> StructuredPageModel:
+        self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
+        self.sandbox.consume_browser_action(request.agent_id)
         return await self.browser.get_layout(request.session_id)
 
     async def find_element(self, request: FindElementRequest) -> list[PageElementMatch]:
+        self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
+        self.sandbox.consume_browser_action(request.agent_id)
         return await self.browser.find_element(request.session_id, request.type, request.text)
 
     async def inspect(self, request: InspectRequest) -> PageInspection:
+        self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
+        self.sandbox.consume_browser_action(request.agent_id)
         return await self.browser.inspect(request.session_id, request.selector)
 
     async def register_agent(self, definition: AgentDefinition) -> AgentDefinition:
@@ -176,7 +199,14 @@ class RuntimeOrchestrator:
         )
         return agent
 
-    async def call_tool(self, tool_name: str, arguments: dict[str, object]) -> dict[str, object]:
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, object],
+        agent_id: str | None,
+    ) -> dict[str, object]:
+        self.sandbox.authorize_tool(agent_id, tool_name)
+        self.sandbox.consume_tool_call(agent_id)
         result = await self.tools.call(tool_name, arguments)
         await self.sockets.broadcast(
             RuntimeEvent(
@@ -267,12 +297,13 @@ class RuntimeOrchestrator:
             request = request.model_copy(update={"session_id": session.session_id})
 
         for tool_call in request.tool_calls:
-            await self.call_tool(tool_call.tool_name, tool_call.arguments)
+            await self.call_tool(tool_call.tool_name, tool_call.arguments, agent_id=request.agent_id)
 
         adapter = self.agents.build_adapter(
             request.agent_id,
             browser=self.browser,
             sockets=self.sockets,
+            sandbox=self.sandbox,
         )
         result = await adapter.execute_task(request)
         final_result = result.model_copy(

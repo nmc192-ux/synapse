@@ -83,42 +83,50 @@ class BrowserState(BaseModel):
 
 class OpenRequest(BaseModel):
     session_id: str
+    agent_id: str | None = None
     url: HttpUrl
 
 
 class ClickRequest(BaseModel):
     session_id: str
+    agent_id: str | None = None
     selector: str
 
 
 class TypeRequest(BaseModel):
     session_id: str
+    agent_id: str | None = None
     selector: str
     text: str
 
 
 class ExtractRequest(BaseModel):
     session_id: str
+    agent_id: str | None = None
     selector: str
     attribute: str | None = None
 
 
 class ScreenshotRequest(BaseModel):
     session_id: str
+    agent_id: str | None = None
 
 
 class LayoutRequest(BaseModel):
     session_id: str
+    agent_id: str | None = None
 
 
 class FindElementRequest(BaseModel):
     session_id: str
+    agent_id: str | None = None
     type: str
     text: str
 
 
 class InspectRequest(BaseModel):
     session_id: str
+    agent_id: str | None = None
     selector: str
 
 

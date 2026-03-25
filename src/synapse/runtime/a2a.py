@@ -31,6 +31,7 @@ class A2AHub:
             capability_tags=request.capabilities,
             reputation=request.reputation,
             latency=request.latency,
+            security=request.security,
             metadata=request.metadata,
         )
         return self.agents.register(definition)

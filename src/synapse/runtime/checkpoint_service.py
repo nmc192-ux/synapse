@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from synapse.models.events import EventType
+from synapse.models.runtime_event import EventType
 from synapse.models.runtime_state import RuntimeCheckpoint
 from synapse.models.task import TaskRequest
 from synapse.runtime.browser_service import BrowserService
@@ -51,8 +51,11 @@ class CheckpointService:
         await self.events.emit(
             EventType.CHECKPOINT_SAVED,
             agent_id=checkpoint.agent_id,
+            task_id=checkpoint.task_id,
             session_id=checkpoint.browser_session_reference,
+            source="checkpoint_service",
             payload=checkpoint.model_dump(mode="json"),
+            correlation_id=checkpoint.checkpoint_id,
         )
         return checkpoint
 
@@ -107,10 +110,13 @@ class CheckpointService:
         await self.events.emit(
             EventType.CHECKPOINT_RESUMED,
             agent_id=checkpoint.agent_id,
+            task_id=checkpoint.task_id,
             session_id=checkpoint.browser_session_reference,
+            source="checkpoint_service",
             payload={
                 "checkpoint_id": checkpoint.checkpoint_id,
                 "task_id": checkpoint.task_id,
                 "result": result.model_dump(mode="json"),
             },
+            correlation_id=checkpoint.checkpoint_id,
         )

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from synapse.models.events import EventType
+from synapse.models.runtime_event import EventSeverity, EventType
 from synapse.models.plugin import PluginDescriptor, PluginReloadRequest, ToolDescriptor
 from synapse.runtime.budget_service import BudgetService
 from synapse.runtime.event_bus import EventBus
@@ -39,6 +39,7 @@ class ToolService:
         await self.events.emit(
             EventType.TOOL_CALLED,
             agent_id=agent_id,
+            source="tool_service",
             payload={"tool_name": tool_name, "arguments": arguments, "result": result},
         )
         return result
@@ -67,6 +68,8 @@ class ToolService:
         await self.events.emit(
             EventType.SECURITY_ALERT,
             agent_id=agent_id,
+            source="tool_service",
             payload=finding.model_dump(mode="json"),
+            severity=EventSeverity.ERROR,
         )
         raise SecurityAlertError(finding)

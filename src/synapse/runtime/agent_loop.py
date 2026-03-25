@@ -2,9 +2,9 @@ import asyncio
 
 from synapse.models.agent import AgentBudgetUsage, AgentDefinition
 from synapse.models.browser import StructuredPageModel
-from synapse.models.events import EventType, RuntimeEvent
 from synapse.models.loop import AgentAction, AgentActionType, LoopEvaluation, LoopObservation, LoopPlan, LoopReflection
 from synapse.models.memory import MemoryStoreRequest, MemoryType
+from synapse.models.runtime_event import EventSeverity, EventType, RuntimeEvent
 from synapse.models.task import TaskRequest, TaskResult, TaskStatus
 from synapse.runtime.budget import AgentBudgetLimitExceeded, AgentBudgetManager
 from synapse.runtime.browser import BrowserRuntime
@@ -57,7 +57,10 @@ class EventDrivenAgentLoop:
                     event_type=EventType.LOOP_OBSERVED,
                     session_id=task.session_id,
                     agent_id=task.agent_id,
+                    task_id=task.task_id,
+                    source="agent_loop",
                     payload=observed.model_dump(mode="json"),
+                    correlation_id=task.task_id,
                 )
             )
 
@@ -88,7 +91,10 @@ class EventDrivenAgentLoop:
                         event_type=EventType.LOOP_ACTED,
                         session_id=task.session_id,
                         agent_id=task.agent_id,
+                        task_id=task.task_id,
+                        source="agent_loop",
                         payload=action.model_dump(mode="json"),
+                        correlation_id=task.task_id,
                     )
                 )
 
@@ -112,7 +118,10 @@ class EventDrivenAgentLoop:
                         event_type=EventType.LOOP_EVALUATED,
                         session_id=task.session_id,
                         agent_id=task.agent_id,
+                        task_id=task.task_id,
+                        source="agent_loop",
                         payload=evaluation.model_dump(mode="json"),
+                        correlation_id=task.task_id,
                     )
                 )
                 await self._increment_tokens(task, evaluation.notes)
@@ -132,7 +141,10 @@ class EventDrivenAgentLoop:
                     event_type=EventType.LOOP_REFLECTED,
                     session_id=task.session_id,
                     agent_id=task.agent_id,
+                    task_id=task.task_id,
+                    source="agent_loop",
                     payload=reflection.model_dump(mode="json"),
+                    correlation_id=task.task_id,
                 )
             )
 
@@ -226,7 +238,11 @@ class EventDrivenAgentLoop:
                     event_type=EventType.SECURITY_ALERT,
                     session_id=task.session_id,
                     agent_id=task.agent_id,
+                    task_id=task.task_id,
+                    source="agent_loop",
                     payload=finding.model_dump(mode="json"),
+                    severity=EventSeverity.ERROR,
+                    correlation_id=task.task_id,
                 )
             )
             raise SecurityAlertError(finding)
@@ -237,7 +253,10 @@ class EventDrivenAgentLoop:
                 event_type=EventType.LOOP_PLANNED,
                 session_id=task.session_id,
                 agent_id=task.agent_id,
+                task_id=task.task_id,
+                source="agent_loop",
                 payload=LoopPlan(task_id=task.task_id, actions=actions).model_dump(mode="json"),
+                correlation_id=task.task_id,
             )
         )
 
@@ -395,7 +414,11 @@ class EventDrivenAgentLoop:
                 event_type=EventType.BUDGET_UPDATED,
                 session_id=task.session_id,
                 agent_id=task.agent_id,
+                task_id=task.task_id,
+                source="agent_loop",
                 payload=payload,
+                severity=EventSeverity.WARNING if warning else EventSeverity.INFO,
+                correlation_id=task.task_id,
             )
         )
 

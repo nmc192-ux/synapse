@@ -31,7 +31,7 @@ from synapse.models.browser import (
     UploadRequest,
     UploadResult,
 )
-from synapse.models.events import EventType, RuntimeEvent
+from synapse.models.runtime_event import EventType, RuntimeEvent
 from synapse.models.message import AgentMessage
 from synapse.models.memory import MemoryRecord, MemorySearchRequest, MemorySearchResult, MemoryStoreRequest
 from synapse.models.plugin import PluginDescriptor, PluginReloadRequest, ToolDescriptor
@@ -649,7 +649,10 @@ async def websocket_a2a(websocket: WebSocket, agent_id: str) -> None:
                     RuntimeEvent(
                         event_type=EventType.A2A_MESSAGE,
                         agent_id=agent_id,
+                        task_id=(response.payload.get("task", {}) or {}).get("task_id") if isinstance(response.payload, dict) and isinstance(response.payload.get("task"), dict) else None,
+                        source="api.websocket",
                         payload=response.model_dump(mode="json"),
+                        correlation_id=response.correlation_id,
                     )
                 )
     except WebSocketDisconnect:

@@ -27,7 +27,7 @@ from synapse.models.browser import (
     UploadRequest,
     UploadResult,
 )
-from synapse.models.events import EventType
+from synapse.models.runtime_event import EventType
 from synapse.models.message import AgentMessage
 from synapse.models.memory import MemoryRecord, MemorySearchRequest, MemorySearchResult, MemoryStoreRequest
 from synapse.models.plugin import PluginDescriptor, PluginReloadRequest, ToolDescriptor
@@ -164,10 +164,11 @@ class RuntimeController:
         agent = self.agents.register(definition)
         await self.agents.save_to_store(agent)
         self.budget_manager.get_or_create(agent)
-        await self.event_bus.emit(EventType.AGENT_REGISTERED, agent_id=agent.agent_id, payload=agent.model_dump(mode="json"))
+        await self.event_bus.emit(EventType.AGENT_REGISTERED, agent_id=agent.agent_id, source="runtime_controller", payload=agent.model_dump(mode="json"))
         await self.event_bus.emit(
             EventType.AGENT_STATUS_UPDATED,
             agent_id=agent.agent_id,
+            source="runtime_controller",
             payload={"agent_id": agent.agent_id, "status": "idle"},
         )
         return agent
@@ -176,10 +177,11 @@ class RuntimeController:
         agent = self.a2a.register_agent(request)
         await self.agents.save_to_store(agent)
         self.budget_manager.get_or_create(agent)
-        await self.event_bus.emit(EventType.AGENT_REGISTERED, agent_id=agent.agent_id, payload=agent.model_dump(mode="json"))
+        await self.event_bus.emit(EventType.AGENT_REGISTERED, agent_id=agent.agent_id, source="runtime_controller", payload=agent.model_dump(mode="json"))
         await self.event_bus.emit(
             EventType.AGENT_STATUS_UPDATED,
             agent_id=agent.agent_id,
+            source="runtime_controller",
             payload={"agent_id": agent.agent_id, "status": "idle"},
         )
         return agent
@@ -201,6 +203,7 @@ class RuntimeController:
         await self.event_bus.emit(
             EventType.AGENT_MESSAGE,
             agent_id=message.sender_agent_id,
+            source="runtime_controller",
             payload=stored.model_dump(mode="json"),
         )
         return stored
@@ -286,7 +289,9 @@ class RuntimeController:
         await self.event_bus.emit(
             EventType.A2A_MESSAGE,
             agent_id=envelope.sender_agent_id,
+            source="runtime_controller",
             payload=response.model_dump(mode="json"),
+            correlation_id=envelope.message_id,
         )
         return response
 

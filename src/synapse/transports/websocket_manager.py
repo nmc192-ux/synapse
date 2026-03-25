@@ -6,7 +6,7 @@ import uuid
 
 from fastapi import WebSocket
 
-from synapse.models.events import RuntimeEvent
+from synapse.models.runtime_event import RuntimeEvent
 from synapse.runtime.state_store import RuntimeStateStore
 
 
@@ -42,15 +42,8 @@ class WebSocketManager:
         if self._state_store is not None:
             try:
                 await self._state_store.store_runtime_event(
-                    str(uuid.uuid4()),
-                    {
-                        "event_type": event.event_type.value,
-                        "agent_id": event.agent_id,
-                        "task_id": str(event.payload.get("task_id")) if event.payload.get("task_id") is not None else None,
-                        "session_id": event.session_id,
-                        "payload": event.model_dump(mode="json"),
-                        "timestamp": event.timestamp.isoformat(),
-                    },
+                    event.event_id,
+                    event.model_dump(mode="json"),
                 )
             except Exception as exc:
                 logger.warning("Failed to persist runtime event: %s", exc)

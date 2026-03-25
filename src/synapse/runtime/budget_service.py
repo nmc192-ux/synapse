@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from synapse.models.agent import AgentBudgetUsage
-from synapse.models.events import EventType
+from synapse.models.runtime_event import EventSeverity, EventType
 from synapse.runtime.budget import AgentBudgetLimitExceeded, AgentBudgetManager
 from synapse.runtime.event_bus import EventBus
 from synapse.runtime.registry import AgentRegistry
@@ -86,6 +86,9 @@ class BudgetService:
         agent_id: str,
         usage: AgentBudgetUsage,
         warning: str | None = None,
+        task_id: str | None = None,
+        session_id: str | None = None,
+        correlation_id: str | None = None,
     ) -> None:
         payload: dict[str, object] = {"usage": usage.model_dump(mode="json")}
         if warning is not None:
@@ -93,5 +96,10 @@ class BudgetService:
         await self.events.emit(
             EventType.BUDGET_UPDATED,
             agent_id=agent_id,
+            task_id=task_id,
+            session_id=session_id,
+            source="budget_service",
             payload=payload,
+            severity=EventSeverity.WARNING if warning else EventSeverity.INFO,
+            correlation_id=correlation_id,
         )

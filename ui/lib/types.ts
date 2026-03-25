@@ -1,8 +1,13 @@
 export type SynapseEvent = {
+  event_id?: string;
   event_type: string;
   agent_id?: string | null;
+  task_id?: string | null;
   session_id?: string | null;
   timestamp?: string;
+  source?: string;
+  severity?: string;
+  correlation_id?: string | null;
   payload?: Record<string, unknown>;
 };
 

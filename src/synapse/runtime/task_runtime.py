@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 
-from synapse.models.events import EventType
+from synapse.models.runtime_event import EventSeverity, EventType
 from synapse.models.task import TaskClaimRequest, TaskCreateRequest, TaskRecord, TaskRequest, TaskResult, TaskStatus, TaskUpdateRequest
 from synapse.runtime.browser_service import BrowserService
 from synapse.runtime.checkpoint_service import CheckpointService
@@ -82,7 +82,10 @@ class TaskRuntime:
             EventType.TASK_UPDATED,
             session_id=request.session_id,
             agent_id=request.agent_id,
+            task_id=request.task_id,
+            source="task_runtime",
             payload=final_result.model_dump(mode="json"),
+            correlation_id=request.task_id,
         )
         if request.session_id is not None and self.checkpoint_service.state_store is not None:
             await self.browser_service.save_session_state(request.session_id, agent_id=request.agent_id, task_id=request.task_id)
@@ -109,6 +112,9 @@ class TaskRuntime:
             EventType.SECURITY_ALERT,
             session_id=session_id,
             agent_id=agent_id,
+            task_id=getattr(finding, "metadata", {}).get("task_id") if isinstance(getattr(finding, "metadata", None), dict) else None,
+            source="task_runtime",
             payload=finding.model_dump(mode="json"),
+            severity=EventSeverity.ERROR,
         )
         raise SecurityAlertError(finding)

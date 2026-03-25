@@ -6,7 +6,7 @@ from fastapi import WebSocket
 
 from synapse.models.a2a import A2AEnvelope, A2AMessageType, AgentPresence, AgentRegistrationRequest, AgentWireMessage
 from synapse.models.agent import AgentDefinition, AgentDiscoveryEntry, AgentKind
-from synapse.models.events import EventType, RuntimeEvent
+from synapse.models.runtime_event import EventType, RuntimeEvent
 from synapse.models.runtime_state import AgentRuntimeStatus, ConnectionState
 from synapse.models.task import TaskRequest, TaskResult
 from synapse.runtime.registry import AgentRegistry
@@ -274,6 +274,7 @@ class A2AHub:
                 RuntimeEvent(
                     event_type=EventType.AGENT_STATUS_UPDATED,
                     agent_id=agent_id,
+                    source="a2a_runtime",
                     payload={"agent_id": agent_id, "status": AgentRuntimeStatus.ACTIVE.value},
                 )
             )
@@ -282,6 +283,7 @@ class A2AHub:
                 RuntimeEvent(
                     event_type=EventType.CONNECTION_HEARTBEAT,
                     agent_id=agent_id,
+                    source="a2a_runtime",
                     payload={"agent_id": agent_id, "last_heartbeat": now.isoformat()},
                 )
             )
@@ -301,6 +303,7 @@ class A2AHub:
                 RuntimeEvent(
                     event_type=EventType.AGENT_STATUS_UPDATED,
                     agent_id=agent_id,
+                    source="a2a_runtime",
                     payload={"agent_id": agent_id, "status": AgentRuntimeStatus.OFFLINE.value},
                 )
             )
@@ -322,6 +325,7 @@ class A2AHub:
                         RuntimeEvent(
                             event_type=EventType.AGENT_STATUS_UPDATED,
                             agent_id=agent_id,
+                            source="a2a_runtime",
                             payload={"agent_id": agent_id, "status": AgentRuntimeStatus.OFFLINE.value},
                         )
                     )
@@ -330,6 +334,7 @@ class A2AHub:
                         RuntimeEvent(
                             event_type=EventType.CONNECTION_STALE,
                             agent_id=agent_id,
+                            source="a2a_runtime",
                             payload={"agent_id": agent_id, "ttl_seconds": ttl_seconds},
                         )
                     )

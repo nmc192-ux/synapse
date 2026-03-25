@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import WebSocket
 
-from synapse.models.events import EventType, RuntimeEvent
+from synapse.models.runtime_event import EventSeverity, EventType, RuntimeEvent
 from synapse.runtime.state_store import RuntimeStateStore
 from synapse.transports.websocket_manager import WebSocketManager
 
@@ -36,14 +36,22 @@ class EventBus:
         event_type: EventType,
         *,
         agent_id: str | None = None,
+        task_id: str | None = None,
         session_id: str | None = None,
+        source: str = "runtime",
         payload: dict[str, object] | None = None,
+        severity: EventSeverity = EventSeverity.INFO,
+        correlation_id: str | None = None,
     ) -> None:
         await self.publish(
             RuntimeEvent(
                 event_type=event_type,
                 agent_id=agent_id,
+                task_id=task_id,
                 session_id=session_id,
+                source=source,
                 payload=payload or {},
+                severity=severity,
+                correlation_id=correlation_id,
             )
         )

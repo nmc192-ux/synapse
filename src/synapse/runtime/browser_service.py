@@ -23,7 +23,7 @@ from synapse.models.browser import (
     UploadRequest,
     UploadResult,
 )
-from synapse.models.events import EventType
+from synapse.models.runtime_event import EventSeverity, EventType
 from synapse.models.runtime_state import BrowserSessionState
 from synapse.models.task import ExtractionRequest, NavigationRequest
 from synapse.runtime.budget_service import BudgetService
@@ -59,6 +59,7 @@ class BrowserService:
         await self.events.emit(
             EventType.SESSION_CREATED,
             session_id=session.session_id,
+            source="browser_service",
             payload={"session_id": session.session_id},
         )
         return session
@@ -74,6 +75,7 @@ class BrowserService:
             EventType.PAGE_NAVIGATED,
             session_id=session.session_id,
             agent_id=request.agent_id,
+            source="browser_service",
             payload={"url": session.current_url},
         )
         return session
@@ -117,6 +119,7 @@ class BrowserService:
             EventType.DATA_EXTRACTED,
             session_id=request.session_id,
             agent_id=request.agent_id,
+            source="browser_service",
             payload=payload.model_dump(mode="json"),
         )
         return payload
@@ -131,6 +134,7 @@ class BrowserService:
             EventType.SCREENSHOT_CAPTURED,
             session_id=request.session_id,
             agent_id=request.agent_id,
+            source="browser_service",
             payload={"action": "screenshot", **result.model_dump(mode="json")},
         )
         return result
@@ -162,6 +166,7 @@ class BrowserService:
             EventType.POPUP_DISMISSED,
             session_id=request.session_id,
             agent_id=request.agent_id,
+            source="browser_service",
             payload=state.metadata,
         )
         return state
@@ -175,6 +180,7 @@ class BrowserService:
             EventType.UPLOAD_COMPLETED,
             session_id=request.session_id,
             agent_id=request.agent_id,
+            source="browser_service",
             payload=result.model_dump(mode="json"),
         )
         return result
@@ -188,6 +194,7 @@ class BrowserService:
             EventType.DOWNLOAD_COMPLETED,
             session_id=request.session_id,
             agent_id=request.agent_id,
+            source="browser_service",
             payload=result.model_dump(mode="json"),
         )
         return result
@@ -207,6 +214,7 @@ class BrowserService:
             EventType.DATA_EXTRACTED,
             session_id=request.session_id,
             agent_id=request.agent_id,
+            source="browser_service",
             payload=result.model_dump(mode="json"),
         )
         return result
@@ -228,7 +236,9 @@ class BrowserService:
             EventType.SESSION_SAVED,
             session_id=session_id,
             agent_id=agent_id,
+            source="browser_service",
             payload={"task_id": task_id, "session_id": session_id},
+            correlation_id=task_id,
         )
 
     async def restore_session_state(self, session_id: str, agent_id: str | None = None, checkpoint_id: str | None = None):
@@ -238,7 +248,9 @@ class BrowserService:
                 EventType.SESSION_RESTORED,
                 session_id=session_id,
                 agent_id=agent_id,
+                source="browser_service",
                 payload={"checkpoint_id": checkpoint_id, "session_id": session_id},
+                correlation_id=checkpoint_id,
             )
         return restored
 
@@ -268,6 +280,7 @@ class BrowserService:
                 EventType.PAGE_NAVIGATED,
                 session_id=state.session_id,
                 agent_id=agent_id,
+                source="browser_service",
                 payload={**(payload or {}), **state.model_dump(mode="json")},
             )
             await self._emit_browser_metadata_events(agent_id, state.session_id, state.metadata)
@@ -303,7 +316,9 @@ class BrowserService:
             EventType.SECURITY_ALERT,
             session_id=session_id,
             agent_id=agent_id,
+            source="browser_service",
             payload=finding.model_dump(mode="json"),
+            severity=EventSeverity.ERROR,
         )
         raise SecurityAlertError(finding)
 
@@ -318,6 +333,7 @@ class BrowserService:
                 EventType.NAVIGATION_ROUTE_CHANGED,
                 agent_id=agent_id,
                 session_id=session_id,
+                source="browser_service",
                 payload=metadata,
             )
         if metadata.get("session_expired"):
@@ -325,7 +341,9 @@ class BrowserService:
                 EventType.SESSION_EXPIRED,
                 agent_id=agent_id,
                 session_id=session_id,
+                source="browser_service",
                 payload=metadata,
+                severity=EventSeverity.WARNING,
             )
         dismissed = metadata.get("dismissed_blockers")
         if isinstance(dismissed, list) and dismissed:
@@ -333,6 +351,7 @@ class BrowserService:
                 EventType.POPUP_DISMISSED,
                 agent_id=agent_id,
                 session_id=session_id,
+                source="browser_service",
                 payload={"dismissed_blockers": dismissed},
             )
 
@@ -347,5 +366,7 @@ class BrowserService:
             EventType.BROWSER_ERROR,
             agent_id=agent_id,
             session_id=session_id,
+            source="browser_service",
             payload={"action": action, "error": str(exc)},
+            severity=EventSeverity.ERROR,
         )

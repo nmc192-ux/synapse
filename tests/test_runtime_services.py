@@ -22,7 +22,7 @@ from synapse.transports.websocket_manager import WebSocketManager
 
 
 class _StubBrowser:
-    async def create_session(self, session_id: str, agent_id: str | None = None):
+    async def create_session(self, session_id: str, agent_id: str | None = None, run_id: str | None = None):
         return type("Session", (), {"session_id": session_id})()
 
     async def open(self, session_id: str, url: str):

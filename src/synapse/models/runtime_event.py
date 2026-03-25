@@ -54,6 +54,7 @@ class EventSeverity(str, Enum):
 class RuntimeEvent(BaseModel):
     event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     event_type: EventType
+    run_id: str | None = None
     agent_id: str | None = None
     task_id: str | None = None
     session_id: str | None = None

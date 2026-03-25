@@ -59,6 +59,7 @@ class EventDrivenAgentLoop:
             await self.sockets.broadcast(
                 RuntimeEvent(
                     event_type=EventType.LOOP_OBSERVED,
+                    run_id=task.run_id,
                     session_id=task.session_id,
                     agent_id=task.agent_id,
                     task_id=task.task_id,
@@ -74,12 +75,18 @@ class EventDrivenAgentLoop:
             await self._store_observation_memory(task, observed, current_page)
             memory_context = await self.memory_service.get_planner_memory_context(
                 task.agent_id,
+                run_id=task.run_id,
                 task_id=task.task_id,
                 limit_per_type=4,
             )
             memory_summary = str(memory_context.get("memory_summary", ""))
             recent_memories = list(memory_context.get("memories", []))
-            recent_events = await self.memory_service.get_recent_runtime_events(task.agent_id, task_id=task.task_id, limit=10)
+            recent_events = await self.memory_service.get_recent_runtime_events(
+                run_id=task.run_id,
+                agent_id=task.agent_id,
+                task_id=task.task_id,
+                limit=10,
+            )
             remaining_actions = await self.planner.generate_plan(
                 task=task,
                 completed_actions=completed_actions,
@@ -102,6 +109,7 @@ class EventDrivenAgentLoop:
                 await self.sockets.broadcast(
                     RuntimeEvent(
                         event_type=EventType.LOOP_ACTED,
+                        run_id=task.run_id,
                         session_id=task.session_id,
                         agent_id=task.agent_id,
                         task_id=task.task_id,
@@ -129,6 +137,7 @@ class EventDrivenAgentLoop:
                 await self.sockets.broadcast(
                     RuntimeEvent(
                         event_type=EventType.LOOP_EVALUATED,
+                        run_id=task.run_id,
                         session_id=task.session_id,
                         agent_id=task.agent_id,
                         task_id=task.task_id,
@@ -152,6 +161,7 @@ class EventDrivenAgentLoop:
             await self.sockets.broadcast(
                 RuntimeEvent(
                     event_type=EventType.LOOP_REFLECTED,
+                    run_id=task.run_id,
                     session_id=task.session_id,
                     agent_id=task.agent_id,
                     task_id=task.task_id,
@@ -249,6 +259,7 @@ class EventDrivenAgentLoop:
             await self.sockets.broadcast(
                 RuntimeEvent(
                     event_type=EventType.SECURITY_ALERT,
+                    run_id=task.run_id,
                     session_id=task.session_id,
                     agent_id=task.agent_id,
                     task_id=task.task_id,
@@ -266,6 +277,7 @@ class EventDrivenAgentLoop:
             await self.sockets.broadcast(
                 RuntimeEvent(
                     event_type=EventType.PLANNER_CONTEXT_COMPRESSED,
+                    run_id=task.run_id,
                     session_id=task.session_id,
                     agent_id=task.agent_id,
                     task_id=task.task_id,
@@ -277,6 +289,7 @@ class EventDrivenAgentLoop:
         await self.sockets.broadcast(
             RuntimeEvent(
                 event_type=EventType.LOOP_PLANNED,
+                run_id=task.run_id,
                 session_id=task.session_id,
                 agent_id=task.agent_id,
                 task_id=task.task_id,
@@ -318,6 +331,7 @@ class EventDrivenAgentLoop:
         await self.memory_service.memory_manager.store(
             MemoryStoreRequest(
                 agent_id=task.agent_id,
+                run_id=task.run_id,
                 memory_type=MemoryType.SHORT_TERM,
                 content=(
                     f"observe cycle task={task.task_id} goal={task.goal} "
@@ -341,6 +355,7 @@ class EventDrivenAgentLoop:
         await self.memory_service.memory_manager.store(
             MemoryStoreRequest(
                 agent_id=task.agent_id,
+                run_id=task.run_id,
                 memory_type=MemoryType.TASK,
                 content=(
                     f"evaluate cycle task={task.task_id} action={action.type.value} "
@@ -378,6 +393,7 @@ class EventDrivenAgentLoop:
         await self.memory_service.memory_manager.store(
             MemoryStoreRequest(
                 agent_id=task.agent_id,
+                run_id=task.run_id,
                 memory_type=MemoryType.LONG_TERM,
                 content=f"reflect cycle task={task.task_id} summary={reflection}",
             )
@@ -444,6 +460,7 @@ class EventDrivenAgentLoop:
         await self.sockets.broadcast(
             RuntimeEvent(
                 event_type=EventType.BUDGET_UPDATED,
+                run_id=task.run_id,
                 session_id=task.session_id,
                 agent_id=task.agent_id,
                 task_id=task.task_id,

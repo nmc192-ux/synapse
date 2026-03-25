@@ -16,13 +16,13 @@ from synapse.transports.websocket_manager import WebSocketManager
 
 
 class _StubBrowser:
-    async def create_session(self, session_id: str, agent_id: str | None = None):
+    async def create_session(self, session_id: str, agent_id: str | None = None, run_id: str | None = None):
         return type("Session", (), {"session_id": session_id})()
 
     async def restore_session_state(self, session_id: str):
         return None
 
-    async def save_session_state(self, session_id: str):
+    async def save_session_state(self, session_id: str, run_id: str | None = None):
         return None
 
 

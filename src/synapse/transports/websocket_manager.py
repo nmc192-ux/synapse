@@ -73,16 +73,17 @@ class WebSocketManager:
     async def get_compact_event_history(
         self,
         *,
+        run_id: str | None = None,
         agent_id: str | None = None,
         task_id: str | None = None,
         limit: int = 100,
     ) -> dict[str, object]:
         if self._state_store is None:
             return {"count": 0, "events": [], "summary": {}, "provider": "noop"}
-        events = await self._state_store.get_runtime_events(agent_id=agent_id, task_id=task_id, limit=limit)
+        events = await self._state_store.get_runtime_events(run_id=run_id, agent_id=agent_id, task_id=task_id, limit=limit)
         summary = await self._compression_provider.summarize_events(
             events,
-            context={"agent_id": agent_id, "task_id": task_id, "channel": "runtime_history"},
+            context={"run_id": run_id, "agent_id": agent_id, "task_id": task_id, "channel": "runtime_history"},
         )
         return {
             "count": len(events),

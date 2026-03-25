@@ -31,6 +31,7 @@ from synapse.models.runtime_event import EventType
 from synapse.models.message import AgentMessage
 from synapse.models.memory import MemoryRecord, MemorySearchRequest, MemorySearchResult, MemoryStoreRequest
 from synapse.models.plugin import PluginDescriptor, PluginReloadRequest, ToolDescriptor
+from synapse.models.run import RunState
 from synapse.models.runtime_state import BrowserSessionState, ConnectionState, RuntimeCheckpoint
 from synapse.models.task import ExtractionRequest, NavigationRequest, TaskClaimRequest, TaskCreateRequest, TaskRecord, TaskRequest, TaskResult, TaskUpdateRequest
 from synapse.runtime.a2a import A2AHub
@@ -45,6 +46,7 @@ from synapse.runtime.memory import AgentMemoryManager
 from synapse.runtime.memory_service import MemoryService
 from synapse.runtime.messaging import AgentMessageBus
 from synapse.runtime.registry import AgentRegistry
+from synapse.runtime.run_store import RunStore
 from synapse.runtime.security import AgentSecuritySandbox
 from synapse.runtime.safety import AgentSafetyLayer
 from synapse.runtime.state_store import RuntimeStateStore
@@ -89,6 +91,7 @@ class RuntimeController:
         self.compression_provider = compression_provider
 
         self.event_bus = EventBus(sockets, compression_provider=compression_provider)
+        self.run_store = RunStore(state_store)
         self.budget_service = BudgetService(budget_manager, agents, self.event_bus)
         self.browser_service = BrowserService(browser, sandbox, safety, self.event_bus, self.budget_service, state_store)
         self.memory_service = MemoryService(
@@ -107,6 +110,7 @@ class RuntimeController:
             memory_service=self.memory_service,
             task_manager=task_manager,
             checkpoint_service=self.checkpoint_service,
+            run_store=self.run_store,
             events=self.event_bus,
             safety=safety,
             llm=llm,
@@ -120,6 +124,7 @@ class RuntimeController:
     @state_store.setter
     def state_store(self, state_store: RuntimeStateStore | None) -> None:
         self._state_store = state_store
+        self.run_store.set_state_store(state_store) if hasattr(self, "run_store") else None
         self.browser_service.set_state_store(state_store) if hasattr(self, "browser_service") else None
         self.checkpoint_service.set_state_store(state_store) if hasattr(self, "checkpoint_service") else None
         self.memory_service.set_state_store(state_store) if hasattr(self, "memory_service") else None
@@ -278,6 +283,29 @@ class RuntimeController:
     async def list_checkpoints(self, agent_id: str | None = None, task_id: str | None = None) -> list[RuntimeCheckpoint]:
         return await self.checkpoint_service.list_checkpoints(agent_id=agent_id, task_id=task_id)
 
+    async def list_runs(self, agent_id: str | None = None, task_id: str | None = None) -> list[RunState]:
+        return await self.task_runtime.list_runs(agent_id=agent_id, task_id=task_id)
+
+    async def get_run(self, run_id: str) -> RunState:
+        return await self.task_runtime.get_run(run_id)
+
+    async def get_run_events(self, run_id: str) -> list[dict[str, object]]:
+        if self.state_store is None:
+            return []
+        return await self.state_store.get_runtime_events(run_id=run_id, limit=200)
+
+    async def get_run_checkpoints(self, run_id: str) -> list[RuntimeCheckpoint]:
+        return await self.checkpoint_service.list_checkpoints(run_id=run_id)
+
+    async def pause_run(self, run_id: str) -> RunState:
+        return await self.task_runtime.pause_run(run_id)
+
+    async def resume_run(self, run_id: str):
+        return await self.task_runtime.resume_run(run_id)
+
+    async def cancel_run(self, run_id: str) -> RunState:
+        return await self.task_runtime.cancel_run(run_id)
+
     async def get_checkpoint(self, checkpoint_id: str) -> RuntimeCheckpoint:
         return await self.checkpoint_service.get_checkpoint(checkpoint_id)
 
@@ -297,8 +325,11 @@ class RuntimeController:
         response = await self.a2a.handle_message(envelope.sender_agent_id, envelope.model_dump(mode="json"))
         if response is None:
             raise RuntimeError("A2A message did not produce a response.")
+        task_payload = response.payload.get("task") if isinstance(response.payload, dict) else None
+        run_id = task_payload.get("run_id") if isinstance(task_payload, dict) else None
         await self.event_bus.emit(
             EventType.A2A_MESSAGE,
+            run_id=str(run_id) if run_id is not None else None,
             agent_id=envelope.sender_agent_id,
             source="runtime_controller",
             payload=response.model_dump(mode="json"),

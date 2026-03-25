@@ -29,6 +29,7 @@ class AgentRuntimeRecord(BaseModel):
 class BrowserSessionState(BaseModel):
     session_id: str
     agent_id: str | None = None
+    run_id: str | None = None
     current_url: str | None = None
     cookies: list[dict[str, object]] = Field(default_factory=list)
     local_storage: dict[str, str] = Field(default_factory=dict)
@@ -53,6 +54,7 @@ class RuntimeCheckpoint(BaseModel):
     checkpoint_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     task_id: str
     agent_id: str
+    run_id: str | None = None
     current_goal: str
     planner_state: dict[str, object] = Field(default_factory=dict)
     memory_snapshot_reference: str | None = None
@@ -66,6 +68,7 @@ class RuntimeCheckpoint(BaseModel):
 class RuntimeEventRecord(BaseModel):
     event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     event_type: str
+    run_id: str | None = None
     agent_id: str | None = None
     task_id: str | None = None
     session_id: str | None = None

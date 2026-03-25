@@ -28,8 +28,12 @@ def test_runtime_state_store_crud() -> None:
         await store.delete_checkpoint("c1")
         assert await store.get_checkpoint("c1") is None
 
-        await store.store_runtime_event("e1", {"event_id": "e1", "agent_id": "a1", "task_id": "t1"})
-        events = await store.get_runtime_events(agent_id="a1")
+        await store.store_run("r1", {"run_id": "r1", "agent_id": "a1", "task_id": "t1", "status": "running"})
+        assert (await store.get_run("r1"))["status"] == "running"
+        assert len(await store.list_runs(agent_id="a1")) == 1
+
+        await store.store_runtime_event("e1", {"event_id": "e1", "run_id": "r1", "agent_id": "a1", "task_id": "t1"})
+        events = await store.get_runtime_events(run_id="r1", agent_id="a1")
         assert len(events) == 1
         assert events[0]["event_id"] == "e1"
 

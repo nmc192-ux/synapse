@@ -71,8 +71,13 @@ class BrowserRuntime:
     async def stop(self) -> None:
         await self.session_manager.stop()
 
-    async def create_session(self, session_id: str, agent_id: str | None = None) -> BrowserSession:
-        return await self.session_manager.create_session(session_id, self._extractor_proxy(), agent_id=agent_id)
+    async def create_session(
+        self,
+        session_id: str,
+        agent_id: str | None = None,
+        run_id: str | None = None,
+    ) -> BrowserSession:
+        return await self.session_manager.create_session(session_id, self._extractor_proxy(), agent_id=agent_id, run_id=run_id)
 
     async def open(self, session_id: str, url: str) -> BrowserState:
         return await self.interaction_engine.open(session_id, url)
@@ -143,8 +148,8 @@ class BrowserRuntime:
     async def close_session(self, session_id: str) -> None:
         await self.session_manager.close_session(session_id)
 
-    async def save_session_state(self, session_id: str) -> BrowserSessionState | None:
-        return await self.session_manager.save_session_state(session_id, self._extractor_proxy())
+    async def save_session_state(self, session_id: str, run_id: str | None = None) -> BrowserSessionState | None:
+        return await self.session_manager.save_session_state(session_id, self._extractor_proxy(), run_id=run_id)
 
     async def restore_session_state(self, session_id: str) -> BrowserSession | None:
         return await self.session_manager.restore_session_state(session_id, self._extractor_proxy())

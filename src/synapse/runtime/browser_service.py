@@ -54,10 +54,11 @@ class BrowserService:
     def set_state_store(self, state_store: RuntimeStateStore) -> None:
         self.state_store = state_store
 
-    async def create_session(self, session_id: str, agent_id: str | None = None) -> BrowserSession:
-        session = await self.browser.create_session(session_id, agent_id=agent_id)
+    async def create_session(self, session_id: str, agent_id: str | None = None, run_id: str | None = None) -> BrowserSession:
+        session = await self.browser.create_session(session_id, agent_id=agent_id, run_id=run_id)
         await self.events.emit(
             EventType.SESSION_CREATED,
+            run_id=run_id,
             session_id=session.session_id,
             source="browser_service",
             payload={"session_id": session.session_id},
@@ -238,10 +239,17 @@ class BrowserService:
             raise KeyError(f"Session not found: {session_id}")
         return BrowserSessionState.model_validate(payload)
 
-    async def save_session_state(self, session_id: str, agent_id: str | None = None, task_id: str | None = None) -> None:
-        await self.browser.save_session_state(session_id)
+    async def save_session_state(
+        self,
+        session_id: str,
+        agent_id: str | None = None,
+        task_id: str | None = None,
+        run_id: str | None = None,
+    ) -> None:
+        await self.browser.save_session_state(session_id, run_id=run_id)
         await self.events.emit(
             EventType.SESSION_SAVED,
+            run_id=run_id,
             session_id=session_id,
             agent_id=agent_id,
             source="browser_service",
@@ -249,11 +257,18 @@ class BrowserService:
             correlation_id=task_id,
         )
 
-    async def restore_session_state(self, session_id: str, agent_id: str | None = None, checkpoint_id: str | None = None):
+    async def restore_session_state(
+        self,
+        session_id: str,
+        agent_id: str | None = None,
+        checkpoint_id: str | None = None,
+        run_id: str | None = None,
+    ):
         restored = await self.browser.restore_session_state(session_id)
         if restored is not None:
             await self.events.emit(
                 EventType.SESSION_RESTORED,
+                run_id=run_id,
                 session_id=session_id,
                 agent_id=agent_id,
                 source="browser_service",

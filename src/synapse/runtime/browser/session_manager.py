@@ -31,6 +31,7 @@ class SessionManager:
         self._contexts: dict[str, BrowserContext] = {}
         self._pages: dict[str, Page] = {}
         self._session_agents: dict[str, str | None] = {}
+        self._session_runs: dict[str, str | None] = {}
         self._state_store = state_store
         self._downloads: dict[str, list[dict[str, object]]] = {}
         self._last_urls: dict[str, str | None] = {}
@@ -59,7 +60,13 @@ class SessionManager:
             await self._playwright.stop()
             self._playwright = None
 
-    async def create_session(self, session_id: str, extractor, agent_id: str | None = None) -> BrowserSession:
+    async def create_session(
+        self,
+        session_id: str,
+        extractor,
+        agent_id: str | None = None,
+        run_id: str | None = None,
+    ) -> BrowserSession:
         if self._browser is None:
             raise RuntimeError("Browser runtime is not started.")
         context = await self._browser.new_context()
@@ -67,9 +74,10 @@ class SessionManager:
         self._contexts[session_id] = context
         self._pages[session_id] = page
         self._session_agents[session_id] = agent_id
+        self._session_runs[session_id] = run_id
         self._downloads.setdefault(session_id, [])
         self._last_urls[session_id] = None
-        await self.save_session_state(session_id, extractor)
+        await self.save_session_state(session_id, extractor, run_id=run_id)
         return BrowserSession(session_id=session_id, page=await extractor.snapshot_page(page))
 
     async def close_session(self, session_id: str) -> None:
@@ -80,12 +88,13 @@ class SessionManager:
         if context is not None:
             await context.close()
         self._session_agents.pop(session_id, None)
+        self._session_runs.pop(session_id, None)
         self._downloads.pop(session_id, None)
         self._last_urls.pop(session_id, None)
         if self._state_store is not None:
             await self._state_store.delete_session(session_id)
 
-    async def save_session_state(self, session_id: str, extractor) -> BrowserSessionState | None:
+    async def save_session_state(self, session_id: str, extractor, run_id: str | None = None) -> BrowserSessionState | None:
         if self._state_store is None:
             return None
         page = self._pages.get(session_id)
@@ -102,6 +111,7 @@ class SessionManager:
         state = BrowserSessionState(
             session_id=session_id,
             agent_id=self._session_agents.get(session_id),
+            run_id=run_id or self._session_runs.get(session_id),
             current_url=page.url or None,
             cookies=[dict(cookie) for cookie in cookies],
             local_storage=storage["local_storage"],
@@ -113,6 +123,7 @@ class SessionManager:
             downloads=list(self._downloads.get(session_id, [])),
         )
         await self._state_store.store_session(session_id, state.model_dump(mode="json"))
+        self._session_runs[session_id] = state.run_id
         self._last_urls[session_id] = state.current_url
         return state
 
@@ -124,7 +135,7 @@ class SessionManager:
             return None
         state = BrowserSessionState.model_validate(payload)
         if session_id not in self._pages:
-            await self.create_session(session_id, extractor, agent_id=state.agent_id)
+            await self.create_session(session_id, extractor, agent_id=state.agent_id, run_id=state.run_id)
         page = self.require_page(session_id)
         context = self.require_context(session_id)
         if state.cookies:
@@ -140,8 +151,9 @@ class SessionManager:
                 logger.warning("Failed to navigate session %s to %s: %s", session_id, state.current_url, exc)
         await self._restore_storage(page, state.local_storage, state.session_storage)
         self._downloads[session_id] = list(state.downloads)
+        self._session_runs[session_id] = state.run_id
         snapshot = await extractor.snapshot_page(page)
-        await self.save_session_state(session_id, extractor)
+        await self.save_session_state(session_id, extractor, run_id=state.run_id)
         return BrowserSession(session_id=session_id, current_url=snapshot.url, page=snapshot)
 
     async def list_sessions(self, extractor, agent_id: str | None = None) -> list[BrowserSessionState]:
@@ -152,6 +164,7 @@ class SessionManager:
                     BrowserSessionState(
                         session_id=session_id,
                         agent_id=self._session_agents.get(session_id),
+                        run_id=self._session_runs.get(session_id),
                         current_url=page.url or None,
                         local_storage={},
                         session_storage={},

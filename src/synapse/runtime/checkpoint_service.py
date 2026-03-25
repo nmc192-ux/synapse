@@ -31,12 +31,14 @@ class CheckpointService:
     async def save_checkpoint(self, task_id: str, state: dict[str, object]) -> RuntimeCheckpoint:
         context = self._task_context.get(task_id)
         agent_id = str(state.get("agent_id") or (context.agent_id if context is not None else ""))
+        run_id = str(state.get("run_id") or (context.run_id if context is not None and context.run_id is not None else "")) or None
         if not agent_id:
             raise KeyError(f"Unable to resolve agent for task: {task_id}")
 
         checkpoint = RuntimeCheckpoint(
             task_id=task_id,
             agent_id=agent_id,
+            run_id=run_id,
             current_goal=str(state.get("current_goal") or (context.goal if context is not None else "")),
             planner_state=state.get("planner_state", {}) if isinstance(state.get("planner_state"), dict) else {},
             memory_snapshot_reference=str(state.get("memory_snapshot_reference")) if state.get("memory_snapshot_reference") is not None else None,
@@ -50,6 +52,7 @@ class CheckpointService:
             await self.state_store.store_checkpoint(checkpoint.checkpoint_id, checkpoint.model_dump(mode="json"))
         await self.events.emit(
             EventType.CHECKPOINT_SAVED,
+            run_id=checkpoint.run_id,
             agent_id=checkpoint.agent_id,
             task_id=checkpoint.task_id,
             session_id=checkpoint.browser_session_reference,
@@ -63,10 +66,13 @@ class CheckpointService:
         self,
         agent_id: str | None = None,
         task_id: str | None = None,
+        run_id: str | None = None,
     ) -> list[RuntimeCheckpoint]:
         if self.state_store is None:
             return []
         rows = await self.state_store.list_checkpoints(agent_id=agent_id, task_id=task_id)
+        if run_id is not None:
+            rows = [row for row in rows if row.get("run_id") == run_id]
         return [RuntimeCheckpoint.model_validate(row) for row in rows]
 
     async def get_checkpoint(self, checkpoint_id: str) -> RuntimeCheckpoint:
@@ -89,6 +95,7 @@ class CheckpointService:
                 checkpoint.browser_session_reference,
                 agent_id=checkpoint.agent_id,
                 checkpoint_id=checkpoint_id,
+                run_id=checkpoint.run_id,
             )
 
         constraints: dict[str, object] = {}
@@ -101,6 +108,7 @@ class CheckpointService:
             task_id=checkpoint.task_id,
             agent_id=checkpoint.agent_id,
             goal=checkpoint.current_goal,
+            run_id=checkpoint.run_id,
             session_id=checkpoint.browser_session_reference,
             constraints=constraints,
         )
@@ -109,6 +117,7 @@ class CheckpointService:
     async def emit_resumed(self, checkpoint: RuntimeCheckpoint, result) -> None:
         await self.events.emit(
             EventType.CHECKPOINT_RESUMED,
+            run_id=checkpoint.run_id,
             agent_id=checkpoint.agent_id,
             task_id=checkpoint.task_id,
             session_id=checkpoint.browser_session_reference,

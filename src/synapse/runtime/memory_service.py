@@ -64,6 +64,7 @@ class MemoryService:
         self,
         agent_id: str,
         *,
+        run_id: str | None = None,
         task_id: str | None = None,
         limit_per_type: int = 4,
     ) -> dict[str, object]:
@@ -87,6 +88,7 @@ class MemoryService:
                 cluster,
                 context={
                     "agent_id": agent_id,
+                    "run_id": run_id,
                     "task_id": task_id,
                     "memory_type": memory_type.value,
                     "channel": "planner_memory",
@@ -112,6 +114,7 @@ class MemoryService:
 
         payload = {
             "agent_id": agent_id,
+            "run_id": run_id,
             "task_id": task_id,
             "memory_summary": "\n".join(summary_lines) if summary_lines else "No memory available.",
             "memories": compressed_clusters,
@@ -125,6 +128,7 @@ class MemoryService:
         if self.events is not None:
             await self.events.emit(
                 EventType.MEMORY_COMPRESSED,
+                run_id=run_id,
                 agent_id=agent_id,
                 task_id=task_id,
                 source="memory_service",
@@ -136,12 +140,13 @@ class MemoryService:
     async def get_recent_runtime_events(
         self,
         agent_id: str,
+        run_id: str | None = None,
         task_id: str | None = None,
         limit: int = 10,
     ) -> list[dict[str, object]]:
         if self.state_store is None:
             return []
-        return await self.state_store.get_runtime_events(agent_id=agent_id, task_id=task_id, limit=limit)
+        return await self.state_store.get_runtime_events(run_id=run_id, agent_id=agent_id, task_id=task_id, limit=limit)
 
     def _deduplicate_memories(self, records: list[MemoryRecord]) -> list[MemoryRecord]:
         clusters: list[list[MemoryRecord]] = []

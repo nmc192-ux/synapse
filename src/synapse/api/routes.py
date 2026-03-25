@@ -35,6 +35,7 @@ from synapse.models.runtime_event import EventType, RuntimeEvent
 from synapse.models.message import AgentMessage
 from synapse.models.memory import MemoryRecord, MemorySearchRequest, MemorySearchResult, MemoryStoreRequest
 from synapse.models.plugin import PluginDescriptor, PluginReloadRequest, ToolDescriptor
+from synapse.models.run import RunState
 from synapse.models.runtime_state import BrowserSessionState, ConnectionState, RuntimeCheckpoint
 from synapse.models.task import (
     ExtractionRequest,
@@ -595,6 +596,75 @@ async def get_checkpoint(
 ) -> RuntimeCheckpoint:
     try:
         return await orchestrator.get_checkpoint(checkpoint_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/runs", response_model=list[RunState])
+async def list_runs(
+    agent_id: str | None = None,
+    task_id: str | None = None,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> list[RunState]:
+    return await orchestrator.list_runs(agent_id=agent_id, task_id=task_id)
+
+
+@router.get("/runs/{run_id}", response_model=RunState)
+async def get_run(
+    run_id: str,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> RunState:
+    try:
+        return await orchestrator.get_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/runs/{run_id}/events")
+async def get_run_events(
+    run_id: str,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> list[dict[str, object]]:
+    return await orchestrator.get_run_events(run_id)
+
+
+@router.get("/runs/{run_id}/checkpoints", response_model=list[RuntimeCheckpoint])
+async def get_run_checkpoints(
+    run_id: str,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> list[RuntimeCheckpoint]:
+    return await orchestrator.get_run_checkpoints(run_id)
+
+
+@router.post("/runs/{run_id}/pause", response_model=RunState)
+async def pause_run(
+    run_id: str,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> RunState:
+    try:
+        return await orchestrator.pause_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/runs/{run_id}/resume")
+async def resume_run(
+    run_id: str,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+):
+    try:
+        return await orchestrator.resume_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/runs/{run_id}/cancel", response_model=RunState)
+async def cancel_run(
+    run_id: str,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> RunState:
+    try:
+        return await orchestrator.cancel_run(run_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

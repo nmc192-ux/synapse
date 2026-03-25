@@ -28,12 +28,13 @@ class AgentMemoryManager:
         pool = self._require_pool()
         row = await pool.fetchrow(
             """
-            INSERT INTO synapse_memory (memory_id, agent_id, memory_type, content, embedding, timestamp)
-            VALUES ($1, $2, $3, $4, $5::vector, $6)
-            RETURNING memory_id, agent_id, memory_type, content, embedding::text AS embedding, timestamp
+            INSERT INTO synapse_memory (memory_id, agent_id, run_id, memory_type, content, embedding, timestamp)
+            VALUES ($1, $2, $3, $4, $5, $6::vector, $7)
+            RETURNING memory_id, agent_id, run_id, memory_type, content, embedding::text AS embedding, timestamp
             """,
             request.memory_id,
             request.agent_id,
+            request.run_id,
             request.memory_type.value,
             request.content,
             self._vector_literal(request.embedding),
@@ -47,7 +48,7 @@ class AgentMemoryManager:
         if request.embedding:
             rows = await pool.fetch(
                 """
-                SELECT memory_id, agent_id, memory_type, content, embedding::text AS embedding, timestamp,
+                SELECT memory_id, agent_id, run_id, memory_type, content, embedding::text AS embedding, timestamp,
                        1 - (embedding <=> $2::vector) AS score
                 FROM synapse_memory
                 WHERE agent_id = $1
@@ -63,7 +64,7 @@ class AgentMemoryManager:
         else:
             rows = await pool.fetch(
                 """
-                SELECT memory_id, agent_id, memory_type, content, embedding::text AS embedding, timestamp,
+                SELECT memory_id, agent_id, run_id, memory_type, content, embedding::text AS embedding, timestamp,
                        CASE
                          WHEN $2::text IS NULL OR $2 = '' THEN 0.0
                          ELSE similarity(content, $2)
@@ -86,7 +87,7 @@ class AgentMemoryManager:
         pool = self._require_pool()
         rows = await pool.fetch(
             """
-            SELECT memory_id, agent_id, memory_type, content, embedding::text AS embedding, timestamp
+            SELECT memory_id, agent_id, run_id, memory_type, content, embedding::text AS embedding, timestamp
             FROM synapse_memory
             WHERE agent_id = $1
             ORDER BY timestamp DESC
@@ -101,11 +102,12 @@ class AgentMemoryManager:
         pool = self._require_pool()
         rows = await pool.fetch(
             """
-            SELECT memory_id, agent_id, memory_type, content, embedding::text AS embedding, timestamp
+            SELECT memory_id, agent_id, run_id, memory_type, content, embedding::text AS embedding, timestamp
             FROM (
                 SELECT
                     memory_id,
                     agent_id,
+                    run_id,
                     memory_type,
                     content,
                     embedding,
@@ -135,6 +137,7 @@ class AgentMemoryManager:
             CREATE TABLE IF NOT EXISTS synapse_memory (
                 memory_id TEXT PRIMARY KEY,
                 agent_id TEXT NOT NULL,
+                run_id TEXT,
                 memory_type TEXT NOT NULL,
                 content TEXT NOT NULL,
                 embedding VECTOR NOT NULL,
@@ -142,6 +145,7 @@ class AgentMemoryManager:
             )
             """
         )
+        await pool.execute("ALTER TABLE synapse_memory ADD COLUMN IF NOT EXISTS run_id TEXT")
         await pool.execute(
             """
             CREATE INDEX IF NOT EXISTS synapse_memory_agent_timestamp_idx
@@ -158,6 +162,7 @@ class AgentMemoryManager:
         return MemoryRecord(
             memory_id=row["memory_id"],
             agent_id=row["agent_id"],
+            run_id=row["run_id"],
             memory_type=row["memory_type"],
             content=row["content"],
             embedding=self._parse_vector(row["embedding"]),

@@ -22,7 +22,10 @@ class EventBus:
     ) -> None:
         self.sockets = sockets
         self.compression_provider = compression_provider or NoOpCompressionProvider()
-        self._recent_event_groups: dict[tuple[str, str | None, str | None, str], list[RuntimeEvent]] = defaultdict(list)
+        self._recent_event_groups: dict[
+            tuple[str, str | None, str | None, str | None, str],
+            list[RuntimeEvent],
+        ] = defaultdict(list)
         self._compressible_event_types = {
             EventType.BUDGET_UPDATED,
             EventType.CONNECTION_HEARTBEAT,
@@ -58,6 +61,7 @@ class EventBus:
         self,
         event_type: EventType,
         *,
+        run_id: str | None = None,
         agent_id: str | None = None,
         task_id: str | None = None,
         session_id: str | None = None,
@@ -69,6 +73,7 @@ class EventBus:
         await self.publish(
             RuntimeEvent(
                 event_type=event_type,
+                run_id=run_id,
                 agent_id=agent_id,
                 task_id=task_id,
                 session_id=session_id,
@@ -82,17 +87,19 @@ class EventBus:
     async def get_compact_history(
         self,
         *,
+        run_id: str | None = None,
         agent_id: str | None = None,
         task_id: str | None = None,
         limit: int = 100,
     ) -> dict[str, object]:
-        return await self.sockets.get_compact_event_history(agent_id=agent_id, task_id=task_id, limit=limit)
+        return await self.sockets.get_compact_event_history(run_id=run_id, agent_id=agent_id, task_id=task_id, limit=limit)
 
     async def _maybe_publish_compressed_summary(self, event: RuntimeEvent) -> None:
         if event.event_type not in self._compressible_event_types:
             return
         key = (
             event.event_type.value,
+            event.run_id,
             event.agent_id,
             event.task_id,
             event.source,
@@ -109,6 +116,7 @@ class EventBus:
             event_dicts,
             context={
                 "agent_id": event.agent_id,
+                "run_id": event.run_id,
                 "task_id": event.task_id,
                 "event_type": event.event_type.value,
                 "channel": "event_bus",
@@ -116,6 +124,7 @@ class EventBus:
         )
         compact_event = RuntimeEvent(
             event_type=EventType.RUNTIME_EVENTS_COMPRESSED,
+            run_id=event.run_id,
             agent_id=event.agent_id,
             task_id=event.task_id,
             session_id=event.session_id,

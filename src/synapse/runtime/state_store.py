@@ -84,12 +84,29 @@ class RuntimeStateStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def store_run(self, run_id: str, run_data: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_run(self, run_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def list_runs(
+        self,
+        agent_id: str | None = None,
+        task_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
     async def store_runtime_event(self, event_id: str, event_data: dict[str, Any]) -> None:
         raise NotImplementedError
 
     @abstractmethod
     async def get_runtime_events(
         self,
+        run_id: str | None = None,
         agent_id: str | None = None,
         task_id: str | None = None,
         limit: int = 100,
@@ -103,6 +120,7 @@ class InMemoryRuntimeStateStore(RuntimeStateStore):
         self._sessions: dict[str, dict[str, Any]] = {}
         self._connections: dict[str, dict[str, Any]] = {}
         self._checkpoints: dict[str, dict[str, Any]] = {}
+        self._runs: dict[str, dict[str, Any]] = {}
         self._events: dict[str, dict[str, Any]] = {}
         self._event_ids: list[str] = []
 
@@ -163,6 +181,25 @@ class InMemoryRuntimeStateStore(RuntimeStateStore):
     async def delete_checkpoint(self, checkpoint_id: str) -> None:
         self._checkpoints.pop(checkpoint_id, None)
 
+    async def store_run(self, run_id: str, run_data: dict[str, Any]) -> None:
+        self._runs[run_id] = dict(run_data)
+
+    async def get_run(self, run_id: str) -> dict[str, Any] | None:
+        record = self._runs.get(run_id)
+        return dict(record) if record is not None else None
+
+    async def list_runs(
+        self,
+        agent_id: str | None = None,
+        task_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        rows = [dict(value) for value in self._runs.values()]
+        if agent_id is not None:
+            rows = [row for row in rows if row.get("agent_id") == agent_id]
+        if task_id is not None:
+            rows = [row for row in rows if row.get("task_id") == task_id]
+        return rows
+
     async def store_runtime_event(self, event_id: str, event_data: dict[str, Any]) -> None:
         self._events[event_id] = dict(event_data)
         self._event_ids.insert(0, event_id)
@@ -172,6 +209,7 @@ class InMemoryRuntimeStateStore(RuntimeStateStore):
 
     async def get_runtime_events(
         self,
+        run_id: str | None = None,
         agent_id: str | None = None,
         task_id: str | None = None,
         limit: int = 100,
@@ -179,6 +217,8 @@ class InMemoryRuntimeStateStore(RuntimeStateStore):
         rows: list[dict[str, Any]] = []
         for event_id in self._event_ids:
             event = self._events[event_id]
+            if run_id is not None and event.get("run_id") != run_id:
+                continue
             if agent_id is not None and event.get("agent_id") != agent_id:
                 continue
             if task_id is not None and event.get("task_id") != task_id:
@@ -315,11 +355,47 @@ class RedisRuntimeStateStore(RuntimeStateStore):
             if isinstance(checkpoint.get("task_id"), str):
                 await redis.srem(f"synapse:checkpoints:task:{checkpoint['task_id']}", checkpoint_id)
 
+    async def store_run(self, run_id: str, run_data: dict[str, Any]) -> None:
+        redis = self._require_redis()
+        await redis.set(self._run_key(run_id), json.dumps(run_data))
+        await redis.sadd("synapse:runs:index", run_id)
+        if isinstance(run_data.get("agent_id"), str):
+            await redis.sadd(f"synapse:runs:agent:{run_data['agent_id']}", run_id)
+        if isinstance(run_data.get("task_id"), str):
+            await redis.sadd(f"synapse:runs:task:{run_data['task_id']}", run_id)
+
+    async def get_run(self, run_id: str) -> dict[str, Any] | None:
+        redis = self._require_redis()
+        payload = await redis.get(self._run_key(run_id))
+        return self._decode(payload)
+
+    async def list_runs(
+        self,
+        agent_id: str | None = None,
+        task_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        redis = self._require_redis()
+        if agent_id is not None:
+            ids = await redis.smembers(f"synapse:runs:agent:{agent_id}")
+        elif task_id is not None:
+            ids = await redis.smembers(f"synapse:runs:task:{task_id}")
+        else:
+            ids = await redis.smembers("synapse:runs:index")
+        keys = [self._run_key(run_id) for run_id in ids]
+        records = await self._mget_json(keys)
+        if task_id is not None:
+            records = [record for record in records if record.get("task_id") == task_id]
+        return records
+
     async def store_runtime_event(self, event_id: str, event_data: dict[str, Any]) -> None:
         redis = self._require_redis()
         await redis.set(self._event_key(event_id), json.dumps(event_data))
         await redis.lpush("synapse:events:index", event_id)
         await redis.ltrim("synapse:events:index", 0, self._max_events - 1)
+        run_id = event_data.get("run_id")
+        if isinstance(run_id, str) and run_id:
+            await redis.lpush(f"synapse:events:run:{run_id}", event_id)
+            await redis.ltrim(f"synapse:events:run:{run_id}", 0, self._max_events - 1)
         agent_id = event_data.get("agent_id")
         if isinstance(agent_id, str) and agent_id:
             await redis.lpush(f"synapse:events:agent:{agent_id}", event_id)
@@ -331,12 +407,15 @@ class RedisRuntimeStateStore(RuntimeStateStore):
 
     async def get_runtime_events(
         self,
+        run_id: str | None = None,
         agent_id: str | None = None,
         task_id: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         redis = self._require_redis()
-        if agent_id is not None:
+        if run_id is not None:
+            ids = await redis.lrange(f"synapse:events:run:{run_id}", 0, max(0, limit - 1))
+        elif agent_id is not None:
             ids = await redis.lrange(f"synapse:events:agent:{agent_id}", 0, max(0, limit - 1))
         elif task_id is not None:
             ids = await redis.lrange(f"synapse:events:task:{task_id}", 0, max(0, limit - 1))
@@ -387,6 +466,10 @@ class RedisRuntimeStateStore(RuntimeStateStore):
     @staticmethod
     def _checkpoint_key(checkpoint_id: str) -> str:
         return f"synapse:checkpoints:{checkpoint_id}"
+
+    @staticmethod
+    def _run_key(run_id: str) -> str:
+        return f"synapse:runs:{run_id}"
 
     @staticmethod
     def _event_key(event_id: str) -> str:

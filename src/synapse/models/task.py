@@ -40,6 +40,7 @@ class TaskRequest(BaseModel):
     task_id: str
     agent_id: str
     goal: str
+    run_id: str | None = None
     session_id: str | None = None
     start_url: HttpUrl | None = None
     tool_calls: list[ToolCallRequest] = Field(default_factory=list)
@@ -49,6 +50,7 @@ class TaskRequest(BaseModel):
 
 class TaskResult(BaseModel):
     task_id: str
+    run_id: str | None = None
     status: TaskStatus
     message: str
     artifacts: dict[str, object] = Field(default_factory=dict)

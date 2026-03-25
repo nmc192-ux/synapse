@@ -14,6 +14,7 @@ class MemoryType(str, Enum):
 class MemoryRecord(BaseModel):
     memory_id: str
     agent_id: str
+    run_id: str | None = None
     memory_type: MemoryType
     content: str
     embedding: list[float] = Field(default_factory=list)
@@ -23,6 +24,7 @@ class MemoryRecord(BaseModel):
 class MemoryStoreRequest(BaseModel):
     memory_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     agent_id: str
+    run_id: str | None = None
     memory_type: MemoryType
     content: str
     embedding: list[float] = Field(default_factory=list)

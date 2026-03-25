@@ -245,9 +245,10 @@ class A2AHub:
             return
         compact_payload = await self._build_compact_payload(envelope)
         await self._sockets.broadcast(
-            RuntimeEvent(
-                event_type=EventType.A2A_MESSAGE_COMPRESSED,
-                agent_id=envelope.sender_agent_id,
+                RuntimeEvent(
+                    event_type=EventType.A2A_MESSAGE_COMPRESSED,
+                    run_id=self._run_id_from_payload(envelope.payload),
+                    agent_id=envelope.sender_agent_id,
                 task_id=self._task_id_from_payload(envelope.payload),
                 source="a2a_runtime",
                 payload={
@@ -322,6 +323,15 @@ class A2AHub:
             task_id = task.get("task_id")
             return str(task_id) if task_id is not None else None
         return None
+
+    @staticmethod
+    def _run_id_from_payload(payload: dict[str, object]) -> str | None:
+        task = payload.get("task")
+        if isinstance(task, dict):
+            run_id = task.get("run_id")
+            return str(run_id) if run_id is not None else None
+        run_id = payload.get("run_id")
+        return str(run_id) if run_id is not None else None
 
     async def register_connection(self, agent_id: str, metadata: dict[str, object]) -> ConnectionState:
         if agent_id not in {agent.agent_id for agent in self.agents.list()}:

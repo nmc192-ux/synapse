@@ -167,31 +167,68 @@ function derivePage(
   }
 
   const pageRecord = page as Record<string, unknown>;
-  const elements = Array.isArray(pageRecord.elements)
-    ? pageRecord.elements
-        .map((element) => {
-          if (!element || typeof element !== "object") {
-            return null;
-          }
-          const item = element as Record<string, unknown>;
-          return {
-            tag: stringify(item.tag) ?? "node",
-            text: stringify(item.text) ?? "(no text)",
-            selectorHint: stringify(item.selector_hint) ?? stringify(item.selectorHint) ?? "unknown",
-          };
-        })
-        .filter((value): value is NonNullable<typeof value> => value !== null)
-        .slice(0, 6)
-    : current.elements;
+  const sections = toRecordArray(pageRecord.sections);
+  const buttons = toRecordArray(pageRecord.buttons);
+  const inputs = toRecordArray(pageRecord.inputs);
+  const forms = toRecordArray(pageRecord.forms);
+  const tables = toRecordArray(pageRecord.tables);
+
+  const elements = [
+    ...sections.map((section) => ({
+      tag: "section",
+      text: stringify(section.heading) ?? stringify(section.text) ?? "(section)",
+      selectorHint: stringify(section.selector_hint) ?? "section",
+    })),
+    ...buttons.map((button) => ({
+      tag: "button",
+      text: stringify(button.text) ?? "(button)",
+      selectorHint: stringify(button.selector_hint) ?? "button",
+    })),
+    ...inputs.map((input) => ({
+      tag: "input",
+      text: stringify(input.name) ?? stringify(input.placeholder) ?? "(input)",
+      selectorHint: stringify(input.selector_hint) ?? "input",
+    })),
+    ...forms.map((form) => ({
+      tag: "form",
+      text: stringify(form.name) ?? "(form)",
+      selectorHint: stringify(form.selector_hint) ?? "form",
+    })),
+    ...tables.map((table) => ({
+      tag: "table",
+      text: Array.isArray(table.headers) ? table.headers.map((item) => String(item)).join(" | ") : "(table)",
+      selectorHint: stringify(table.selector_hint) ?? "table",
+    })),
+  ].slice(0, 6);
+
+  const excerpt =
+    sections
+      .map((section) => stringify(section.text))
+      .filter((value): value is string => Boolean(value))
+      .join(" ")
+      .slice(0, 280) ||
+    stringify(pageRecord.text_excerpt) ||
+    stringify(pageRecord.excerpt) ||
+    current.excerpt;
 
   return {
     url: stringify(pageRecord.url) ?? current.url,
     title: stringify(pageRecord.title) ?? current.title,
-    excerpt: stringify(pageRecord.text_excerpt) ?? stringify(pageRecord.excerpt) ?? current.excerpt,
+    excerpt,
     links: Array.isArray(pageRecord.links)
-      ? pageRecord.links.map((item) => String(item)).slice(0, 6)
+      ? pageRecord.links
+          .map((item) => {
+            if (typeof item === "string") return item;
+            if (item && typeof item === "object") {
+              const link = item as Record<string, unknown>;
+              return stringify(link.href) ?? stringify(link.text) ?? "";
+            }
+            return "";
+          })
+          .filter((value) => value.length > 0)
+          .slice(0, 6)
       : current.links,
-    elements,
+    elements: elements.length > 0 ? elements : current.elements,
   };
 }
 
@@ -240,4 +277,11 @@ function relativeTimestamp(timestamp?: string): string {
 
 function stringify(value: unknown): string | null {
   return typeof value === "string" || typeof value === "number" ? String(value) : null;
+}
+
+function toRecordArray(value: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object");
 }

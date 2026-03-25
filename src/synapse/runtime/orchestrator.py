@@ -7,9 +7,15 @@ from synapse.models.browser import (
     ClickRequest,
     ExtractionResult,
     ExtractRequest,
+    FindElementRequest,
+    InspectRequest,
+    LayoutRequest,
     OpenRequest,
+    PageElementMatch,
+    PageInspection,
     ScreenshotRequest,
     ScreenshotResult,
+    StructuredPageModel,
     TypeRequest,
 )
 from synapse.models.events import EventType, RuntimeEvent
@@ -138,6 +144,15 @@ class RuntimeOrchestrator:
             )
         )
         return result
+
+    async def get_layout(self, request: LayoutRequest) -> StructuredPageModel:
+        return await self.browser.get_layout(request.session_id)
+
+    async def find_element(self, request: FindElementRequest) -> list[PageElementMatch]:
+        return await self.browser.find_element(request.session_id, request.type, request.text)
+
+    async def inspect(self, request: InspectRequest) -> PageInspection:
+        return await self.browser.inspect(request.session_id, request.selector)
 
     async def register_agent(self, definition: AgentDefinition) -> AgentDefinition:
         agent = self.agents.register(definition)

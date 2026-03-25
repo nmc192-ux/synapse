@@ -9,9 +9,17 @@ from synapse.models.browser import (
     BrowserState,
     ExtractedElement,
     ExtractionResult,
-    PageData,
-    PageElement,
+    PageButton,
+    PageElementMatch,
+    PageForm,
+    PageFormField,
+    PageInput,
+    PageInspection,
+    PageLink,
+    PageSection,
+    PageTable,
     ScreenshotResult,
+    StructuredPageModel,
 )
 from synapse.runtime.session import BrowserSession
 
@@ -119,6 +127,111 @@ class BrowserRuntime:
             page=await self._snapshot_page(page),
         )
 
+    async def get_layout(self, session_id: str) -> StructuredPageModel:
+        page = self._require_page(session_id)
+        return await self._snapshot_page(page)
+
+    async def find_element(self, session_id: str, element_type: str, text: str) -> list[PageElementMatch]:
+        spm = await self.get_layout(session_id)
+        normalized_type = element_type.lower()
+        normalized_text = text.lower()
+        matches: list[PageElementMatch] = []
+
+        if normalized_type == "sections":
+            for section in spm.sections:
+                haystack = " ".join(filter(None, [section.heading, section.text])).lower()
+                if normalized_text in haystack:
+                    matches.append(
+                        PageElementMatch(
+                            element_type="section",
+                            text=section.heading or section.text,
+                            selector_hint=section.selector_hint,
+                        )
+                    )
+        elif normalized_type == "buttons":
+            for button in spm.buttons:
+                if normalized_text in button.text.lower():
+                    matches.append(
+                        PageElementMatch(
+                            element_type="button",
+                            text=button.text,
+                            selector_hint=button.selector_hint,
+                            metadata={"role": button.role, "disabled": button.disabled},
+                        )
+                    )
+        elif normalized_type == "inputs":
+            for item in spm.inputs:
+                haystack = " ".join(filter(None, [item.name, item.placeholder, item.value])).lower()
+                if normalized_text in haystack:
+                    matches.append(
+                        PageElementMatch(
+                            element_type="input",
+                            text=item.name or item.placeholder or item.value or "",
+                            selector_hint=item.selector_hint,
+                            metadata={"input_type": item.input_type},
+                        )
+                    )
+        elif normalized_type == "forms":
+            for form in spm.forms:
+                haystack = " ".join(filter(None, [form.name, form.selector_hint])).lower()
+                if normalized_text in haystack:
+                    matches.append(
+                        PageElementMatch(
+                            element_type="form",
+                            text=form.name or "",
+                            selector_hint=form.selector_hint,
+                            metadata={"method": form.method, "action": form.action},
+                        )
+                    )
+        elif normalized_type == "tables":
+            for table in spm.tables:
+                haystack = " ".join(table.headers + [cell for row in table.rows for cell in row]).lower()
+                if normalized_text in haystack:
+                    matches.append(
+                        PageElementMatch(
+                            element_type="table",
+                            text=" | ".join(table.headers),
+                            selector_hint=table.selector_hint,
+                            metadata={"row_count": len(table.rows)},
+                        )
+                    )
+        elif normalized_type == "links":
+            for link in spm.links:
+                haystack = " ".join(filter(None, [link.text, link.href])).lower()
+                if normalized_text in haystack:
+                    matches.append(
+                        PageElementMatch(
+                            element_type="link",
+                            text=link.text or link.href or "",
+                            selector_hint=link.selector_hint,
+                            metadata={"href": link.href},
+                        )
+                    )
+        else:
+            raise ValueError(f"Unsupported structured element type: {element_type}")
+
+        return matches
+
+    async def inspect(self, session_id: str, selector: str) -> PageInspection:
+        page = self._require_page(session_id)
+        locator = page.locator(selector).first
+        box = await locator.bounding_box()
+        attributes = await locator.evaluate(
+            """
+            (element) => Object.fromEntries(
+              Array.from(element.attributes).map((attribute) => [attribute.name, attribute.value])
+            )
+            """
+        )
+        return PageInspection(
+            selector=selector,
+            text=await locator.text_content(),
+            html_tag=await locator.evaluate("(element) => element.tagName.toLowerCase()"),
+            attributes=attributes,
+            is_visible=await locator.is_visible(),
+            bounding_box=box,
+        )
+
     async def navigate(self, session_id: str, url: str) -> BrowserSession:
         state = await self.open(session_id, url)
         return BrowserSession(session_id=session_id, current_url=state.page.url, page=state.page)
@@ -138,70 +251,126 @@ class BrowserRuntime:
             raise KeyError(f"Unknown session: {session_id}")
         return page
 
-    async def _snapshot_page(self, page: Page) -> PageData:
+    async def _snapshot_page(self, page: Page) -> StructuredPageModel:
         snapshot = await page.evaluate(
             """
             () => {
-              const text = document.body?.innerText ?? "";
-              const excerpt = text.replace(/\\s+/g, " ").trim().slice(0, 2000);
-              const interactiveSelector = [
-                "a[href]",
-                "button",
-                "input",
-                "textarea",
-                "select",
-                "[role]"
-              ].join(",");
+              const selectorHint = (element) => {
+                const tag = element.tagName.toLowerCase();
+                if (element.id) return `#${element.id}`;
+                if (element.getAttribute("data-testid")) {
+                  return `[data-testid="${element.getAttribute("data-testid")}"]`;
+                }
+                if (element.getAttribute("name")) {
+                  return `${tag}[name="${element.getAttribute("name")}"]`;
+                }
+                if (element.classList?.length) {
+                  return `${tag}.${Array.from(element.classList).slice(0, 2).join(".")}`;
+                }
+                return tag;
+              };
 
-              const elements = Array.from(document.querySelectorAll(interactiveSelector))
-                .slice(0, 50)
-                .map((element) => {
-                  const tag = element.tagName.toLowerCase();
-                  const role = element.getAttribute("role");
-                  const textContent = (element.innerText || element.textContent || "")
-                    .replace(/\\s+/g, " ")
-                    .trim()
-                    .slice(0, 200);
-                  const selectorHint =
-                    element.id
-                      ? `#${element.id}`
-                      : element.getAttribute("data-testid")
-                        ? `[data-testid="${element.getAttribute("data-testid")}"]`
-                        : element.getAttribute("name")
-                          ? `${tag}[name="${element.getAttribute("name")}"]`
-                          : tag;
-                  const style = window.getComputedStyle(element);
-                  return {
-                    tag,
-                    role,
-                    text: textContent || null,
-                    selector_hint: selectorHint,
-                    href: element.getAttribute("href"),
-                    input_type: element.getAttribute("type"),
-                    visible: style.display !== "none" && style.visibility !== "hidden"
-                  };
-                });
+              const compactText = (value) => (value || "").replace(/\\s+/g, " ").trim();
+
+              const sections = Array.from(document.querySelectorAll("main section, section, article"))
+                .slice(0, 20)
+                .map((element) => ({
+                  heading: compactText(
+                    element.querySelector("h1, h2, h3, h4, h5, h6")?.textContent || ""
+                  ) || null,
+                  text: compactText(element.textContent || "").slice(0, 400),
+                  selector_hint: selectorHint(element)
+                }));
+
+              const buttons = Array.from(document.querySelectorAll("button, [role='button'], input[type='submit'], input[type='button']"))
+                .slice(0, 25)
+                .map((element) => ({
+                  text: compactText(element.innerText || element.value || element.textContent || ""),
+                  selector_hint: selectorHint(element),
+                  role: element.getAttribute("role"),
+                  disabled: Boolean(element.disabled)
+                }));
+
+              const inputs = Array.from(document.querySelectorAll("input, textarea, select"))
+                .slice(0, 25)
+                .map((element) => ({
+                  name: element.getAttribute("name"),
+                  input_type: element.getAttribute("type") || element.tagName.toLowerCase(),
+                  placeholder: element.getAttribute("placeholder"),
+                  selector_hint: selectorHint(element),
+                  value: element.value || null
+                }));
+
+              const forms = Array.from(document.querySelectorAll("form"))
+                .slice(0, 10)
+                .map((form) => ({
+                  name: form.getAttribute("name") || form.getAttribute("id"),
+                  selector_hint: selectorHint(form),
+                  method: form.getAttribute("method"),
+                  action: form.getAttribute("action"),
+                  fields: Array.from(form.querySelectorAll("input, textarea, select"))
+                    .slice(0, 20)
+                    .map((field) => ({
+                      name: field.getAttribute("name"),
+                      field_type: field.getAttribute("type") || field.tagName.toLowerCase(),
+                      selector_hint: selectorHint(field)
+                    }))
+                }));
+
+              const tables = Array.from(document.querySelectorAll("table"))
+                .slice(0, 10)
+                .map((table) => ({
+                  selector_hint: selectorHint(table),
+                  headers: Array.from(table.querySelectorAll("thead th, tr th"))
+                    .slice(0, 20)
+                    .map((cell) => compactText(cell.textContent || "")),
+                  rows: Array.from(table.querySelectorAll("tbody tr, tr"))
+                    .slice(0, 10)
+                    .map((row) => Array.from(row.querySelectorAll("td"))
+                      .slice(0, 20)
+                      .map((cell) => compactText(cell.textContent || "")))
+                    .filter((row) => row.length > 0)
+                }));
 
               const links = Array.from(document.querySelectorAll("a[href]"))
-                .slice(0, 25)
-                .map((link) => link.href);
+                .slice(0, 30)
+                .map((link) => ({
+                  text: compactText(link.textContent || ""),
+                  href: link.href,
+                  selector_hint: selectorHint(link)
+                }));
 
               return {
                 url: window.location.href,
                 title: document.title || "",
-                text_excerpt: excerpt,
+                sections,
+                buttons,
+                inputs,
+                forms,
+                tables,
                 links,
-                elements
               };
             }
             """
         )
-        return PageData(
+        return StructuredPageModel(
             url=snapshot["url"],
             title=snapshot["title"],
-            text_excerpt=snapshot["text_excerpt"],
-            links=list(snapshot["links"]),
-            elements=[PageElement(**element) for element in snapshot["elements"]],
+            sections=[PageSection(**section) for section in snapshot["sections"]],
+            buttons=[PageButton(**button) for button in snapshot["buttons"]],
+            inputs=[PageInput(**item) for item in snapshot["inputs"]],
+            forms=[
+                PageForm(
+                    name=form["name"],
+                    selector_hint=form["selector_hint"],
+                    method=form["method"],
+                    action=form["action"],
+                    fields=[PageFormField(**field) for field in form["fields"]],
+                )
+                for form in snapshot["forms"]
+            ],
+            tables=[PageTable(**table) for table in snapshot["tables"]],
+            links=[PageLink(**link) for link in snapshot["links"]],
         )
 
 

@@ -7,9 +7,15 @@ from synapse.models.browser import (
     ClickRequest,
     ExtractionResult,
     ExtractRequest,
+    FindElementRequest,
+    InspectRequest,
+    LayoutRequest,
+    PageElementMatch,
+    PageInspection,
     OpenRequest,
     ScreenshotRequest,
     ScreenshotResult,
+    StructuredPageModel,
     TypeRequest,
 )
 from synapse.models.events import EventType, RuntimeEvent
@@ -103,6 +109,30 @@ async def screenshot(
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> ScreenshotResult:
     return await orchestrator.screenshot(request)
+
+
+@router.post("/browser/layout", response_model=StructuredPageModel)
+async def get_layout(
+    request: LayoutRequest,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> StructuredPageModel:
+    return await orchestrator.get_layout(request)
+
+
+@router.post("/browser/find", response_model=list[PageElementMatch])
+async def find_element(
+    request: FindElementRequest,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> list[PageElementMatch]:
+    return await orchestrator.find_element(request)
+
+
+@router.post("/browser/inspect", response_model=PageInspection)
+async def inspect(
+    request: InspectRequest,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> PageInspection:
+    return await orchestrator.inspect(request)
 
 
 @router.post("/agents", response_model=AgentDefinition)

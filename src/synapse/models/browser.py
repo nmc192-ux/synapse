@@ -1,27 +1,83 @@
 from pydantic import BaseModel, Field, HttpUrl
 
 
-class PageElement(BaseModel):
-    tag: str
-    role: str | None = None
-    text: str | None = None
+class PageSection(BaseModel):
+    heading: str | None = None
+    text: str = ""
     selector_hint: str | None = None
-    href: str | None = None
+
+
+class PageButton(BaseModel):
+    text: str = ""
+    selector_hint: str | None = None
+    role: str | None = None
+    disabled: bool = False
+
+
+class PageInput(BaseModel):
+    name: str | None = None
     input_type: str | None = None
-    visible: bool = True
+    placeholder: str | None = None
+    selector_hint: str | None = None
+    value: str | None = None
 
 
-class PageData(BaseModel):
-    url: str
+class PageFormField(BaseModel):
+    name: str | None = None
+    field_type: str | None = None
+    selector_hint: str | None = None
+
+
+class PageForm(BaseModel):
+    name: str | None = None
+    selector_hint: str | None = None
+    method: str | None = None
+    action: str | None = None
+    fields: list[PageFormField] = Field(default_factory=list)
+
+
+class PageTable(BaseModel):
+    selector_hint: str | None = None
+    headers: list[str] = Field(default_factory=list)
+    rows: list[list[str]] = Field(default_factory=list)
+
+
+class PageLink(BaseModel):
+    text: str = ""
+    href: str | None = None
+    selector_hint: str | None = None
+
+
+class PageElementMatch(BaseModel):
+    element_type: str
+    text: str
+    selector_hint: str | None = None
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class PageInspection(BaseModel):
+    selector: str
+    text: str | None = None
+    html_tag: str | None = None
+    attributes: dict[str, str] = Field(default_factory=dict)
+    is_visible: bool = True
+    bounding_box: dict[str, float] | None = None
+
+
+class StructuredPageModel(BaseModel):
     title: str
-    text_excerpt: str = ""
-    links: list[str] = Field(default_factory=list)
-    elements: list[PageElement] = Field(default_factory=list)
+    url: str
+    sections: list[PageSection] = Field(default_factory=list)
+    buttons: list[PageButton] = Field(default_factory=list)
+    inputs: list[PageInput] = Field(default_factory=list)
+    forms: list[PageForm] = Field(default_factory=list)
+    tables: list[PageTable] = Field(default_factory=list)
+    links: list[PageLink] = Field(default_factory=list)
 
 
 class BrowserState(BaseModel):
     session_id: str
-    page: PageData
+    page: StructuredPageModel
     metadata: dict[str, object] = Field(default_factory=dict)
 
 
@@ -51,6 +107,21 @@ class ScreenshotRequest(BaseModel):
     session_id: str
 
 
+class LayoutRequest(BaseModel):
+    session_id: str
+
+
+class FindElementRequest(BaseModel):
+    session_id: str
+    type: str
+    text: str
+
+
+class InspectRequest(BaseModel):
+    session_id: str
+    selector: str
+
+
 class ExtractedElement(BaseModel):
     selector: str
     text: str | None = None
@@ -62,11 +133,11 @@ class ExtractedElement(BaseModel):
 class ExtractionResult(BaseModel):
     session_id: str
     matches: list[ExtractedElement] = Field(default_factory=list)
-    page: PageData
+    page: StructuredPageModel
 
 
 class ScreenshotResult(BaseModel):
     session_id: str
     image_base64: str
     format: str = "png"
-    page: PageData
+    page: StructuredPageModel

@@ -2,7 +2,7 @@ from fastapi.testclient import TestClient
 
 from synapse.main import app
 from synapse.models.a2a import A2AEnvelope, A2AMessageType
-from synapse.models.browser import BrowserState, PageData
+from synapse.models.browser import BrowserState, PageButton, PageLink, PageSection, StructuredPageModel
 from synapse.models.loop import AgentAction, AgentActionType
 from synapse.models.memory import MemorySearchRequest, MemoryStoreRequest, MemoryType
 from synapse.models.plugin import ToolDescriptor
@@ -20,10 +20,12 @@ def test_healthcheck() -> None:
 def test_browser_state_serialization() -> None:
     state = BrowserState(
         session_id="session-1",
-        page=PageData(
+        page=StructuredPageModel(
             url="https://example.com",
             title="Example",
-            text_excerpt="Structured page summary",
+            sections=[PageSection(heading="Overview", text="Structured page summary")],
+            buttons=[PageButton(text="Continue", selector_hint="button")],
+            links=[PageLink(text="Docs", href="https://example.com/docs", selector_hint="a")],
         ),
     )
     assert state.model_dump()["page"]["title"] == "Example"
@@ -63,6 +65,17 @@ def test_sdk_client_exposes_browser() -> None:
     client = SynapseClient("http://127.0.0.1:8000")
     assert client.browser is not None
     client.close()
+
+
+def test_structured_page_model_has_sections_and_buttons() -> None:
+    page = StructuredPageModel(
+        title="Dashboard",
+        url="https://example.com",
+        sections=[PageSection(heading="Hero", text="Welcome")],
+        buttons=[PageButton(text="Launch", selector_hint="button.launch")],
+    )
+    assert page.sections[0].heading == "Hero"
+    assert page.buttons[0].text == "Launch"
 
 
 def test_task_create_request_defaults() -> None:

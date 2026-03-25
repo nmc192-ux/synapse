@@ -8,9 +8,15 @@ from synapse.models.browser import (
     ClickRequest,
     ExtractionResult,
     ExtractRequest,
+    FindElementRequest,
+    InspectRequest,
+    LayoutRequest,
     OpenRequest,
+    PageElementMatch,
+    PageInspection,
     ScreenshotRequest,
     ScreenshotResult,
+    StructuredPageModel,
     TypeRequest,
 )
 from synapse.models.message import AgentMessage
@@ -122,6 +128,24 @@ class SynapseBrowser:
         response = self._client._http.post("/api/browser/screenshot", json=payload.model_dump(mode="json"))
         response.raise_for_status()
         return ScreenshotResult.model_validate(response.json())
+
+    def get_layout(self) -> StructuredPageModel:
+        payload = LayoutRequest(session_id=self.session_id)
+        response = self._client._http.post("/api/browser/layout", json=payload.model_dump(mode="json"))
+        response.raise_for_status()
+        return StructuredPageModel.model_validate(response.json())
+
+    def find_element(self, type: str, text: str) -> list[PageElementMatch]:
+        payload = FindElementRequest(session_id=self.session_id, type=type, text=text)
+        response = self._client._http.post("/api/browser/find", json=payload.model_dump(mode="json"))
+        response.raise_for_status()
+        return [PageElementMatch.model_validate(item) for item in response.json()]
+
+    def inspect(self, selector: str) -> PageInspection:
+        payload = InspectRequest(session_id=self.session_id, selector=selector)
+        response = self._client._http.post("/api/browser/inspect", json=payload.model_dump(mode="json"))
+        response.raise_for_status()
+        return PageInspection.model_validate(response.json())
 
     def call_tool(self, tool_name: str, arguments: dict[str, object] | None = None) -> dict[str, object]:
         return self._client.call_tool(tool_name, arguments)

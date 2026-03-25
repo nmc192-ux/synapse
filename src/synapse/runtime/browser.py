@@ -71,18 +71,21 @@ class BrowserRuntime:
         page = self._require_page(session_id)
         await page.goto(url)
         await page.wait_for_load_state("domcontentloaded")
+        await self._stabilize_page(page)
         return BrowserState(session_id=session_id, page=await self._snapshot_page(page))
 
     async def click(self, session_id: str, selector: str) -> BrowserState:
         page = self._require_page(session_id)
         await page.locator(selector).first.click()
         await page.wait_for_load_state("domcontentloaded")
+        await self._stabilize_page(page)
         return BrowserState(session_id=session_id, page=await self._snapshot_page(page))
 
     async def type(self, session_id: str, selector: str, text: str) -> BrowserState:
         page = self._require_page(session_id)
         locator = page.locator(selector).first
         await locator.fill(text)
+        await self._stabilize_page(page)
         return BrowserState(
             session_id=session_id,
             page=await self._snapshot_page(page),
@@ -120,6 +123,7 @@ class BrowserRuntime:
 
     async def screenshot(self, session_id: str) -> ScreenshotResult:
         page = self._require_page(session_id)
+        await self._stabilize_page(page)
         image_bytes = await page.screenshot(full_page=True, type="png")
         return ScreenshotResult(
             session_id=session_id,
@@ -129,6 +133,7 @@ class BrowserRuntime:
 
     async def get_layout(self, session_id: str) -> StructuredPageModel:
         page = self._require_page(session_id)
+        await self._stabilize_page(page)
         return await self._snapshot_page(page)
 
     async def find_element(self, session_id: str, element_type: str, text: str) -> list[PageElementMatch]:
@@ -258,6 +263,18 @@ class BrowserRuntime:
         snapshot = await page.evaluate(
             """
             () => {
+              const LIMITS = {
+                sections: 24,
+                buttons: 32,
+                inputs: 32,
+                forms: 12,
+                tables: 12,
+                links: 40,
+                tableHeaders: 20,
+                tableRows: 12,
+                formFields: 20,
+              };
+
               const selectorHint = (element) => {
                 const tag = element.tagName.toLowerCase();
                 if (element.id) return `#${element.id}`;
@@ -274,74 +291,172 @@ class BrowserRuntime:
               };
 
               const compactText = (value) => (value || "").replace(/\\s+/g, " ").trim();
+              const seen = {
+                sections: new Set(),
+                buttons: new Set(),
+                inputs: new Set(),
+                forms: new Set(),
+                tables: new Set(),
+                links: new Set(),
+              };
 
-              const sections = Array.from(document.querySelectorAll("main section, section, article"))
-                .slice(0, 20)
-                .map((element) => ({
-                  heading: compactText(
-                    element.querySelector("h1, h2, h3, h4, h5, h6")?.textContent || ""
-                  ) || null,
-                  text: compactText(element.textContent || "").slice(0, 400),
-                  selector_hint: selectorHint(element)
-                }));
+              const sections = [];
+              const buttons = [];
+              const inputs = [];
+              const forms = [];
+              const tables = [];
+              const links = [];
 
-              const buttons = Array.from(document.querySelectorAll("button, [role='button'], input[type='submit'], input[type='button']"))
-                .slice(0, 25)
-                .map((element) => ({
-                  text: compactText(element.innerText || element.value || element.textContent || ""),
-                  selector_hint: selectorHint(element),
-                  role: element.getAttribute("role"),
-                  disabled: Boolean(element.disabled)
-                }));
+              const addUnique = (bucket, key, collection, entry, limit) => {
+                if (!key || seen[bucket].has(key) || collection.length >= limit) {
+                  return;
+                }
+                seen[bucket].add(key);
+                collection.push(entry);
+              };
 
-              const inputs = Array.from(document.querySelectorAll("input, textarea, select"))
-                .slice(0, 25)
-                .map((element) => ({
-                  name: element.getAttribute("name"),
-                  input_type: element.getAttribute("type") || element.tagName.toLowerCase(),
-                  placeholder: element.getAttribute("placeholder"),
-                  selector_hint: selectorHint(element),
-                  value: element.value || null
-                }));
+              const roots = [];
+              const collectRoots = (root, prefix = "") => {
+                roots.push({ root, prefix });
 
-              const forms = Array.from(document.querySelectorAll("form"))
-                .slice(0, 10)
-                .map((form) => ({
-                  name: form.getAttribute("name") || form.getAttribute("id"),
-                  selector_hint: selectorHint(form),
-                  method: form.getAttribute("method"),
-                  action: form.getAttribute("action"),
-                  fields: Array.from(form.querySelectorAll("input, textarea, select"))
-                    .slice(0, 20)
-                    .map((field) => ({
-                      name: field.getAttribute("name"),
-                      field_type: field.getAttribute("type") || field.tagName.toLowerCase(),
-                      selector_hint: selectorHint(field)
-                    }))
-                }));
+                for (const element of Array.from(root.querySelectorAll("*"))) {
+                  if (element.shadowRoot) {
+                    const shadowPrefix = prefix ? `${prefix} >> shadow(${selectorHint(element)})` : `shadow(${selectorHint(element)})`;
+                    collectRoots(element.shadowRoot, shadowPrefix);
+                  }
 
-              const tables = Array.from(document.querySelectorAll("table"))
-                .slice(0, 10)
-                .map((table) => ({
-                  selector_hint: selectorHint(table),
-                  headers: Array.from(table.querySelectorAll("thead th, tr th"))
-                    .slice(0, 20)
-                    .map((cell) => compactText(cell.textContent || "")),
-                  rows: Array.from(table.querySelectorAll("tbody tr, tr"))
-                    .slice(0, 10)
-                    .map((row) => Array.from(row.querySelectorAll("td"))
-                      .slice(0, 20)
-                      .map((cell) => compactText(cell.textContent || "")))
-                    .filter((row) => row.length > 0)
-                }));
+                  if (element.tagName?.toLowerCase() === "iframe") {
+                    try {
+                      const frameDoc = element.contentDocument;
+                      if (frameDoc?.documentElement) {
+                        const framePrefix = prefix ? `${prefix} >> iframe(${selectorHint(element)})` : `iframe(${selectorHint(element)})`;
+                        collectRoots(frameDoc, framePrefix);
+                      }
+                    } catch (_error) {
+                      // Cross-origin frames cannot be traversed from the page context.
+                    }
+                  }
+                }
+              };
 
-              const links = Array.from(document.querySelectorAll("a[href]"))
-                .slice(0, 30)
-                .map((link) => ({
-                  text: compactText(link.textContent || ""),
-                  href: link.href,
-                  selector_hint: selectorHint(link)
-                }));
+              const scopedSelector = (prefix, element) => {
+                const base = selectorHint(element);
+                return prefix ? `${prefix} >> ${base}` : base;
+              };
+
+              collectRoots(document);
+
+              for (const { root, prefix } of roots) {
+                for (const element of Array.from(root.querySelectorAll("main section, section, article")).slice(0, LIMITS.sections)) {
+                  const key = scopedSelector(prefix, element);
+                  addUnique(
+                    "sections",
+                    key,
+                    sections,
+                    {
+                      heading: compactText(
+                        element.querySelector("h1, h2, h3, h4, h5, h6")?.textContent || ""
+                      ) || null,
+                      text: compactText(element.textContent || "").slice(0, 400),
+                      selector_hint: key
+                    },
+                    LIMITS.sections
+                  );
+                }
+
+                for (const element of Array.from(root.querySelectorAll("button, [role='button'], input[type='submit'], input[type='button']")).slice(0, LIMITS.buttons)) {
+                  const key = scopedSelector(prefix, element);
+                  addUnique(
+                    "buttons",
+                    key,
+                    buttons,
+                    {
+                      text: compactText(element.innerText || element.value || element.textContent || ""),
+                      selector_hint: key,
+                      role: element.getAttribute("role"),
+                      disabled: Boolean(element.disabled)
+                    },
+                    LIMITS.buttons
+                  );
+                }
+
+                for (const element of Array.from(root.querySelectorAll("input, textarea, select")).slice(0, LIMITS.inputs)) {
+                  const key = scopedSelector(prefix, element);
+                  addUnique(
+                    "inputs",
+                    key,
+                    inputs,
+                    {
+                      name: element.getAttribute("name"),
+                      input_type: element.getAttribute("type") || element.tagName.toLowerCase(),
+                      placeholder: element.getAttribute("placeholder"),
+                      selector_hint: key,
+                      value: element.value || null
+                    },
+                    LIMITS.inputs
+                  );
+                }
+
+                for (const form of Array.from(root.querySelectorAll("form")).slice(0, LIMITS.forms)) {
+                  const key = scopedSelector(prefix, form);
+                  addUnique(
+                    "forms",
+                    key,
+                    forms,
+                    {
+                      name: form.getAttribute("name") || form.getAttribute("id"),
+                      selector_hint: key,
+                      method: form.getAttribute("method"),
+                      action: form.getAttribute("action"),
+                      fields: Array.from(form.querySelectorAll("input, textarea, select"))
+                        .slice(0, LIMITS.formFields)
+                        .map((field) => ({
+                          name: field.getAttribute("name"),
+                          field_type: field.getAttribute("type") || field.tagName.toLowerCase(),
+                          selector_hint: scopedSelector(prefix, field)
+                        }))
+                    },
+                    LIMITS.forms
+                  );
+                }
+
+                for (const table of Array.from(root.querySelectorAll("table")).slice(0, LIMITS.tables)) {
+                  const key = scopedSelector(prefix, table);
+                  addUnique(
+                    "tables",
+                    key,
+                    tables,
+                    {
+                      selector_hint: key,
+                      headers: Array.from(table.querySelectorAll("thead th, tr th"))
+                        .slice(0, LIMITS.tableHeaders)
+                        .map((cell) => compactText(cell.textContent || "")),
+                      rows: Array.from(table.querySelectorAll("tbody tr, tr"))
+                        .slice(0, LIMITS.tableRows)
+                        .map((row) => Array.from(row.querySelectorAll("td"))
+                          .slice(0, LIMITS.tableHeaders)
+                          .map((cell) => compactText(cell.textContent || "")))
+                        .filter((row) => row.length > 0)
+                    },
+                    LIMITS.tables
+                  );
+                }
+
+                for (const link of Array.from(root.querySelectorAll("a[href]")).slice(0, LIMITS.links)) {
+                  const key = `${scopedSelector(prefix, link)}:${link.href}`;
+                  addUnique(
+                    "links",
+                    key,
+                    links,
+                    {
+                      text: compactText(link.textContent || ""),
+                      href: link.href,
+                      selector_hint: scopedSelector(prefix, link)
+                    },
+                    LIMITS.links
+                  );
+                }
+              }
 
               return {
                 url: window.location.href,
@@ -375,6 +490,53 @@ class BrowserRuntime:
             tables=[PageTable(**table) for table in snapshot["tables"]],
             links=[PageLink(**link) for link in snapshot["links"]],
         )
+
+    async def _stabilize_page(self, page: Page) -> None:
+        try:
+            await page.wait_for_load_state("networkidle", timeout=1000)
+        except Exception:
+            pass
+
+        try:
+            await page.evaluate(
+                """
+                async () => {
+                  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+                  let lastMutation = Date.now();
+                  const observer = new MutationObserver(() => {
+                    lastMutation = Date.now();
+                  });
+                  observer.observe(document, {
+                    subtree: true,
+                    childList: true,
+                    attributes: true,
+                    characterData: true,
+                  });
+
+                  const maxScroll = Math.max(
+                    document.body?.scrollHeight || 0,
+                    document.documentElement?.scrollHeight || 0
+                  );
+                  const viewport = window.innerHeight || 800;
+                  for (let offset = 0; offset <= maxScroll; offset += Math.max(200, Math.floor(viewport * 0.75))) {
+                    window.scrollTo({ top: offset, behavior: "auto" });
+                    await wait(100);
+                  }
+                  window.scrollTo({ top: 0, behavior: "auto" });
+
+                  for (let index = 0; index < 8; index += 1) {
+                    await wait(100);
+                    if (Date.now() - lastMutation >= 250) {
+                      break;
+                    }
+                  }
+
+                  observer.disconnect();
+                }
+                """
+            )
+        except Exception:
+            pass
 
 
 @asynccontextmanager

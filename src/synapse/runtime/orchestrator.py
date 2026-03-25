@@ -16,11 +16,13 @@ from synapse.models.events import EventType, RuntimeEvent
 from synapse.models.message import AgentMessage
 from synapse.models.plugin import PluginDescriptor, PluginReloadRequest, ToolDescriptor
 from synapse.models.task import ExtractionRequest, NavigationRequest, TaskRequest, TaskResult, TaskStatus
+from synapse.models.task import TaskClaimRequest, TaskCreateRequest, TaskRecord, TaskUpdateRequest
 from synapse.runtime.browser import BrowserRuntime
 from synapse.runtime.messaging import AgentMessageBus
 from synapse.runtime.a2a import A2AHub
 from synapse.runtime.registry import AgentRegistry
 from synapse.runtime.session import BrowserSession
+from synapse.runtime.task_manager import TaskExecutionManager
 from synapse.runtime.tools import ToolRegistry
 from synapse.transports.websocket_manager import WebSocketManager
 
@@ -33,6 +35,7 @@ class RuntimeOrchestrator:
         tools: ToolRegistry,
         messages: AgentMessageBus,
         a2a: A2AHub,
+        task_manager: TaskExecutionManager,
         sockets: WebSocketManager,
     ) -> None:
         self.browser = browser
@@ -40,6 +43,7 @@ class RuntimeOrchestrator:
         self.tools = tools
         self.messages = messages
         self.a2a = a2a
+        self.task_manager = task_manager
         self.sockets = sockets
 
     async def create_session(self, session_id: str | None = None) -> BrowserSession:
@@ -188,6 +192,18 @@ class RuntimeOrchestrator:
             )
         )
         return response
+
+    async def create_task_record(self, request: TaskCreateRequest) -> TaskRecord:
+        return await self.task_manager.create_task(request)
+
+    async def claim_task(self, task_id: str, request: TaskClaimRequest) -> TaskRecord:
+        return await self.task_manager.claim_task(task_id, request)
+
+    async def update_task_record(self, task_id: str, request: TaskUpdateRequest) -> TaskRecord:
+        return await self.task_manager.update_task(task_id, request)
+
+    async def list_active_tasks(self) -> list[TaskRecord]:
+        return await self.task_manager.list_active_tasks()
 
     async def execute_task(self, request: TaskRequest) -> TaskResult:
         if request.session_id is None:

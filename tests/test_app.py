@@ -5,7 +5,7 @@ from synapse.models.a2a import A2AEnvelope, A2AMessageType
 from synapse.models.browser import BrowserState, PageData
 from synapse.models.loop import AgentAction, AgentActionType
 from synapse.models.plugin import ToolDescriptor
-from synapse.models.task import TaskRequest
+from synapse.models.task import TaskCreateRequest, TaskRequest, TaskStatus
 from synapse.sdk import SynapseClient
 
 
@@ -62,3 +62,11 @@ def test_sdk_client_exposes_browser() -> None:
     client = SynapseClient("http://127.0.0.1:8000")
     assert client.browser is not None
     client.close()
+
+
+def test_task_create_request_defaults() -> None:
+    task = TaskCreateRequest(goal="Review active runtime tasks")
+    assert task.goal == "Review active runtime tasks"
+    assert task.constraints == {}
+    assert task.assigned_agent is None
+    assert TaskStatus.CLAIMED == "claimed"

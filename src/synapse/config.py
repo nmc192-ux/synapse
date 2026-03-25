@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     port: int = 8000
     browser_headless: bool = True
     browser_channel: str | None = Field(default=None)
+    postgres_dsn: str = "postgresql://postgres:postgres@localhost:5432/synapse"
     plugin_packages: list[str] = Field(default_factory=lambda: ["synapse.plugins"])
     plugin_modules: list[str] = Field(default_factory=list)
 

@@ -1,3 +1,5 @@
+import uuid
+from datetime import datetime, timezone
 from enum import Enum
 
 from pydantic import BaseModel, Field, HttpUrl
@@ -8,6 +10,7 @@ from synapse.models.loop import AgentAction
 
 class TaskStatus(str, Enum):
     PENDING = "pending"
+    CLAIMED = "claimed"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -48,3 +51,31 @@ class TaskResult(BaseModel):
 
 
 BrowserArtifact = BrowserState | ExtractionResult | ScreenshotResult
+
+
+class TaskRecord(BaseModel):
+    id: str
+    goal: str
+    constraints: dict[str, object] = Field(default_factory=dict)
+    status: TaskStatus = TaskStatus.PENDING
+    assigned_agent: str | None = None
+    result: dict[str, object] = Field(default_factory=dict)
+    timestamp: datetime
+
+
+class TaskCreateRequest(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    goal: str
+    constraints: dict[str, object] = Field(default_factory=dict)
+    assigned_agent: str | None = None
+
+
+class TaskClaimRequest(BaseModel):
+    assigned_agent: str
+
+
+class TaskUpdateRequest(BaseModel):
+    status: TaskStatus
+    assigned_agent: str | None = None
+    result: dict[str, object] = Field(default_factory=dict)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

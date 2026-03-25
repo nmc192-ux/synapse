@@ -9,6 +9,7 @@ from synapse.runtime.browser import BrowserRuntime
 from synapse.runtime.messaging import AgentMessageBus
 from synapse.runtime.orchestrator import RuntimeOrchestrator
 from synapse.runtime.registry import AgentRegistry
+from synapse.runtime.task_manager import TaskExecutionManager
 from synapse.runtime.tools import ToolRegistry
 from synapse.transports.websocket_manager import WebSocketManager
 
@@ -19,12 +20,14 @@ tool_registry = ToolRegistry()
 message_bus = AgentMessageBus()
 websocket_manager = WebSocketManager()
 a2a_hub = A2AHub(agent_registry)
+task_manager = TaskExecutionManager()
 orchestrator = RuntimeOrchestrator(
     browser=browser_runtime,
     agents=agent_registry,
     tools=tool_registry,
     messages=message_bus,
     a2a=a2a_hub,
+    task_manager=task_manager,
     sockets=websocket_manager,
 )
 a2a_hub.set_task_executor(orchestrator.execute_task)
@@ -44,9 +47,11 @@ tool_registry.load_plugins(
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await browser_runtime.start()
+    await task_manager.start()
     try:
         yield
     finally:
+        await task_manager.stop()
         await browser_runtime.stop()
 
 

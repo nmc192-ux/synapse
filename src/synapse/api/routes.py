@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 
 from synapse.models.a2a import A2AEnvelope, AgentPresence
 from synapse.models.agent import AgentDefinition
@@ -15,7 +15,16 @@ from synapse.models.browser import (
 from synapse.models.events import EventType, RuntimeEvent
 from synapse.models.message import AgentMessage
 from synapse.models.plugin import PluginDescriptor, PluginReloadRequest, ToolDescriptor
-from synapse.models.task import ExtractionRequest, NavigationRequest, TaskRequest, ToolCallRequest
+from synapse.models.task import (
+    ExtractionRequest,
+    NavigationRequest,
+    TaskClaimRequest,
+    TaskCreateRequest,
+    TaskRecord,
+    TaskRequest,
+    TaskUpdateRequest,
+    ToolCallRequest,
+)
 from synapse.runtime.orchestrator import RuntimeOrchestrator
 from synapse.runtime.session import BrowserSession
 
@@ -168,6 +177,47 @@ async def execute_task(
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ):
     return await orchestrator.execute_task(request)
+
+
+@router.post("/tasks/create", response_model=TaskRecord)
+async def create_task(
+    request: TaskCreateRequest,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> TaskRecord:
+    return await orchestrator.create_task_record(request)
+
+
+@router.post("/tasks/{task_id}/claim", response_model=TaskRecord)
+async def claim_task(
+    task_id: str,
+    request: TaskClaimRequest,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> TaskRecord:
+    try:
+        return await orchestrator.claim_task(task_id, request)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/tasks/{task_id}/update", response_model=TaskRecord)
+async def update_task(
+    task_id: str,
+    request: TaskUpdateRequest,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> TaskRecord:
+    try:
+        return await orchestrator.update_task_record(task_id, request)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/tasks/active", response_model=list[TaskRecord])
+async def list_active_tasks(
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> list[TaskRecord]:
+    return await orchestrator.list_active_tasks()
 
 
 @router.websocket("/ws")

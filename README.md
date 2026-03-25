@@ -32,6 +32,7 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e .
 playwright install chromium
+export SYNAPSE_POSTGRES_DSN=postgresql://postgres:postgres@localhost:5432/synapse
 uvicorn synapse.main:app --reload
 ```
 
@@ -73,3 +74,13 @@ npm run dev
 The UI renders a Synapse operator dashboard with agent activity, page view, thoughts,
 actions log, memory, and agent communication. It listens to `NEXT_PUBLIC_SYNAPSE_WS_URL`
 and defaults to `ws://127.0.0.1:8000/api/ws`.
+
+## Task Execution API
+
+Synapse now includes a PostgreSQL-backed task manager for task creation, claiming,
+progress updates, and result submission.
+
+- `POST /api/tasks/create`
+- `POST /api/tasks/{task_id}/claim`
+- `POST /api/tasks/{task_id}/update`
+- `GET /api/tasks/active`

@@ -40,6 +40,8 @@ class EventType(str, Enum):
     BROWSER_ERROR = "browser.error"
     SESSION_EXPIRED = "session.expired"
     MEMORY_COMPRESSED = "memory.compressed"
+    RUNTIME_EVENTS_COMPRESSED = "runtime.events.compressed"
+    A2A_MESSAGE_COMPRESSED = "a2a.message.compressed"
 
 
 class EventSeverity(str, Enum):

@@ -1,12 +1,15 @@
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import WebSocket
 
 from synapse.models.a2a import A2AEnvelope, A2AMessageType, AgentPresence, AgentRegistrationRequest, AgentWireMessage
 from synapse.models.agent import AgentDefinition, AgentDiscoveryEntry, AgentKind
 from synapse.models.runtime_event import EventType, RuntimeEvent
+from synapse.runtime.compression.base import CompressionProvider
+from synapse.runtime.compression.noop import NoOpCompressionProvider
 from synapse.models.runtime_state import AgentRuntimeStatus, ConnectionState
 from synapse.models.task import TaskRequest, TaskResult
 from synapse.runtime.registry import AgentRegistry
@@ -23,6 +26,7 @@ class A2AHub:
         agents: AgentRegistry,
         state_store: RuntimeStateStore | None = None,
         sockets: WebSocketManager | None = None,
+        compression_provider: CompressionProvider | None = None,
     ) -> None:
         self.agents = agents
         self._connections: dict[str, WebSocket] = {}
@@ -30,12 +34,16 @@ class A2AHub:
         self._task_executor: TaskExecutor | None = None
         self._state_store = state_store
         self._sockets = sockets
+        self._compression_provider = compression_provider or NoOpCompressionProvider()
 
     def set_state_store(self, state_store: RuntimeStateStore) -> None:
         self._state_store = state_store
 
     def set_sockets(self, sockets: WebSocketManager) -> None:
         self._sockets = sockets
+
+    def set_compression_provider(self, compression_provider: CompressionProvider | None) -> None:
+        self._compression_provider = compression_provider or NoOpCompressionProvider()
 
     def set_task_executor(self, executor: TaskExecutor) -> None:
         self._task_executor = executor
@@ -156,6 +164,7 @@ class A2AHub:
 
         await websocket.send_json(self.to_wire_message(envelope).model_dump(mode="json"))
         await self.heartbeat(envelope.recipient_agent_id)
+        await self._emit_compact_message(envelope)
 
     def to_wire_message(self, envelope: A2AEnvelope) -> AgentWireMessage:
         target_agent = envelope.recipient_agent_id
@@ -229,7 +238,90 @@ class A2AHub:
                 message=str(exc),
             )
             await self.send(error)
-            return error
+        return error
+
+    async def _emit_compact_message(self, envelope: A2AEnvelope) -> None:
+        if self._sockets is None:
+            return
+        compact_payload = await self._build_compact_payload(envelope)
+        await self._sockets.broadcast(
+            RuntimeEvent(
+                event_type=EventType.A2A_MESSAGE_COMPRESSED,
+                agent_id=envelope.sender_agent_id,
+                task_id=self._task_id_from_payload(envelope.payload),
+                source="a2a_runtime",
+                payload={
+                    "message_id": envelope.message_id,
+                    "type": envelope.type.value,
+                    "sender_agent_id": envelope.sender_agent_id,
+                    "recipient_agent_id": envelope.recipient_agent_id,
+                    "compact_payload": compact_payload,
+                    "correlation_id": envelope.correlation_id,
+                },
+                correlation_id=envelope.correlation_id or envelope.message_id,
+            )
+        )
+
+    async def _build_compact_payload(self, envelope: A2AEnvelope) -> dict[str, Any]:
+        payload = dict(envelope.payload)
+        if envelope.type in {A2AMessageType.DELEGATE, A2AMessageType.REQUEST_TASK}:
+            task = payload.get("task")
+            if isinstance(task, dict):
+                return {
+                    "mode": "delegation-summary",
+                    "task_id": task.get("task_id"),
+                    "goal": str(task.get("goal", ""))[:160],
+                    "agent_id": task.get("agent_id"),
+                    "action_count": len(task.get("actions", []) or []),
+                }
+        if envelope.type in {A2AMessageType.TASK_RESULT, A2AMessageType.TASK_RESULT_LEGACY}:
+            task = payload.get("task")
+            if isinstance(task, dict):
+                return {
+                    "mode": "task-result-summary",
+                    "task_id": task.get("task_id"),
+                    "status": task.get("status"),
+                    "success": task.get("success"),
+                }
+        if envelope.type in {A2AMessageType.DISCOVER_RESPONSE, A2AMessageType.DISCOVER, A2AMessageType.DISCOVER_AGENTS}:
+            return {
+                "mode": "status-summary",
+                "agent_count": len(payload.get("agents", []) or []),
+                "message_type": envelope.type.value,
+            }
+        if self._requires_exact_fidelity(envelope.type):
+            return {
+                "mode": "exact-fidelity-preserved",
+                "keys": sorted(payload.keys()),
+            }
+        return await self._compression_provider.compress_json(
+            payload,
+            context={
+                "message_type": envelope.type.value,
+                "sender_agent_id": envelope.sender_agent_id,
+                "recipient_agent_id": envelope.recipient_agent_id,
+                "channel": "a2a",
+            },
+        )
+
+    @staticmethod
+    def _requires_exact_fidelity(message_type: A2AMessageType) -> bool:
+        return message_type in {
+            A2AMessageType.REQUEST,
+            A2AMessageType.RESPONSE,
+            A2AMessageType.DELEGATE,
+            A2AMessageType.REQUEST_TASK,
+            A2AMessageType.TASK_RESULT,
+            A2AMessageType.TASK_RESULT_LEGACY,
+        }
+
+    @staticmethod
+    def _task_id_from_payload(payload: dict[str, object]) -> str | None:
+        task = payload.get("task")
+        if isinstance(task, dict):
+            task_id = task.get("task_id")
+            return str(task_id) if task_id is not None else None
+        return None
 
     async def register_connection(self, agent_id: str, metadata: dict[str, object]) -> ConnectionState:
         if agent_id not in {agent.agent_id for agent in self.agents.list()}:

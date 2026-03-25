@@ -22,19 +22,24 @@ from synapse.transports.websocket_manager import WebSocketManager
 
 
 runtime_state_store = InMemoryRuntimeStateStore()
+compression_provider = create_compression_provider(settings)
 browser_runtime = BrowserRuntime(state_store=runtime_state_store)
 agent_registry = AgentRegistry(state_store=runtime_state_store)
 tool_registry = ToolRegistry()
 message_bus = AgentMessageBus()
-websocket_manager = WebSocketManager(state_store=runtime_state_store)
-a2a_hub = A2AHub(agent_registry, state_store=runtime_state_store, sockets=websocket_manager)
+websocket_manager = WebSocketManager(state_store=runtime_state_store, compression_provider=compression_provider)
+a2a_hub = A2AHub(
+    agent_registry,
+    state_store=runtime_state_store,
+    sockets=websocket_manager,
+    compression_provider=compression_provider,
+)
 memory_manager = AgentMemoryManager()
 task_manager = TaskExecutionManager()
 sandbox = AgentSecuritySandbox(agent_registry)
 safety = AgentSafetyLayer()
 budget_manager = AgentBudgetManager()
 llm_provider = create_llm_provider(settings)
-compression_provider = create_compression_provider(settings)
 orchestrator = RuntimeOrchestrator(
     browser=browser_runtime,
     agents=agent_registry,

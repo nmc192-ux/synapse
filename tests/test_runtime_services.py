@@ -231,3 +231,24 @@ def test_browser_service_open_delegates_and_emits_navigation() -> None:
             assert third.event_type == EventType.SPM_COMPRESSED
 
     asyncio.run(scenario())
+
+
+def test_event_bus_emits_compressed_summary_for_repetitive_events() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        sockets = WebSocketManager(state_store=store, compression_provider=_StubCompressionProvider())
+        bus = EventBus(sockets, compression_provider=_StubCompressionProvider())
+
+        async with bus.subscribe("subscriber") as queue:
+            await bus.emit(EventType.BUDGET_UPDATED, agent_id="agent-1", payload={"steps_used": 1})
+            await bus.emit(EventType.BUDGET_UPDATED, agent_id="agent-1", payload={"steps_used": 2})
+            await bus.emit(EventType.BUDGET_UPDATED, agent_id="agent-1", payload={"steps_used": 3})
+            events = [await queue.get(), await queue.get(), await queue.get(), await queue.get()]
+            assert events[-1].event_type == EventType.RUNTIME_EVENTS_COMPRESSED
+            assert events[-1].payload["event_count"] == 3
+
+        history = await sockets.get_compact_event_history(agent_id="agent-1")
+        assert history["count"] >= 4
+        assert history["summary"]["count"] >= 4
+
+    asyncio.run(scenario())

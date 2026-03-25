@@ -2,11 +2,12 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 import logging
-import uuid
 
 from fastapi import WebSocket
 
 from synapse.models.runtime_event import RuntimeEvent
+from synapse.runtime.compression.base import CompressionProvider
+from synapse.runtime.compression.noop import NoOpCompressionProvider
 from synapse.runtime.state_store import RuntimeStateStore
 
 
@@ -14,13 +15,21 @@ logger = logging.getLogger(__name__)
 
 
 class WebSocketManager:
-    def __init__(self, state_store: RuntimeStateStore | None = None) -> None:
+    def __init__(
+        self,
+        state_store: RuntimeStateStore | None = None,
+        compression_provider: CompressionProvider | None = None,
+    ) -> None:
         self._connections: set[WebSocket] = set()
         self._subscribers: dict[str, asyncio.Queue[RuntimeEvent]] = {}
         self._state_store = state_store
+        self._compression_provider = compression_provider or NoOpCompressionProvider()
 
     def set_state_store(self, state_store: RuntimeStateStore) -> None:
         self._state_store = state_store
+
+    def set_compression_provider(self, compression_provider: CompressionProvider | None) -> None:
+        self._compression_provider = compression_provider or NoOpCompressionProvider()
 
     async def connect(self, websocket: WebSocket) -> None:
         await websocket.accept()
@@ -60,3 +69,23 @@ class WebSocketManager:
 
         for queue in self._subscribers.values():
             await queue.put(event)
+
+    async def get_compact_event_history(
+        self,
+        *,
+        agent_id: str | None = None,
+        task_id: str | None = None,
+        limit: int = 100,
+    ) -> dict[str, object]:
+        if self._state_store is None:
+            return {"count": 0, "events": [], "summary": {}, "provider": "noop"}
+        events = await self._state_store.get_runtime_events(agent_id=agent_id, task_id=task_id, limit=limit)
+        summary = await self._compression_provider.summarize_events(
+            events,
+            context={"agent_id": agent_id, "task_id": task_id, "channel": "runtime_history"},
+        )
+        return {
+            "count": len(events),
+            "events": events,
+            "summary": summary,
+        }

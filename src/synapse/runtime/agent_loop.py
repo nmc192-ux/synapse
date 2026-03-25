@@ -3,8 +3,10 @@ import asyncio
 from synapse.models.browser import StructuredPageModel
 from synapse.models.events import EventType, RuntimeEvent
 from synapse.models.loop import AgentAction, AgentActionType, LoopEvaluation, LoopObservation, LoopPlan, LoopReflection
+from synapse.models.memory import MemoryStoreRequest, MemoryType
 from synapse.models.task import TaskRequest, TaskResult, TaskStatus
 from synapse.runtime.browser import BrowserRuntime
+from synapse.runtime.memory import AgentMemoryManager
 from synapse.runtime.planning import NavigationEvaluator, NavigationPlanner
 from synapse.runtime.security import AgentSecuritySandbox
 from synapse.runtime.safety import AgentSafetyLayer, SecurityAlertError
@@ -18,11 +20,13 @@ class EventDrivenAgentLoop:
         sockets: WebSocketManager,
         sandbox: AgentSecuritySandbox,
         safety: AgentSafetyLayer,
+        memory_manager: AgentMemoryManager,
     ) -> None:
         self.browser = browser
         self.sockets = sockets
         self.sandbox = sandbox
         self.safety = safety
+        self.memory_manager = memory_manager
         self.planner = NavigationPlanner()
         self.evaluator = NavigationEvaluator()
 
@@ -45,6 +49,7 @@ class EventDrivenAgentLoop:
             )
 
             current_page = await self._current_page(task)
+            await self._store_observation_memory(task, observed, current_page)
             remaining_actions = self.planner.plan(task, completed_actions=completed_actions, current_page=current_page)
             await self._broadcast_plan(task, remaining_actions)
 
@@ -82,6 +87,7 @@ class EventDrivenAgentLoop:
                         payload=evaluation.model_dump(mode="json"),
                     )
                 )
+                await self._store_evaluation_memory(task, action, evaluation, current_page)
                 if remaining_actions:
                     await self._broadcast_plan(task, remaining_actions)
 
@@ -217,3 +223,46 @@ class EventDrivenAgentLoop:
         if isinstance(page, dict):
             return StructuredPageModel.model_validate(page)
         return None
+
+    async def _store_observation_memory(
+        self,
+        task: TaskRequest,
+        observation: LoopObservation,
+        current_page: StructuredPageModel | None,
+    ) -> None:
+        page_summary = ""
+        if current_page is not None:
+            page_summary = f" page={current_page.title} url={current_page.url}"
+
+        await self.memory_manager.store(
+            MemoryStoreRequest(
+                agent_id=task.agent_id,
+                memory_type=MemoryType.SHORT_TERM,
+                content=(
+                    f"observe cycle task={task.task_id} goal={task.goal} "
+                    f"events={observation.event_count}{page_summary}"
+                ),
+            )
+        )
+
+    async def _store_evaluation_memory(
+        self,
+        task: TaskRequest,
+        action: AgentAction,
+        evaluation: LoopEvaluation,
+        current_page: StructuredPageModel | None,
+    ) -> None:
+        page_summary = ""
+        if current_page is not None:
+            page_summary = f" page={current_page.title}"
+
+        await self.memory_manager.store(
+            MemoryStoreRequest(
+                agent_id=task.agent_id,
+                memory_type=MemoryType.TASK,
+                content=(
+                    f"evaluate cycle task={task.task_id} action={action.type.value} "
+                    f"success={evaluation.success} notes={evaluation.notes}{page_summary}"
+                ),
+            )
+        )

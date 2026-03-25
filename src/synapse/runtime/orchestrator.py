@@ -360,6 +360,7 @@ class RuntimeOrchestrator:
             sockets=self.sockets,
             sandbox=self.sandbox,
             safety=self.safety,
+            memory_manager=self.memory_manager,
         )
         result = await adapter.execute_task(request)
         final_result = result.model_copy(

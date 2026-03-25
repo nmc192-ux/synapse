@@ -6,6 +6,7 @@ from synapse.adapters.custom import CustomAgentAdapter
 from synapse.adapters.openclaw import OpenClawAdapter
 from synapse.models.agent import AgentDefinition, AgentDiscoveryEntry, AgentKind
 from synapse.runtime.browser import BrowserRuntime
+from synapse.runtime.memory import AgentMemoryManager
 from synapse.runtime.security import AgentSecuritySandbox
 from synapse.runtime.safety import AgentSafetyLayer
 from synapse.transports.websocket_manager import WebSocketManager
@@ -69,6 +70,7 @@ class AgentRegistry:
         sockets: WebSocketManager,
         sandbox: AgentSecuritySandbox,
         safety: AgentSafetyLayer,
+        memory_manager: AgentMemoryManager,
     ) -> AgentAdapter:
         definition = self.get(agent_id)
         adapter_map: dict[AgentKind, type[AgentAdapter]] = {
@@ -79,4 +81,11 @@ class AgentRegistry:
             AgentKind.CUSTOM: CustomAgentAdapter,
         }
         adapter_cls = adapter_map[definition.kind]
-        return adapter_cls(definition, browser=browser, sockets=sockets, sandbox=sandbox, safety=safety)
+        return adapter_cls(
+            definition,
+            browser=browser,
+            sockets=sockets,
+            sandbox=sandbox,
+            safety=safety,
+            memory_manager=memory_manager,
+        )

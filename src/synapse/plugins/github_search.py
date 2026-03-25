@@ -8,6 +8,13 @@ from synapse.runtime.tools import ToolRegistry
 
 
 def register(registry: ToolRegistry) -> None:
+    registry.register_plugin(
+        name="github_search",
+        module=__name__,
+        capabilities=["repository_search", "code_discovery"],
+        endpoint="github.search",
+    )
+
     async def github_search(arguments: dict[str, object]) -> dict[str, object]:
         query = str(arguments.get("query", "")).strip()
         if not query:

@@ -40,6 +40,12 @@ async def echo_tool(arguments: dict[str, object]) -> dict[str, object]:
     return {"echo": arguments}
 
 
+tool_registry.register_plugin(
+    name="core",
+    module="synapse.main",
+    capabilities=["echo"],
+    endpoint="echo",
+)
 tool_registry.register("echo", echo_tool, description="Echo tool arguments for connectivity tests.", plugin_name="core")
 tool_registry.load_plugins(
     package_names=settings.plugin_packages,

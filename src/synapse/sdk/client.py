@@ -129,6 +129,9 @@ class SynapseBrowser:
         response.raise_for_status()
         return ScreenshotResult.model_validate(response.json())
 
+    def list_tools(self) -> list[ToolDescriptor]:
+        return self._client.list_tools()
+
     def get_layout(self) -> StructuredPageModel:
         payload = LayoutRequest(session_id=self.session_id)
         response = self._client._http.post("/api/browser/layout", json=payload.model_dump(mode="json"))

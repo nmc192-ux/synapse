@@ -5,6 +5,13 @@ from synapse.runtime.tools import ToolRegistry
 
 
 def register(registry: ToolRegistry) -> None:
+    registry.register_plugin(
+        name="database",
+        module=__name__,
+        capabilities=["sql_query", "sqlite_read", "sqlite_write_optional"],
+        endpoint="database.query",
+    )
+
     async def database_query(arguments: dict[str, object]) -> dict[str, object]:
         database = str(arguments.get("database", "")).strip()
         query = str(arguments.get("query", "")).strip()

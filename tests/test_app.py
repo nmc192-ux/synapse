@@ -71,11 +71,13 @@ def test_tools_endpoint_returns_descriptors() -> None:
     assert response.status_code == 200
     tools = [ToolDescriptor.model_validate(item) for item in response.json()]
     assert any(tool.name == "github.search" for tool in tools)
+    assert any(tool.endpoint == "pdf.read" for tool in tools)
 
 
 def test_sdk_client_exposes_browser() -> None:
     client = SynapseClient("http://127.0.0.1:8000")
     assert client.browser is not None
+    assert client.browser.list_tools() is not None
     client.close()
 
 

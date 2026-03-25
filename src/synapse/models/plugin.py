@@ -5,11 +5,15 @@ class ToolDescriptor(BaseModel):
     name: str
     description: str = ""
     plugin: str | None = None
+    capabilities: list[str] = Field(default_factory=list)
+    endpoint: str | None = None
 
 
 class PluginDescriptor(BaseModel):
     name: str
     module: str
+    capabilities: list[str] = Field(default_factory=list)
+    endpoint: str | None = None
     tools: list[str] = Field(default_factory=list)
 
 

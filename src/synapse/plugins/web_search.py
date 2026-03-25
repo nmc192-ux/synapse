@@ -7,6 +7,13 @@ from synapse.runtime.tools import ToolRegistry
 
 
 def register(registry: ToolRegistry) -> None:
+    registry.register_plugin(
+        name="web_search",
+        module=__name__,
+        capabilities=["web_search", "web_summary"],
+        endpoint="web.search",
+    )
+
     async def web_search(arguments: dict[str, object]) -> dict[str, object]:
         query = str(arguments.get("query", "")).strip()
         if not query:

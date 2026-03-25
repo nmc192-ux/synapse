@@ -20,19 +20,38 @@ class ToolRegistry:
         description: str = "",
         plugin_name: str | None = None,
     ) -> None:
+        plugin = self._plugins.get(plugin_name) if plugin_name else None
         self._tools[name] = handler
         self._tool_descriptors[name] = ToolDescriptor(
             name=name,
             description=description,
             plugin=plugin_name,
+            capabilities=list(plugin.capabilities) if plugin else [],
+            endpoint=plugin.endpoint if plugin else None,
         )
         if plugin_name:
-            plugin = self._plugins.get(plugin_name)
             if plugin is None:
                 plugin = PluginDescriptor(name=plugin_name, module=plugin_name)
                 self._plugins[plugin_name] = plugin
             if name not in plugin.tools:
                 plugin.tools.append(name)
+
+    def register_plugin(
+        self,
+        name: str,
+        module: str,
+        capabilities: list[str],
+        endpoint: str,
+    ) -> PluginDescriptor:
+        descriptor = PluginDescriptor(
+            name=name,
+            module=module,
+            capabilities=capabilities,
+            endpoint=endpoint,
+            tools=[],
+        )
+        self._plugins[name] = descriptor
+        return descriptor
 
     async def call(self, name: str, arguments: dict[str, object]) -> dict[str, object]:
         handler = self._tools.get(name)
@@ -71,6 +90,10 @@ class ToolRegistry:
         plugin = self._plugins[plugin_name]
         plugin.module = module_name
         plugin.tools = sorted({name for name, descriptor in self._tool_descriptors.items() if descriptor.plugin == plugin_name})
+        for tool_name in plugin.tools:
+            descriptor = self._tool_descriptors[tool_name]
+            descriptor.capabilities = list(plugin.capabilities)
+            descriptor.endpoint = plugin.endpoint
         return plugin_name
 
     def load_plugins(self, package_names: list[str] | None = None, module_names: list[str] | None = None) -> list[str]:

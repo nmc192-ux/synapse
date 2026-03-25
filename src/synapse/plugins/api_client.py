@@ -7,6 +7,13 @@ from synapse.runtime.tools import ToolRegistry
 
 
 def register(registry: ToolRegistry) -> None:
+    registry.register_plugin(
+        name="api_caller",
+        module=__name__,
+        capabilities=["http_get", "http_post", "api_integration"],
+        endpoint="api.request",
+    )
+
     async def api_request(arguments: dict[str, object]) -> dict[str, object]:
         method = str(arguments.get("method", "GET")).upper()
         url = str(arguments.get("url", "")).strip()

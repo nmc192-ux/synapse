@@ -18,9 +18,16 @@ class EventType(str, Enum):
     LOOP_REFLECTED = "loop.reflected"
     TOOL_CALLED = "tool.called"
     AGENT_REGISTERED = "agent.registered"
+    AGENT_STATUS_UPDATED = "agent.status.updated"
     AGENT_MESSAGE = "agent.message"
     A2A_MESSAGE = "a2a.message"
     TASK_UPDATED = "task.updated"
+    SESSION_SAVED = "session.saved"
+    SESSION_RESTORED = "session.restored"
+    CONNECTION_HEARTBEAT = "connection.heartbeat"
+    CONNECTION_STALE = "connection.stale"
+    CHECKPOINT_SAVED = "checkpoint.saved"
+    CHECKPOINT_RESUMED = "checkpoint.resumed"
 
 
 class RuntimeEvent(BaseModel):

@@ -1,28 +1,136 @@
 from __future__ import annotations
 
-from synapse.adapters.a2a import A2AAdapter
-from synapse.adapters.base import AgentAdapter
-from synapse.adapters.claude_code import ClaudeCodeAdapter
-from synapse.adapters.codex import CodexAdapter
-from synapse.adapters.custom import CustomAgentAdapter
-from synapse.adapters.openclaw import OpenClawAdapter
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING
+
 from synapse.models.agent import AgentDefinition, AgentDiscoveryEntry, AgentKind
+from synapse.models.runtime_state import AgentRuntimeRecord, AgentRuntimeStatus
 from synapse.runtime.budget import AgentBudgetManager
-from synapse.runtime.browser import BrowserRuntime
 from synapse.runtime.llm import LLMProvider
 from synapse.runtime.memory import AgentMemoryManager
 from synapse.runtime.security import AgentSecuritySandbox
 from synapse.runtime.safety import AgentSafetyLayer
+from synapse.runtime.state_store import RuntimeStateStore
 from synapse.transports.websocket_manager import WebSocketManager
+
+if TYPE_CHECKING:
+    from synapse.adapters.base import AgentAdapter
+    from synapse.runtime.browser import BrowserRuntime
 
 
 class AgentRegistry:
-    def __init__(self) -> None:
+    def __init__(self, state_store: RuntimeStateStore | None = None) -> None:
         self._definitions: dict[str, AgentDefinition] = {}
+        self._status: dict[str, AgentRuntimeStatus] = {}
+        self._last_seen_at: dict[str, datetime] = {}
+        self._state_store = state_store
+
+    def set_state_store(self, state_store: RuntimeStateStore) -> None:
+        self._state_store = state_store
 
     def register(self, definition: AgentDefinition) -> AgentDefinition:
         self._definitions[definition.agent_id] = definition
+        self._status.setdefault(definition.agent_id, AgentRuntimeStatus.IDLE)
+        self._last_seen_at[definition.agent_id] = datetime.now(timezone.utc)
         return definition
+
+    async def load_from_store(self) -> None:
+        if self._state_store is None:
+            return
+        records = await self._state_store.list_agents()
+        for record in records:
+            agent_payload = record.get("agent")
+            if not isinstance(agent_payload, dict):
+                continue
+            definition = AgentDefinition.model_validate(agent_payload)
+            self._definitions[definition.agent_id] = definition
+            status_value = record.get("status", AgentRuntimeStatus.IDLE.value)
+            self._status[definition.agent_id] = AgentRuntimeStatus(status_value)
+            last_seen = record.get("last_seen_at")
+            if isinstance(last_seen, str):
+                self._last_seen_at[definition.agent_id] = datetime.fromisoformat(last_seen)
+            else:
+                self._last_seen_at[definition.agent_id] = datetime.now(timezone.utc)
+
+    async def save_to_store(self, agent: AgentDefinition) -> None:
+        if self._state_store is None:
+            return
+        status = self._status.get(agent.agent_id, AgentRuntimeStatus.IDLE)
+        last_seen = self._last_seen_at.get(agent.agent_id, datetime.now(timezone.utc))
+        record = AgentRuntimeRecord(
+            agent_id=agent.agent_id,
+            kind=agent.kind.value,
+            name=agent.name,
+            capabilities=agent.capability_tags,
+            reputation=agent.reputation,
+            limits=(agent.limits.model_dump(mode="json") if agent.limits is not None else {}),
+            security_policy=agent.security.model_dump(mode="json"),
+            availability=status != AgentRuntimeStatus.OFFLINE,
+            status=status,
+            last_seen_at=last_seen,
+            endpoint=agent.endpoint,
+            metadata=agent.metadata,
+        )
+        await self._state_store.register_agent(
+            {
+                "agent_id": agent.agent_id,
+                "agent": agent.model_dump(mode="json"),
+                "status": status.value,
+                "last_seen_at": last_seen.isoformat(),
+                "runtime": record.model_dump(mode="json"),
+            }
+        )
+
+    async def update_agent_status(self, agent_id: str, status: AgentRuntimeStatus) -> None:
+        agent = self.get(agent_id)
+        self._status[agent_id] = status
+        await self.update_agent_last_seen(agent_id, datetime.now(timezone.utc))
+        await self.save_to_store(agent)
+
+    async def update_agent_last_seen(self, agent_id: str, timestamp: datetime) -> None:
+        self.get(agent_id)
+        self._last_seen_at[agent_id] = timestamp
+
+    def get_agent_status(self, agent_id: str) -> dict[str, object]:
+        agent = self.get(agent_id)
+        status = self._status.get(agent_id, AgentRuntimeStatus.IDLE)
+        last_seen = self._last_seen_at.get(agent_id, datetime.now(timezone.utc))
+        return {
+            "agent_id": agent_id,
+            "status": status.value,
+            "availability": status != AgentRuntimeStatus.OFFLINE,
+            "last_seen_at": last_seen,
+        }
+
+    async def get_persisted_agent(self, agent_id: str) -> dict[str, object] | None:
+        if self._state_store is None:
+            agent = self._definitions.get(agent_id)
+            if agent is None:
+                return None
+            status_payload = self.get_agent_status(agent_id)
+            return {
+                "agent_id": agent.agent_id,
+                "agent": agent.model_dump(mode="json"),
+                "status": status_payload["status"],
+                "last_seen_at": status_payload["last_seen_at"].isoformat(),
+            }
+        return await self._state_store.get_agent(agent_id)
+
+    async def list_persisted_agents(self) -> list[dict[str, object]]:
+        if self._state_store is None:
+            rows: list[dict[str, object]] = []
+            for agent in self._definitions.values():
+                status_payload = self.get_agent_status(agent.agent_id)
+                rows.append(
+                    {
+                        "agent_id": agent.agent_id,
+                        "agent": agent.model_dump(mode="json"),
+                        "status": status_payload["status"],
+                        "last_seen_at": status_payload["last_seen_at"].isoformat(),
+                    }
+                )
+            return rows
+        return await self._state_store.list_agents()
 
     def get(self, agent_id: str) -> AgentDefinition:
         try:
@@ -70,7 +178,7 @@ class AgentRegistry:
     def build_adapter(
         self,
         agent_id: str,
-        browser: BrowserRuntime,
+        browser: "BrowserRuntime",
         sockets: WebSocketManager,
         sandbox: AgentSecuritySandbox,
         safety: AgentSafetyLayer,
@@ -78,8 +186,14 @@ class AgentRegistry:
         budget_manager: AgentBudgetManager,
         llm: LLMProvider | None = None,
     ) -> AgentAdapter:
+        from synapse.adapters.a2a import A2AAdapter
+        from synapse.adapters.claude_code import ClaudeCodeAdapter
+        from synapse.adapters.codex import CodexAdapter
+        from synapse.adapters.custom import CustomAgentAdapter
+        from synapse.adapters.openclaw import OpenClawAdapter
+
         definition = self.get(agent_id)
-        adapter_map: dict[AgentKind, type[AgentAdapter]] = {
+        adapter_map: dict[AgentKind, type["AgentAdapter"]] = {
             AgentKind.OPENCLAW: OpenClawAdapter,
             AgentKind.CLAUDE_CODE: ClaudeCodeAdapter,
             AgentKind.CODEX: CodexAdapter,

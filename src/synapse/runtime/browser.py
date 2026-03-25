@@ -1,6 +1,8 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 import base64
+from datetime import datetime, timezone
+import logging
 
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
 
@@ -21,17 +23,27 @@ from synapse.models.browser import (
     ScreenshotResult,
     StructuredPageModel,
 )
+from synapse.models.runtime_state import BrowserSessionState
 from synapse.runtime.session import BrowserSession
+from synapse.runtime.state_store import RuntimeStateStore
+
+
+logger = logging.getLogger(__name__)
 
 
 class BrowserRuntime:
     """Manages Playwright browser lifecycle and structured page interactions."""
 
-    def __init__(self) -> None:
+    def __init__(self, state_store: RuntimeStateStore | None = None) -> None:
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
         self._contexts: dict[str, BrowserContext] = {}
         self._pages: dict[str, Page] = {}
+        self._session_agents: dict[str, str | None] = {}
+        self._state_store = state_store
+
+    def set_state_store(self, state_store: RuntimeStateStore) -> None:
+        self._state_store = state_store
 
     async def start(self) -> None:
         if self._browser is not None:
@@ -57,7 +69,7 @@ class BrowserRuntime:
             await self._playwright.stop()
             self._playwright = None
 
-    async def create_session(self, session_id: str) -> BrowserSession:
+    async def create_session(self, session_id: str, agent_id: str | None = None) -> BrowserSession:
         if self._browser is None:
             raise RuntimeError("Browser runtime is not started.")
 
@@ -65,6 +77,8 @@ class BrowserRuntime:
         page = await context.new_page()
         self._contexts[session_id] = context
         self._pages[session_id] = page
+        self._session_agents[session_id] = agent_id
+        await self.save_session_state(session_id)
         return BrowserSession(session_id=session_id, page=await self._snapshot_page(page))
 
     async def open(self, session_id: str, url: str) -> BrowserState:
@@ -72,6 +86,7 @@ class BrowserRuntime:
         await page.goto(url)
         await page.wait_for_load_state("domcontentloaded")
         await self._stabilize_page(page)
+        await self.save_session_state(session_id)
         return BrowserState(session_id=session_id, page=await self._snapshot_page(page))
 
     async def click(self, session_id: str, selector: str) -> BrowserState:
@@ -79,6 +94,7 @@ class BrowserRuntime:
         await page.locator(selector).first.click()
         await page.wait_for_load_state("domcontentloaded")
         await self._stabilize_page(page)
+        await self.save_session_state(session_id)
         return BrowserState(session_id=session_id, page=await self._snapshot_page(page))
 
     async def type(self, session_id: str, selector: str, text: str) -> BrowserState:
@@ -86,6 +102,7 @@ class BrowserRuntime:
         locator = page.locator(selector).first
         await locator.fill(text)
         await self._stabilize_page(page)
+        await self.save_session_state(session_id)
         return BrowserState(
             session_id=session_id,
             page=await self._snapshot_page(page),
@@ -115,25 +132,30 @@ class BrowserRuntime:
                 )
             )
 
-        return ExtractionResult(
+        payload = ExtractionResult(
             session_id=session_id,
             matches=matches,
             page=await self._snapshot_page(page),
         )
+        await self.save_session_state(session_id)
+        return payload
 
     async def screenshot(self, session_id: str) -> ScreenshotResult:
         page = self._require_page(session_id)
         await self._stabilize_page(page)
         image_bytes = await page.screenshot(full_page=True, type="png")
-        return ScreenshotResult(
+        payload = ScreenshotResult(
             session_id=session_id,
             image_base64=base64.b64encode(image_bytes).decode("ascii"),
             page=await self._snapshot_page(page),
         )
+        await self.save_session_state(session_id)
+        return payload
 
     async def get_layout(self, session_id: str) -> StructuredPageModel:
         page = self._require_page(session_id)
         await self._stabilize_page(page)
+        await self.save_session_state(session_id)
         return await self._snapshot_page(page)
 
     async def find_element(self, session_id: str, element_type: str, text: str) -> list[PageElementMatch]:
@@ -249,6 +271,82 @@ class BrowserRuntime:
         context = self._contexts.pop(session_id, None)
         if context is not None:
             await context.close()
+        self._session_agents.pop(session_id, None)
+        if self._state_store is not None:
+            await self._state_store.delete_session(session_id)
+
+    async def save_session_state(self, session_id: str) -> BrowserSessionState | None:
+        if self._state_store is None:
+            return None
+        page = self._pages.get(session_id)
+        context = self._contexts.get(session_id)
+        if page is None or context is None:
+            return None
+
+        try:
+            cookies = await context.cookies()
+        except Exception:
+            cookies = []
+
+        state = BrowserSessionState(
+            session_id=session_id,
+            agent_id=self._session_agents.get(session_id),
+            current_url=page.url or None,
+            cookies=[dict(cookie) for cookie in cookies],
+            last_active_at=datetime.now(timezone.utc),
+            page_title=await page.title(),
+            tabs=[{"index": 0, "url": page.url or None, "title": await page.title()}],
+        )
+        await self._state_store.store_session(session_id, state.model_dump(mode="json"))
+        return state
+
+    async def restore_session_state(self, session_id: str) -> BrowserSession | None:
+        if self._state_store is None:
+            return None
+        payload = await self._state_store.get_session(session_id)
+        if payload is None:
+            return None
+        state = BrowserSessionState.model_validate(payload)
+        if session_id not in self._pages:
+            await self.create_session(session_id, agent_id=state.agent_id)
+        page = self._require_page(session_id)
+        context = self._contexts[session_id]
+
+        if state.cookies:
+            try:
+                await context.add_cookies(state.cookies)
+            except Exception as exc:
+                logger.warning("Failed to restore cookies for session %s: %s", session_id, exc)
+        if state.current_url:
+            try:
+                await page.goto(state.current_url)
+                await page.wait_for_load_state("domcontentloaded")
+            except Exception as exc:
+                logger.warning("Failed to navigate session %s to %s: %s", session_id, state.current_url, exc)
+
+        snapshot = await self._snapshot_page(page)
+        await self.save_session_state(session_id)
+        return BrowserSession(session_id=session_id, current_url=snapshot.url, page=snapshot)
+
+    async def list_sessions(self, agent_id: str | None = None) -> list[BrowserSessionState]:
+        if self._state_store is None:
+            rows = []
+            for session_id, page in self._pages.items():
+                rows.append(
+                    BrowserSessionState(
+                        session_id=session_id,
+                        agent_id=self._session_agents.get(session_id),
+                        current_url=page.url or None,
+                        last_active_at=datetime.now(timezone.utc),
+                        page_title=await page.title(),
+                        tabs=[{"index": 0, "url": page.url or None, "title": await page.title()}],
+                    )
+                )
+            if agent_id is None:
+                return rows
+            return [row for row in rows if row.agent_id == agent_id]
+        records = await self._state_store.list_sessions(agent_id=agent_id)
+        return [BrowserSessionState.model_validate(record) for record in records]
 
     def _require_page(self, session_id: str) -> Page:
         page = self._pages.get(session_id)

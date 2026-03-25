@@ -33,6 +33,7 @@ source .venv/bin/activate
 pip install -e .
 playwright install chromium
 export SYNAPSE_POSTGRES_DSN=postgresql://postgres:postgres@localhost:5432/synapse
+export SYNAPSE_REDIS_URL=redis://localhost:6379/0
 uvicorn synapse.main:app --reload
 ```
 
@@ -46,6 +47,17 @@ export OPENAI_MODEL=gpt-4o-mini
 
 Supported providers are `openai`, `anthropic`, and `local`. Local models can be
 configured with `SYNAPSE_LOCAL_MODEL_ENDPOINT` and `SYNAPSE_LOCAL_MODEL_NAME`.
+
+Runtime durability configuration:
+
+```bash
+export SYNAPSE_REDIS_URL=redis://localhost:6379/0
+export SYNAPSE_REDIS_REQUIRED=false
+export SYNAPSE_RUNTIME_STATE_FALLBACK_MEMORY=true
+```
+
+If Redis is unavailable and fallback is enabled, Synapse logs a warning and uses
+in-memory runtime state.
 
 ## Project layout
 
@@ -146,6 +158,16 @@ progress updates, and result submission.
 - `POST /api/tasks/{task_id}/claim`
 - `POST /api/tasks/{task_id}/update`
 - `GET /api/tasks/active`
+- `POST /api/tasks/{task_id}/checkpoint`
+- `POST /api/tasks/resume/{checkpoint_id}`
+- `GET /api/checkpoints`
+- `GET /api/checkpoints/{checkpoint_id}`
+
+Checkpoint resume flow:
+1. Save checkpoint state with task/session/planner context.
+2. Restore last persisted browser session metadata.
+3. Rehydrate pending planner actions from checkpoint.
+4. Continue execution from best-known state if some fields are unavailable.
 
 ## Persistent Memory
 
@@ -162,3 +184,16 @@ client.memory.store(agent_id="codex", memory_type="short_term", content="Observe
 client.memory.search(agent_id="codex", embedding=[0.1, 0.2, 0.3])
 client.memory.get_recent(agent_id="codex", limit=5)
 ```
+
+## Durable Runtime State
+
+Synapse now persists runtime state to Redis with namespace keys:
+
+- `synapse:agents:{agent_id}`
+- `synapse:sessions:{session_id}`
+- `synapse:connections:{agent_id}`
+- `synapse:checkpoints:{checkpoint_id}`
+- `synapse:events:{event_id}`
+
+Connection heartbeats update agent liveness. If an A2A connection misses heartbeat
+TTL (default `60s`), it is marked stale/offline and emits `connection.stale`.

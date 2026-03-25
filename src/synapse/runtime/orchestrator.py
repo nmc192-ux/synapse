@@ -1,4 +1,6 @@
 import uuid
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from synapse.models.a2a import A2AEnvelope, A2AMessageType, AgentDelegateRequest, AgentPresence, AgentRegistrationRequest, AgentWireMessage
 from synapse.models.agent import AgentBudgetUsage, AgentCheckpoint, AgentDefinition, AgentDiscoveryEntry
@@ -22,9 +24,9 @@ from synapse.models.events import EventType, RuntimeEvent
 from synapse.models.message import AgentMessage
 from synapse.models.memory import MemoryRecord, MemorySearchRequest, MemorySearchResult, MemoryStoreRequest
 from synapse.models.plugin import PluginDescriptor, PluginReloadRequest, ToolDescriptor
+from synapse.models.runtime_state import BrowserSessionState, ConnectionState, RuntimeCheckpoint
 from synapse.models.task import ExtractionRequest, NavigationRequest, TaskRequest, TaskResult, TaskStatus
 from synapse.models.task import TaskClaimRequest, TaskCreateRequest, TaskRecord, TaskUpdateRequest
-from synapse.runtime.browser import BrowserRuntime
 from synapse.runtime.messaging import AgentMessageBus
 from synapse.runtime.a2a import A2AHub
 from synapse.runtime.budget import AgentBudgetLimitExceeded, AgentBudgetManager
@@ -36,13 +38,17 @@ from synapse.runtime.safety import AgentSafetyLayer, SecurityAlertError, Securit
 from synapse.runtime.session import BrowserSession
 from synapse.runtime.task_manager import TaskExecutionManager
 from synapse.runtime.tools import ToolRegistry
+from synapse.runtime.state_store import RuntimeStateStore
 from synapse.transports.websocket_manager import WebSocketManager
+
+if TYPE_CHECKING:
+    from synapse.runtime.browser import BrowserRuntime
 
 
 class RuntimeOrchestrator:
     def __init__(
         self,
-        browser: BrowserRuntime,
+        browser: "BrowserRuntime",
         agents: AgentRegistry,
         tools: ToolRegistry,
         messages: AgentMessageBus,
@@ -53,6 +59,7 @@ class RuntimeOrchestrator:
         sandbox: AgentSecuritySandbox,
         safety: AgentSafetyLayer,
         budget_manager: AgentBudgetManager,
+        state_store: RuntimeStateStore | None = None,
         llm: LLMProvider | None = None,
     ) -> None:
         self.browser = browser
@@ -66,11 +73,13 @@ class RuntimeOrchestrator:
         self.sandbox = sandbox
         self.safety = safety
         self.budget_manager = budget_manager
+        self.state_store = state_store
         self.llm = llm
+        self._task_context: dict[str, TaskRequest] = {}
 
-    async def create_session(self, session_id: str | None = None) -> BrowserSession:
+    async def create_session(self, session_id: str | None = None, agent_id: str | None = None) -> BrowserSession:
         resolved_session_id = session_id or str(uuid.uuid4())
-        session = await self.browser.create_session(resolved_session_id)
+        session = await self.browser.create_session(resolved_session_id, agent_id=agent_id)
         await self.sockets.broadcast(
             RuntimeEvent(
                 event_type=EventType.SESSION_CREATED,
@@ -246,6 +255,7 @@ class RuntimeOrchestrator:
 
     async def register_agent(self, definition: AgentDefinition) -> AgentDefinition:
         agent = self.agents.register(definition)
+        await self.agents.save_to_store(agent)
         self.budget_manager.get_or_create(agent)
         await self.sockets.broadcast(
             RuntimeEvent(
@@ -254,16 +264,31 @@ class RuntimeOrchestrator:
                 payload=agent.model_dump(mode="json"),
             )
         )
+        await self.sockets.broadcast(
+            RuntimeEvent(
+                event_type=EventType.AGENT_STATUS_UPDATED,
+                agent_id=agent.agent_id,
+                payload={"agent_id": agent.agent_id, "status": "idle"},
+            )
+        )
         return agent
 
     async def register_a2a_agent(self, request: AgentRegistrationRequest) -> AgentDefinition:
         agent = self.a2a.register_agent(request)
+        await self.agents.save_to_store(agent)
         self.budget_manager.get_or_create(agent)
         await self.sockets.broadcast(
             RuntimeEvent(
                 event_type=EventType.AGENT_REGISTERED,
                 agent_id=agent.agent_id,
                 payload=agent.model_dump(mode="json"),
+            )
+        )
+        await self.sockets.broadcast(
+            RuntimeEvent(
+                event_type=EventType.AGENT_STATUS_UPDATED,
+                agent_id=agent.agent_id,
+                payload={"agent_id": agent.agent_id, "status": "idle"},
             )
         )
         return agent
@@ -354,6 +379,145 @@ class RuntimeOrchestrator:
     async def discover_agents(self) -> list[AgentPresence]:
         return self.a2a.list_agents()
 
+    async def get_persisted_agents(self) -> list[AgentDefinition]:
+        rows = await self.agents.list_persisted_agents()
+        agents: list[AgentDefinition] = []
+        for row in rows:
+            payload = row.get("agent")
+            if isinstance(payload, dict):
+                agents.append(AgentDefinition.model_validate(payload))
+        return agents
+
+    async def get_persisted_agent(self, agent_id: str) -> AgentDefinition:
+        row = await self.agents.get_persisted_agent(agent_id)
+        if row is None:
+            raise KeyError(f"Agent not found: {agent_id}")
+        payload = row.get("agent")
+        if not isinstance(payload, dict):
+            raise KeyError(f"Agent not found: {agent_id}")
+        return AgentDefinition.model_validate(payload)
+
+    async def get_agent_status(self, agent_id: str) -> dict[str, object]:
+        self.agents.get(agent_id)
+        status = self.agents.get_agent_status(agent_id)
+        return {
+            "agent_id": status["agent_id"],
+            "status": status["status"],
+            "availability": status["availability"],
+            "last_seen_at": status["last_seen_at"].isoformat(),
+        }
+
+    async def list_sessions(self, agent_id: str | None = None) -> list[BrowserSessionState]:
+        return await self.browser.list_sessions(agent_id=agent_id)
+
+    async def get_session(self, session_id: str) -> BrowserSessionState:
+        if self.state_store is None:
+            raise KeyError(f"Session not found: {session_id}")
+        payload = await self.state_store.get_session(session_id)
+        if payload is None:
+            raise KeyError(f"Session not found: {session_id}")
+        return BrowserSessionState.model_validate(payload)
+
+    async def list_connections(self) -> list[ConnectionState]:
+        return await self.a2a.list_persisted_connections()
+
+    async def get_connection(self, agent_id: str) -> ConnectionState:
+        connection = await self.a2a.get_persisted_connection(agent_id)
+        if connection is None:
+            raise KeyError(f"Connection not found: {agent_id}")
+        return connection
+
+    async def save_checkpoint(self, task_id: str, state: dict[str, object]) -> RuntimeCheckpoint:
+        context = self._task_context.get(task_id)
+        agent_id = str(state.get("agent_id") or (context.agent_id if context is not None else ""))
+        if not agent_id:
+            raise KeyError(f"Unable to resolve agent for task: {task_id}")
+
+        checkpoint = RuntimeCheckpoint(
+            task_id=task_id,
+            agent_id=agent_id,
+            current_goal=str(state.get("current_goal") or (context.goal if context is not None else "")),
+            planner_state=state.get("planner_state", {}) if isinstance(state.get("planner_state"), dict) else {},
+            memory_snapshot_reference=str(state.get("memory_snapshot_reference")) if state.get("memory_snapshot_reference") is not None else None,
+            browser_session_reference=str(state.get("browser_session_reference") or (context.session_id if context is not None else "")) or None,
+            last_action=state.get("last_action", {}) if isinstance(state.get("last_action"), dict) else {},
+            pending_actions=state.get("pending_actions", []) if isinstance(state.get("pending_actions"), list) else [],
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        if self.state_store is not None:
+            await self.state_store.store_checkpoint(checkpoint.checkpoint_id, checkpoint.model_dump(mode="json"))
+        await self.sockets.broadcast(
+            RuntimeEvent(
+                event_type=EventType.CHECKPOINT_SAVED,
+                agent_id=checkpoint.agent_id,
+                session_id=checkpoint.browser_session_reference,
+                payload=checkpoint.model_dump(mode="json"),
+            )
+        )
+        return checkpoint
+
+    async def list_checkpoints(
+        self,
+        agent_id: str | None = None,
+        task_id: str | None = None,
+    ) -> list[RuntimeCheckpoint]:
+        if self.state_store is None:
+            return []
+        rows = await self.state_store.list_checkpoints(agent_id=agent_id, task_id=task_id)
+        return [RuntimeCheckpoint.model_validate(row) for row in rows]
+
+    async def get_checkpoint(self, checkpoint_id: str) -> RuntimeCheckpoint:
+        if self.state_store is None:
+            raise KeyError(f"Checkpoint not found: {checkpoint_id}")
+        payload = await self.state_store.get_checkpoint(checkpoint_id)
+        if payload is None:
+            raise KeyError(f"Checkpoint not found: {checkpoint_id}")
+        return RuntimeCheckpoint.model_validate(payload)
+
+    async def delete_checkpoint(self, checkpoint_id: str) -> None:
+        if self.state_store is None:
+            return
+        await self.state_store.delete_checkpoint(checkpoint_id)
+
+    async def resume_task(self, checkpoint_id: str) -> TaskResult:
+        checkpoint = await self.get_checkpoint(checkpoint_id)
+        if checkpoint.browser_session_reference:
+            restored = await self.browser.restore_session_state(checkpoint.browser_session_reference)
+            if restored is not None:
+                await self.sockets.broadcast(
+                    RuntimeEvent(
+                        event_type=EventType.SESSION_RESTORED,
+                        agent_id=checkpoint.agent_id,
+                        session_id=checkpoint.browser_session_reference,
+                        payload={"checkpoint_id": checkpoint_id, "session_id": checkpoint.browser_session_reference},
+                    )
+                )
+
+        constraints: dict[str, object] = {}
+        if checkpoint.pending_actions:
+            constraints["action_plan"] = checkpoint.pending_actions
+        if checkpoint.planner_state:
+            constraints["planner_state"] = checkpoint.planner_state
+
+        request = TaskRequest(
+            task_id=checkpoint.task_id,
+            agent_id=checkpoint.agent_id,
+            goal=checkpoint.current_goal,
+            session_id=checkpoint.browser_session_reference,
+            constraints=constraints,
+        )
+        result = await self.execute_task(request)
+        await self.sockets.broadcast(
+            RuntimeEvent(
+                event_type=EventType.CHECKPOINT_RESUMED,
+                agent_id=checkpoint.agent_id,
+                session_id=checkpoint.browser_session_reference,
+                payload={"checkpoint_id": checkpoint_id, "task_id": checkpoint.task_id, "result": result.model_dump(mode="json")},
+            )
+        )
+        return result
+
     async def find_agents(self, capability: str) -> list[AgentDiscoveryEntry]:
         return self.a2a.find_agents(capability)
 
@@ -400,8 +564,9 @@ class RuntimeOrchestrator:
         await self._enforce_task_safety(request)
         self.budget_manager.get_or_create(self.agents.get(request.agent_id))
         if request.session_id is None:
-            session = await self.create_session()
+            session = await self.create_session(agent_id=request.agent_id)
             request = request.model_copy(update={"session_id": session.session_id})
+        self._task_context[request.task_id] = request
 
         for tool_call in request.tool_calls:
             await self.call_tool(tool_call.tool_name, tool_call.arguments, agent_id=request.agent_id)
@@ -434,6 +599,16 @@ class RuntimeOrchestrator:
                 payload=final_result.model_dump(mode="json"),
             )
         )
+        if self.state_store is not None:
+            await self.browser.save_session_state(request.session_id)
+            await self.sockets.broadcast(
+                RuntimeEvent(
+                    event_type=EventType.SESSION_SAVED,
+                    session_id=request.session_id,
+                    agent_id=request.agent_id,
+                    payload={"task_id": request.task_id, "session_id": request.session_id},
+                )
+            )
         return final_result
 
     async def _ensure_current_page_safe(self, agent_id: str | None, session_id: str, action: str) -> None:

@@ -28,6 +28,7 @@ from synapse.models.events import EventType, RuntimeEvent
 from synapse.models.message import AgentMessage
 from synapse.models.memory import MemoryRecord, MemorySearchRequest, MemorySearchResult, MemoryStoreRequest
 from synapse.models.plugin import PluginDescriptor, PluginReloadRequest, ToolDescriptor
+from synapse.models.runtime_state import BrowserSessionState, ConnectionState, RuntimeCheckpoint
 from synapse.models.task import (
     ExtractionRequest,
     NavigationRequest,
@@ -242,7 +243,7 @@ async def register_agent(
 
 @router.get("/agents", response_model=list[AgentDefinition])
 async def list_agents(orchestrator: RuntimeOrchestrator = Depends(get_orchestrator)) -> list[AgentDefinition]:
-    return orchestrator.agents.list()
+    return await orchestrator.get_persisted_agents()
 
 
 @router.get("/agents/{agent_id}/budget", response_model=AgentBudgetUsage)
@@ -305,6 +306,28 @@ async def delegate_agent_task(
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> AgentWireMessage:
     return await orchestrator.delegate_agent_task(request)
+
+
+@router.get("/agents/{agent_id}", response_model=AgentDefinition)
+async def get_agent(
+    agent_id: str,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> AgentDefinition:
+    try:
+        return await orchestrator.get_persisted_agent(agent_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/agents/{agent_id}/status")
+async def get_agent_status(
+    agent_id: str,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> dict[str, object]:
+    try:
+        return await orchestrator.get_agent_status(agent_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/a2a/agents", response_model=list[AgentPresence])
@@ -452,6 +475,86 @@ async def list_active_tasks(
     return await orchestrator.list_active_tasks()
 
 
+@router.get("/sessions", response_model=list[BrowserSessionState])
+async def list_sessions(
+    agent_id: str | None = None,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> list[BrowserSessionState]:
+    return await orchestrator.list_sessions(agent_id=agent_id)
+
+
+@router.get("/sessions/{session_id}", response_model=BrowserSessionState)
+async def get_session(
+    session_id: str,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> BrowserSessionState:
+    try:
+        return await orchestrator.get_session(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/connections", response_model=list[ConnectionState])
+async def list_connections(
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> list[ConnectionState]:
+    return await orchestrator.list_connections()
+
+
+@router.get("/connections/{agent_id}", response_model=ConnectionState)
+async def get_connection(
+    agent_id: str,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> ConnectionState:
+    try:
+        return await orchestrator.get_connection(agent_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/checkpoints", response_model=list[RuntimeCheckpoint])
+async def list_checkpoints(
+    agent_id: str | None = None,
+    task_id: str | None = None,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> list[RuntimeCheckpoint]:
+    return await orchestrator.list_checkpoints(agent_id=agent_id, task_id=task_id)
+
+
+@router.get("/checkpoints/{checkpoint_id}", response_model=RuntimeCheckpoint)
+async def get_checkpoint(
+    checkpoint_id: str,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> RuntimeCheckpoint:
+    try:
+        return await orchestrator.get_checkpoint(checkpoint_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/tasks/{task_id}/checkpoint", response_model=RuntimeCheckpoint)
+async def save_task_checkpoint(
+    task_id: str,
+    state: dict[str, object],
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> RuntimeCheckpoint:
+    try:
+        return await orchestrator.save_checkpoint(task_id, state)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/tasks/resume/{checkpoint_id}")
+async def resume_task(
+    checkpoint_id: str,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+):
+    try:
+        return await orchestrator.resume_task(checkpoint_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.websocket("/ws")
 async def websocket_events(websocket: WebSocket) -> None:
     runtime = get_orchestrator()
@@ -470,8 +573,10 @@ async def websocket_a2a(websocket: WebSocket, agent_id: str) -> None:
     try:
         while True:
             payload = await websocket.receive_json()
+            await runtime.a2a.heartbeat(agent_id)
             wire_message = AgentWireMessage.model_validate({**payload, "agent": agent_id})
             response = await runtime.send_agent_wire_message(wire_message)
+            await runtime.a2a.cleanup_stale_connections()
             if response is not None:
                 await runtime.sockets.broadcast(
                     RuntimeEvent(
@@ -481,4 +586,4 @@ async def websocket_a2a(websocket: WebSocket, agent_id: str) -> None:
                     )
                 )
     except WebSocketDisconnect:
-        runtime.a2a.disconnect(agent_id)
+        await runtime.a2a.disconnect(agent_id)

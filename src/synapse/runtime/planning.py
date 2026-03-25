@@ -81,11 +81,18 @@ class NavigationPlanner:
 
         page_context: dict[str, object] = {}
         if current_page is not None:
-            page_context = (
-                current_page.compact_spm.model_dump(mode="json")
-                if current_page.compact_spm is not None
-                else current_page.model_dump(mode="json", exclude={"full_spm"})
-            )
+            if current_page.compact_page_graph is not None:
+                page_context = {
+                    "graph_summary": current_page.compact_page_graph.summary,
+                    "actionable_paths": self._graph_paths(current_page, task.goal),
+                    "graph": current_page.compact_page_graph.model_dump(mode="json"),
+                }
+            else:
+                page_context = (
+                    current_page.compact_spm.model_dump(mode="json")
+                    if current_page.compact_spm is not None
+                    else current_page.model_dump(mode="json", exclude={"full_spm"})
+                )
         previous_actions = [
             {
                 "type": action.type.value,
@@ -100,6 +107,7 @@ class NavigationPlanner:
             "goal": task.goal,
             "page_state": page_context,
             "full_page_state": current_page.full_spm if current_page is not None else {},
+            "page_graph": current_page.page_graph.model_dump(mode="json") if current_page is not None and current_page.page_graph is not None else {},
             "recent_memory": recent_memories,
             "memory_summary": memory_summary or "No memory available.",
             "recent_runtime_events": recent_events,
@@ -191,6 +199,28 @@ class NavigationPlanner:
 
     def get_last_context_telemetry(self) -> dict[str, object]:
         return dict(self.last_context_debug)
+
+    @staticmethod
+    def _graph_paths(current_page: StructuredPageModel, goal: str) -> list[dict[str, object]]:
+        graph = current_page.compact_page_graph
+        if graph is None:
+            return []
+        matches: list[dict[str, object]] = []
+        goal_lower = goal.lower()
+        for node in graph.nodes:
+            if node.node_type != "action":
+                continue
+            haystack = " ".join([node.label.lower(), node.text.lower(), (node.region or "").lower()])
+            if goal_lower in haystack or not goal_lower:
+                matches.append(
+                    {
+                        "label": node.label,
+                        "selector_reference": node.selector_reference,
+                        "region": node.region,
+                        "confidence": node.confidence,
+                    }
+                )
+        return matches[:8]
 
     @staticmethod
     def _decode_llm_json(raw: str) -> dict[str, object] | None:

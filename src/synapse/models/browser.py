@@ -1,5 +1,7 @@
 from pydantic import BaseModel, Field, HttpUrl
 
+from synapse.models.page_graph import PageGraph
+
 
 class PageSection(BaseModel):
     heading: str | None = None
@@ -127,6 +129,8 @@ class StructuredPageModel(BaseModel):
     links: list[PageLink] = Field(default_factory=list)
     full_spm: dict[str, object] = Field(default_factory=dict)
     compact_spm: CompactStructuredPageModel | None = None
+    page_graph: PageGraph | None = None
+    compact_page_graph: PageGraph | None = None
 
 
 class BrowserState(BaseModel):

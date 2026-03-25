@@ -20,9 +20,13 @@ from synapse.models.browser import (
     PageTable,
     StructuredPageModel,
 )
+from synapse.runtime.browser.page_graph_builder import PageGraphBuilder
 
 
 class SPMExtractor:
+    def __init__(self) -> None:
+        self.page_graph_builder = PageGraphBuilder()
+
     async def snapshot_page(self, page: Any) -> StructuredPageModel:
         snapshot = await page.evaluate(
             """
@@ -122,10 +126,14 @@ class SPMExtractor:
 
     def attach_compressed_views(self, spm: StructuredPageModel) -> StructuredPageModel:
         full_spm = self.full_spm(spm)
+        page_graph = self.page_graph_builder.build_page_graph(full_spm)
+        compact_page_graph = self.page_graph_builder.build_compact_page_graph(full_spm)
         return spm.model_copy(
             update={
                 "full_spm": full_spm,
                 "compact_spm": self.build_compact_spm(spm),
+                "page_graph": page_graph,
+                "compact_page_graph": compact_page_graph,
             }
         )
 

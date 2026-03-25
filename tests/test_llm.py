@@ -1,7 +1,9 @@
 import asyncio
 from types import SimpleNamespace
 
+from synapse.models.browser import StructuredPageModel
 from synapse.models.loop import AgentAction, AgentActionType
+from synapse.runtime.browser.spm_extractor import SPMExtractor
 from synapse.models.task import TaskRequest
 from synapse.runtime.llm import AnthropicProvider, LocalModelProvider, OpenAIProvider, create_llm_provider
 from synapse.runtime.planning import NavigationEvaluator, NavigationPlanner, NavigationReflector
@@ -118,6 +120,27 @@ def test_navigation_planner_records_compression_telemetry() -> None:
     )
     assert "raw_context" in telemetry
     assert "compressed_context" in telemetry
+
+
+def test_navigation_planner_prefers_graph_context_when_available() -> None:
+    class StubProvider:
+        async def generate(self, prompt: str, system: str | None = None) -> str:
+            return '{"actions":[{"type":"screenshot"}]}'
+
+    planner = NavigationPlanner(llm=StubProvider())
+    task = TaskRequest(task_id="task-graph", agent_id="agent-1", goal="search papers")
+    page = SPMExtractor().attach_compressed_views(
+        StructuredPageModel(
+            title="Search",
+            url="https://example.com/search",
+        )
+    )
+
+    asyncio.run(planner.generate_plan(task, completed_actions=[], current_page=page))
+    telemetry = planner.get_last_context_telemetry()
+    page_state = telemetry["raw_context"]["page_state"]
+    assert "graph_summary" in page_state
+    assert "actionable_paths" in page_state
 
 
 def test_navigation_evaluator_evaluate_action_uses_llm_response() -> None:

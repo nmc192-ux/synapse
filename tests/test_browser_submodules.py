@@ -4,6 +4,7 @@ from synapse.models.browser import DownloadArtifact, PageButton, PageForm, PageF
 from synapse.runtime.browser import BrowserRuntime
 from synapse.runtime.browser.download_manager import DownloadManager
 from synapse.runtime.browser.interaction_engine import InteractionEngine
+from synapse.runtime.browser.page_graph_builder import PageGraphBuilder
 from synapse.runtime.browser.recovery_engine import RecoveryEngine
 from synapse.runtime.browser.session_manager import SessionManager
 from synapse.runtime.browser.spm_extractor import SPMExtractor
@@ -190,6 +191,32 @@ def test_spm_extractor_builds_compact_spm() -> None:
     assert any(region.region_type == "content" for region in page.compact_spm.semantic_regions)
     assert any(group.element_type == "button" for group in page.compact_spm.grouped_elements)
     assert any(item.action == "click" for item in page.compact_spm.actionable_elements)
+    assert page.page_graph is not None
+    assert page.compact_page_graph is not None
+    assert any(node.node_type == "action" for node in page.page_graph.nodes)
+
+
+def test_page_graph_builder_finds_actionable_paths() -> None:
+    builder = PageGraphBuilder()
+    full_spm = {
+        "title": "Search",
+        "url": "https://example.com/search",
+        "sections": [{"heading": "Results", "text": "Paper results", "selector_hint": "section.results"}],
+        "buttons": [{"text": "Load more", "selector_hint": "button.load", "role": "button", "disabled": False}],
+        "inputs": [{"name": "query", "input_type": "search", "placeholder": "Search papers", "selector_hint": "input.query"}],
+        "forms": [{"name": "search", "selector_hint": "form.search", "method": "get", "action": "/search", "fields": [{"name": "query", "field_type": "search", "selector_hint": "input.query"}]}],
+        "tables": [],
+        "links": [{"text": "Paper A", "href": "https://example.com/papers/a", "selector_hint": "a.paper"}],
+    }
+
+    graph = builder.build_page_graph(full_spm)
+    compact_graph = builder.build_compact_page_graph(full_spm)
+    paths = builder.find_actionable_paths(graph, "search")
+
+    assert graph.summary
+    assert compact_graph.metadata["compact"] is True
+    assert paths
+    assert paths[0]["label"]
 
 
 def test_recovery_engine_helpers() -> None:

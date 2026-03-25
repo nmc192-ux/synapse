@@ -10,6 +10,7 @@ class EventType(str, Enum):
     DATA_EXTRACTED = "data.extracted"
     SCREENSHOT_CAPTURED = "screenshot.captured"
     SECURITY_ALERT = "security.alert"
+    BUDGET_UPDATED = "budget.updated"
     LOOP_OBSERVED = "loop.observed"
     LOOP_PLANNED = "loop.planned"
     LOOP_ACTED = "loop.acted"

@@ -31,6 +31,49 @@ class AgentSecurityPolicy(BaseModel):
     block_unsafe_actions: bool = True
 
 
+class AgentExecutionLimits(BaseModel):
+    max_steps: int = 60
+    max_pages: int = 25
+    max_tool_calls: int = 40
+    max_runtime_seconds: int = 180
+    max_tokens: int = 40000
+    max_memory_writes: int = 100
+
+    def merged(self, override: "AgentExecutionLimits | dict[str, int] | None") -> "AgentExecutionLimits":
+        if override is None:
+            return self.model_copy()
+        if isinstance(override, AgentExecutionLimits):
+            data = override.model_dump(exclude_unset=False)
+        else:
+            data = dict(override)
+        return self.model_copy(update={key: value for key, value in data.items() if value is not None})
+
+
+class AgentExecutionPolicy(BaseModel):
+    stop_on_soft_limit: bool = False
+    pause_on_hard_limit: bool = False
+    save_checkpoint_on_limit: bool = False
+
+
+class AgentBudgetUsage(BaseModel):
+    steps_used: int = 0
+    pages_opened: int = 0
+    tool_calls: int = 0
+    tokens_used: int = 0
+    memory_writes: int = 0
+    runtime_seconds: int = 0
+    llm_cost_estimate: float = 0.0
+    tool_cost_estimate: float = 0.0
+    limits: AgentExecutionLimits = Field(default_factory=AgentExecutionLimits)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class AgentCheckpoint(BaseModel):
+    agent_id: str
+    state: dict[str, object] = Field(default_factory=dict)
+    reason: str | None = None
+
+
 class AgentDefinition(BaseModel):
     agent_id: str = Field(..., description="Runtime identifier for the agent instance.")
     kind: AgentKind
@@ -42,6 +85,8 @@ class AgentDefinition(BaseModel):
     reputation: float = 0.5
     latency: float = 0.0
     security: AgentSecurityPolicy = Field(default_factory=AgentSecurityPolicy)
+    limits: AgentExecutionLimits | None = None
+    execution_policy: AgentExecutionPolicy = Field(default_factory=AgentExecutionPolicy)
     metadata: dict[str, str] = Field(default_factory=dict)
 
 

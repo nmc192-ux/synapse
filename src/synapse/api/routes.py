@@ -7,7 +7,7 @@ from synapse.models.a2a import (
     AgentRegistrationRequest,
     AgentWireMessage,
 )
-from synapse.models.agent import AgentDefinition, AgentDiscoveryEntry
+from synapse.models.agent import AgentBudgetUsage, AgentCheckpoint, AgentDefinition, AgentDiscoveryEntry
 from synapse.models.browser import (
     BrowserState,
     ClickRequest,
@@ -39,6 +39,7 @@ from synapse.models.task import (
     ToolCallRequest,
 )
 from synapse.runtime.orchestrator import RuntimeOrchestrator
+from synapse.runtime.budget import AgentBudgetLimitExceeded
 from synapse.runtime.security import SandboxPermissionError, SandboxRateLimitError
 from synapse.runtime.safety import SecurityAlertError
 from synapse.runtime.session import BrowserSession
@@ -76,6 +77,8 @@ async def navigate(
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxRateLimitError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except AgentBudgetLimitExceeded as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
 
 
 @router.post("/browser/open", response_model=BrowserState)
@@ -90,6 +93,8 @@ async def open_page(
     except SandboxPermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxRateLimitError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except AgentBudgetLimitExceeded as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
 
 
@@ -106,6 +111,8 @@ async def click(
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxRateLimitError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except AgentBudgetLimitExceeded as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
 
 
 @router.post("/browser/type", response_model=BrowserState)
@@ -120,6 +127,8 @@ async def type_text(
     except SandboxPermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxRateLimitError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except AgentBudgetLimitExceeded as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
 
 
@@ -136,6 +145,8 @@ async def extract(
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxRateLimitError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except AgentBudgetLimitExceeded as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
 
 
 @router.post("/browser/extract", response_model=ExtractionResult)
@@ -150,6 +161,8 @@ async def structured_extract(
     except SandboxPermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxRateLimitError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except AgentBudgetLimitExceeded as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
 
 
@@ -166,6 +179,8 @@ async def screenshot(
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxRateLimitError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except AgentBudgetLimitExceeded as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
 
 
 @router.post("/browser/layout", response_model=StructuredPageModel)
@@ -181,6 +196,8 @@ async def get_layout(
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxRateLimitError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except AgentBudgetLimitExceeded as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
 
 
 @router.post("/browser/find", response_model=list[PageElementMatch])
@@ -195,6 +212,8 @@ async def find_element(
     except SandboxPermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxRateLimitError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except AgentBudgetLimitExceeded as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
 
 
@@ -224,6 +243,29 @@ async def register_agent(
 @router.get("/agents", response_model=list[AgentDefinition])
 async def list_agents(orchestrator: RuntimeOrchestrator = Depends(get_orchestrator)) -> list[AgentDefinition]:
     return orchestrator.agents.list()
+
+
+@router.get("/agents/{agent_id}/budget", response_model=AgentBudgetUsage)
+async def get_agent_budget(
+    agent_id: str,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> AgentBudgetUsage:
+    try:
+        return await orchestrator.get_agent_budget(agent_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/agents/{agent_id}/checkpoint", response_model=AgentCheckpoint)
+async def save_agent_checkpoint(
+    agent_id: str,
+    state: dict[str, object],
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> AgentCheckpoint:
+    try:
+        return await orchestrator.save_agent_checkpoint(agent_id, state)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/agents/register", response_model=AgentDefinition)
@@ -298,7 +340,10 @@ async def store_memory(
     request: MemoryStoreRequest,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> MemoryRecord:
-    return await orchestrator.store_memory(request)
+    try:
+        return await orchestrator.store_memory(request)
+    except AgentBudgetLimitExceeded as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
 
 
 @router.post("/memory/search", response_model=list[MemorySearchResult])
@@ -336,6 +381,8 @@ async def call_tool(
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxRateLimitError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except AgentBudgetLimitExceeded as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
 
 
 @router.get("/plugins", response_model=list[PluginDescriptor])
@@ -360,6 +407,8 @@ async def execute_task(
         return await orchestrator.execute_task(request)
     except SecurityAlertError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except AgentBudgetLimitExceeded as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
 
 
 @router.post("/tasks/create", response_model=TaskRecord)

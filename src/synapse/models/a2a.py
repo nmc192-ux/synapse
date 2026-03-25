@@ -3,7 +3,7 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
-from synapse.models.agent import AgentDefinition, AgentSecurityPolicy
+from synapse.models.agent import AgentDefinition, AgentExecutionLimits, AgentExecutionPolicy, AgentSecurityPolicy
 from synapse.models.task import TaskRequest, TaskResult
 
 
@@ -58,6 +58,8 @@ class AgentRegistrationRequest(BaseModel):
     reputation: float = 0.5
     latency: float = 0.0
     security: AgentSecurityPolicy = Field(default_factory=AgentSecurityPolicy)
+    limits: AgentExecutionLimits | None = None
+    execution_policy: AgentExecutionPolicy = Field(default_factory=AgentExecutionPolicy)
     metadata: dict[str, str] = Field(default_factory=dict)
 
 

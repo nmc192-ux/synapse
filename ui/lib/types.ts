@@ -69,6 +69,22 @@ export type TaskItem = {
   assignedAgent: string;
 };
 
+export type BudgetMetric = {
+  label: string;
+  used: number;
+  limit: number;
+  percent: number;
+};
+
+export type AgentBudgetItem = {
+  agent: string;
+  runtimeSeconds: number;
+  warnings: string[];
+  metrics: BudgetMetric[];
+  llmCostEstimate: number;
+  toolCostEstimate: number;
+};
+
 export type DashboardState = {
   events: SynapseEvent[];
   activity: ActivityItem[];
@@ -77,5 +93,6 @@ export type DashboardState = {
   memory: MemoryItem[];
   messages: MessageItem[];
   tasks: TaskItem[];
+  budgets: AgentBudgetItem[];
   page: PageState;
 };

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import httpx
 
-from synapse.models.agent import AgentDefinition
+from synapse.models.agent import AgentBudgetUsage, AgentDefinition, AgentExecutionLimits, AgentKind
 from synapse.models.browser import (
     BrowserState,
     ClickRequest,
@@ -92,6 +92,29 @@ class SynapseClient:
         response = self._http.post("/api/messages", json=message.model_dump(mode="json"))
         response.raise_for_status()
         return AgentMessage.model_validate(response.json())
+
+    def get_budget(self, agent_id: str | None = None) -> AgentBudgetUsage:
+        resolved_agent_id = agent_id or self.agent_id
+        if resolved_agent_id is None:
+            raise ValueError("agent_id is required to fetch budget usage.")
+        response = self._http.get(f"/api/agents/{resolved_agent_id}/budget")
+        response.raise_for_status()
+        return AgentBudgetUsage.model_validate(response.json())
+
+    def save_checkpoint(
+        self,
+        state: dict[str, object] | None = None,
+        agent_id: str | None = None,
+    ) -> dict[str, object]:
+        resolved_agent_id = agent_id or self.agent_id
+        if resolved_agent_id is None:
+            raise ValueError("agent_id is required to save a checkpoint.")
+        response = self._http.post(
+            f"/api/agents/{resolved_agent_id}/checkpoint",
+            json=state or {},
+        )
+        response.raise_for_status()
+        return dict(response.json())
 
 
 class SynapseBrowser:
@@ -236,3 +259,47 @@ class SynapseMemory:
         response = self._client._http.get(f"/api/memory/{agent_id}/recent", params={"limit": limit})
         response.raise_for_status()
         return [MemoryRecord.model_validate(item) for item in response.json()]
+
+
+class SynapseAgent:
+    def __init__(
+        self,
+        name: str,
+        base_url: str = "http://127.0.0.1:8000",
+        kind: AgentKind | str = AgentKind.CUSTOM,
+        limits: dict[str, int] | AgentExecutionLimits | None = None,
+        timeout: float = 30.0,
+    ) -> None:
+        self.name = name
+        self.client = SynapseClient(base_url=base_url, timeout=timeout, agent_id=name)
+        self.kind = AgentKind(kind)
+        self.limits = (
+            limits if isinstance(limits, AgentExecutionLimits) or limits is None else AgentExecutionLimits(**limits)
+        )
+
+    @property
+    def browser(self) -> SynapseBrowser:
+        return self.client.browser
+
+    @property
+    def memory(self) -> SynapseMemory:
+        return self.client.memory
+
+    def register(self, **definition_overrides: object) -> AgentDefinition:
+        agent = AgentDefinition(
+            agent_id=self.name,
+            kind=self.kind,
+            name=self.name,
+            limits=self.limits,
+            **definition_overrides,
+        )
+        return self.client.register_agent(agent)
+
+    def get_budget(self) -> AgentBudgetUsage:
+        return self.client.get_budget(self.name)
+
+    def save_checkpoint(self, state: dict[str, object] | None = None) -> dict[str, object]:
+        return self.client.save_checkpoint(state=state, agent_id=self.name)
+
+    def close(self) -> None:
+        self.client.close()

@@ -193,6 +193,42 @@ export function Dashboard() {
                 ))}
               </div>
             </Panel>
+
+            <Panel title="Agent Budget" badge={`${state.budgets.length} agents`}>
+              <div className="budget-list">
+                {state.budgets.map((budget) => (
+                  <article className="budget-card" key={budget.agent}>
+                    <div className="budget-header">
+                      <strong>{budget.agent}</strong>
+                      <span>{budget.runtimeSeconds}s</span>
+                    </div>
+                    <div className="budget-metrics">
+                      {budget.metrics.map((metric) => (
+                        <div className="budget-metric" key={`${budget.agent}-${metric.label}`}>
+                          <div className="budget-labels">
+                            <span>{metric.label}</span>
+                            <strong>
+                              {metric.used}/{metric.limit}
+                            </strong>
+                          </div>
+                          <div className="budget-bar">
+                            <div className="budget-fill" style={{ width: `${metric.percent}%` }} />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <p className="budget-cost mono">
+                      llm ${budget.llmCostEstimate.toFixed(4)} · tools ${budget.toolCostEstimate.toFixed(4)}
+                    </p>
+                    {budget.warnings.map((warning) => (
+                      <p className="budget-warning" key={warning}>
+                        {warning}
+                      </p>
+                    ))}
+                  </article>
+                ))}
+              </div>
+            </Panel>
           </div>
 
           <Panel title="A2A Messages" badge={`${a2aMessages} routed`}>

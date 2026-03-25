@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 from synapse.models.agent import AgentDefinition
 from synapse.models.task import TaskRequest, TaskResult
 from synapse.runtime.agent_loop import EventDrivenAgentLoop
+from synapse.runtime.budget import AgentBudgetManager
 from synapse.runtime.browser import BrowserRuntime
 from synapse.runtime.memory import AgentMemoryManager
 from synapse.runtime.security import AgentSecuritySandbox
@@ -19,14 +20,17 @@ class AgentAdapter(ABC):
         sandbox: AgentSecuritySandbox,
         safety: AgentSafetyLayer,
         memory_manager: AgentMemoryManager,
+        budget_manager: AgentBudgetManager,
     ) -> None:
         self.definition = definition
         self.loop = EventDrivenAgentLoop(
+            definition=definition,
             browser=browser,
             sockets=sockets,
             sandbox=sandbox,
             safety=safety,
             memory_manager=memory_manager,
+            budget_manager=budget_manager,
         )
 
     @abstractmethod

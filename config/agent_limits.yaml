@@ -1,0 +1,7 @@
+agent_limits:
+  max_steps: 60
+  max_pages: 25
+  max_tool_calls: 40
+  max_runtime_seconds: 180
+  max_tokens: 40000
+  max_memory_writes: 100

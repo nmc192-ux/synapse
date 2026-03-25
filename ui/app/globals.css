@@ -269,7 +269,9 @@ textarea {
 
 .page-stage,
 .section-stack,
-.task-list {
+.task-list,
+.budget-list,
+.budget-metrics {
   display: grid;
   gap: 12px;
 }
@@ -310,7 +312,8 @@ textarea {
 }
 
 .section-card,
-.task-card {
+.task-card,
+.budget-card {
   padding: 14px 16px;
   border: 1px solid var(--line);
   border-radius: 18px;
@@ -339,6 +342,48 @@ textarea {
   margin: 8px 0 0;
   color: var(--muted);
   line-height: 1.55;
+}
+
+.budget-header,
+.budget-labels {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.budget-header strong,
+.budget-labels strong {
+  margin: 0;
+}
+
+.budget-header span,
+.budget-labels span {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.budget-bar {
+  overflow: hidden;
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.budget-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-warm));
+}
+
+.budget-cost,
+.budget-warning {
+  margin: 8px 0 0;
+  color: var(--muted);
+}
+
+.budget-warning {
+  color: var(--accent-warm);
 }
 
 .chip-card,

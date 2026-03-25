@@ -124,6 +124,20 @@ export const initialState: DashboardState = {
       assignedAgent: "claude-code-example",
     },
   ],
+  budgets: [
+    {
+      agent: "codex-example",
+      runtimeSeconds: 42,
+      warnings: ["Agent budget warning: 80% of max_pages reached."],
+      llmCostEstimate: 0.007,
+      toolCostEstimate: 0.002,
+      metrics: [
+        { label: "Steps", used: 48, limit: 60, percent: 80 },
+        { label: "Pages", used: 20, limit: 25, percent: 80 },
+        { label: "Tool Calls", used: 8, limit: 40, percent: 20 },
+      ],
+    },
+  ],
   page: {
     url: "https://example.com",
     title: "Example Domain",

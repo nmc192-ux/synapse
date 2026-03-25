@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from synapse.api.routes import router
 from synapse.config import settings
 from synapse.runtime.a2a import A2AHub
+from synapse.runtime.budget import AgentBudgetManager
 from synapse.runtime.browser import BrowserRuntime
 from synapse.runtime.memory import AgentMemoryManager
 from synapse.runtime.messaging import AgentMessageBus
@@ -27,6 +28,7 @@ memory_manager = AgentMemoryManager()
 task_manager = TaskExecutionManager()
 sandbox = AgentSecuritySandbox(agent_registry)
 safety = AgentSafetyLayer()
+budget_manager = AgentBudgetManager()
 orchestrator = RuntimeOrchestrator(
     browser=browser_runtime,
     agents=agent_registry,
@@ -38,6 +40,7 @@ orchestrator = RuntimeOrchestrator(
     sockets=websocket_manager,
     sandbox=sandbox,
     safety=safety,
+    budget_manager=budget_manager,
 )
 a2a_hub.set_task_executor(orchestrator.execute_task)
 

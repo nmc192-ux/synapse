@@ -1,3 +1,3 @@
-from synapse.sdk.client import SynapseBrowser, SynapseClient, SynapseMemory
+from synapse.sdk.client import SynapseAgent, SynapseBrowser, SynapseClient, SynapseMemory
 
-__all__ = ["SynapseBrowser", "SynapseClient", "SynapseMemory"]
+__all__ = ["SynapseAgent", "SynapseBrowser", "SynapseClient", "SynapseMemory"]

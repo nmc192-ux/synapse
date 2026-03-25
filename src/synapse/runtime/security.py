@@ -3,10 +3,13 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from collections.abc import Callable
 from time import monotonic
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 from synapse.models.agent import AgentDefinition
-from synapse.runtime.registry import AgentRegistry
+
+if TYPE_CHECKING:
+    from synapse.runtime.registry import AgentRegistry
 
 
 class SandboxPermissionError(PermissionError):

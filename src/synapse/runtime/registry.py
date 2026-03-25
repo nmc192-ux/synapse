@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from synapse.adapters.a2a import A2AAdapter
 from synapse.adapters.base import AgentAdapter
 from synapse.adapters.claude_code import ClaudeCodeAdapter
@@ -5,6 +7,7 @@ from synapse.adapters.codex import CodexAdapter
 from synapse.adapters.custom import CustomAgentAdapter
 from synapse.adapters.openclaw import OpenClawAdapter
 from synapse.models.agent import AgentDefinition, AgentDiscoveryEntry, AgentKind
+from synapse.runtime.budget import AgentBudgetManager
 from synapse.runtime.browser import BrowserRuntime
 from synapse.runtime.memory import AgentMemoryManager
 from synapse.runtime.security import AgentSecuritySandbox
@@ -71,6 +74,7 @@ class AgentRegistry:
         sandbox: AgentSecuritySandbox,
         safety: AgentSafetyLayer,
         memory_manager: AgentMemoryManager,
+        budget_manager: AgentBudgetManager,
     ) -> AgentAdapter:
         definition = self.get(agent_id)
         adapter_map: dict[AgentKind, type[AgentAdapter]] = {
@@ -88,4 +92,5 @@ class AgentRegistry:
             sandbox=sandbox,
             safety=safety,
             memory_manager=memory_manager,
+            budget_manager=budget_manager,
         )

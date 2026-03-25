@@ -1,7 +1,7 @@
 import uuid
 
 from synapse.models.a2a import A2AEnvelope, A2AMessageType, AgentDelegateRequest, AgentPresence, AgentRegistrationRequest, AgentWireMessage
-from synapse.models.agent import AgentDefinition, AgentDiscoveryEntry
+from synapse.models.agent import AgentBudgetUsage, AgentCheckpoint, AgentDefinition, AgentDiscoveryEntry
 from synapse.models.browser import (
     BrowserState,
     ClickRequest,
@@ -27,6 +27,7 @@ from synapse.models.task import TaskClaimRequest, TaskCreateRequest, TaskRecord,
 from synapse.runtime.browser import BrowserRuntime
 from synapse.runtime.messaging import AgentMessageBus
 from synapse.runtime.a2a import A2AHub
+from synapse.runtime.budget import AgentBudgetLimitExceeded, AgentBudgetManager
 from synapse.runtime.memory import AgentMemoryManager
 from synapse.runtime.registry import AgentRegistry
 from synapse.runtime.security import AgentSecuritySandbox
@@ -50,6 +51,7 @@ class RuntimeOrchestrator:
         sockets: WebSocketManager,
         sandbox: AgentSecuritySandbox,
         safety: AgentSafetyLayer,
+        budget_manager: AgentBudgetManager,
     ) -> None:
         self.browser = browser
         self.agents = agents
@@ -61,6 +63,7 @@ class RuntimeOrchestrator:
         self.sockets = sockets
         self.sandbox = sandbox
         self.safety = safety
+        self.budget_manager = budget_manager
 
     async def create_session(self, session_id: str | None = None) -> BrowserSession:
         resolved_session_id = session_id or str(uuid.uuid4())
@@ -77,6 +80,10 @@ class RuntimeOrchestrator:
     async def navigate(self, request: NavigationRequest) -> BrowserSession:
         self.sandbox.authorize_domain(request.agent_id, str(request.url))
         self.sandbox.consume_browser_action(request.agent_id)
+        if request.agent_id:
+            usage = self.budget_manager.increment_page(self.agents.get(request.agent_id))
+            await self._broadcast_budget_update(request.agent_id, usage)
+            await self._check_budget_limits(request.agent_id)
         session = await self.browser.navigate(request.session_id, str(request.url))
         await self._enforce_page_safety(
             agent_id=request.agent_id,
@@ -96,6 +103,10 @@ class RuntimeOrchestrator:
     async def open(self, request: OpenRequest) -> BrowserState:
         self.sandbox.authorize_domain(request.agent_id, str(request.url))
         self.sandbox.consume_browser_action(request.agent_id)
+        if request.agent_id:
+            usage = self.budget_manager.increment_page(self.agents.get(request.agent_id))
+            await self._broadcast_budget_update(request.agent_id, usage)
+            await self._check_budget_limits(request.agent_id)
         state = await self.browser.open(request.session_id, str(request.url))
         await self._enforce_page_safety(
             agent_id=request.agent_id,
@@ -232,6 +243,7 @@ class RuntimeOrchestrator:
 
     async def register_agent(self, definition: AgentDefinition) -> AgentDefinition:
         agent = self.agents.register(definition)
+        self.budget_manager.get_or_create(agent)
         await self.sockets.broadcast(
             RuntimeEvent(
                 event_type=EventType.AGENT_REGISTERED,
@@ -243,6 +255,7 @@ class RuntimeOrchestrator:
 
     async def register_a2a_agent(self, request: AgentRegistrationRequest) -> AgentDefinition:
         agent = self.a2a.register_agent(request)
+        self.budget_manager.get_or_create(agent)
         await self.sockets.broadcast(
             RuntimeEvent(
                 event_type=EventType.AGENT_REGISTERED,
@@ -261,6 +274,10 @@ class RuntimeOrchestrator:
         await self._enforce_tool_safety(agent_id, tool_name, arguments)
         self.sandbox.authorize_tool(agent_id, tool_name)
         self.sandbox.consume_tool_call(agent_id)
+        if agent_id:
+            usage = self.budget_manager.increment_tool_call(self.agents.get(agent_id))
+            await self._broadcast_budget_update(agent_id, usage)
+            await self._check_budget_limits(agent_id)
         result = await self.tools.call(tool_name, arguments)
         await self.sockets.broadcast(
             RuntimeEvent(
@@ -292,13 +309,44 @@ class RuntimeOrchestrator:
         return stored
 
     async def store_memory(self, request: MemoryStoreRequest) -> MemoryRecord:
-        return await self.memory_manager.store(request)
+        record = await self.memory_manager.store(request)
+        try:
+            usage = self.budget_manager.increment_memory_write(self.agents.get(request.agent_id))
+            await self._broadcast_budget_update(request.agent_id, usage)
+            await self._check_budget_limits(request.agent_id)
+        except KeyError:
+            pass
+        return record
 
     async def search_memory(self, request: MemorySearchRequest) -> list[MemorySearchResult]:
         return await self.memory_manager.search(request)
 
     async def get_recent_memory(self, agent_id: str, limit: int = 10) -> list[MemoryRecord]:
         return await self.memory_manager.get_recent(agent_id, limit)
+
+    async def get_agent_budget(self, agent_id: str) -> AgentBudgetUsage:
+        self.agents.get(agent_id)
+        return self.budget_manager.get_usage(agent_id)
+
+    async def save_agent_checkpoint(
+        self,
+        agent_id: str,
+        state: dict[str, object],
+        reason: str | None = None,
+    ) -> AgentCheckpoint:
+        self.agents.get(agent_id)
+        checkpoint = self.budget_manager.save_checkpoint(agent_id, state, reason)
+        await self.sockets.broadcast(
+            RuntimeEvent(
+                event_type=EventType.BUDGET_UPDATED,
+                agent_id=agent_id,
+                payload={
+                    "usage": self.budget_manager.get_usage(agent_id).model_dump(mode="json"),
+                    "checkpoint_reason": reason,
+                },
+            )
+        )
+        return checkpoint
 
     async def discover_agents(self) -> list[AgentPresence]:
         return self.a2a.list_agents()
@@ -347,6 +395,7 @@ class RuntimeOrchestrator:
 
     async def execute_task(self, request: TaskRequest) -> TaskResult:
         await self._enforce_task_safety(request)
+        self.budget_manager.get_or_create(self.agents.get(request.agent_id))
         if request.session_id is None:
             session = await self.create_session()
             request = request.model_copy(update={"session_id": session.session_id})
@@ -361,6 +410,7 @@ class RuntimeOrchestrator:
             sandbox=self.sandbox,
             safety=self.safety,
             memory_manager=self.memory_manager,
+            budget_manager=self.budget_manager,
         )
         result = await adapter.execute_task(request)
         final_result = result.model_copy(
@@ -429,3 +479,42 @@ class RuntimeOrchestrator:
             )
         )
         raise SecurityAlertError(finding)
+
+    async def _broadcast_budget_update(
+        self,
+        agent_id: str,
+        usage: AgentBudgetUsage,
+        warning: str | None = None,
+    ) -> None:
+        payload: dict[str, object] = {"usage": usage.model_dump(mode="json")}
+        if warning is not None:
+            payload["warning"] = warning
+        await self.sockets.broadcast(
+            RuntimeEvent(
+                event_type=EventType.BUDGET_UPDATED,
+                agent_id=agent_id,
+                payload=payload,
+            )
+        )
+
+    async def _check_budget_limits(self, agent_id: str) -> None:
+        agent = self.agents.get(agent_id)
+        try:
+            usage, warnings = self.budget_manager.check_limits(agent)
+        except AgentBudgetLimitExceeded as exc:
+            if agent.execution_policy.save_checkpoint_on_limit or agent.execution_policy.pause_on_hard_limit:
+                self.budget_manager.save_checkpoint(
+                    agent_id,
+                    {
+                        "usage": self.budget_manager.get_usage(agent_id).model_dump(mode="json"),
+                    },
+                    reason=str(exc),
+                )
+            await self._broadcast_budget_update(agent_id, self.budget_manager.get_usage(agent_id), warning=str(exc))
+            raise
+
+        if agent.execution_policy.stop_on_soft_limit and any("exceeded" in warning for warning in warnings):
+            raise AgentBudgetLimitExceeded("Agent terminated: soft budget limit exceeded.")
+
+        for warning in warnings:
+            await self._broadcast_budget_update(agent_id, usage, warning=warning)

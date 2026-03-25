@@ -11,6 +11,7 @@ import {
   SynapseEvent,
   TaskItem,
   ThoughtItem,
+  AgentBudgetItem,
 } from "@/lib/types";
 
 const defaultSocketUrl =
@@ -47,6 +48,7 @@ function applyEvent(current: DashboardState, event: SynapseEvent): DashboardStat
   const message = buildMessage(event, payload);
   const memory = buildMemory(event, payload);
   const task = buildTask(event, payload);
+  const budget = buildBudget(event, payload);
 
   return {
     ...current,
@@ -57,6 +59,7 @@ function applyEvent(current: DashboardState, event: SynapseEvent): DashboardStat
     memory: memory ? [memory, ...current.memory].slice(0, 6) : current.memory,
     messages: message ? [message, ...current.messages].slice(0, 8) : current.messages,
     tasks: task ? mergeTask(current.tasks, task).slice(0, 8) : current.tasks,
+    budgets: budget ? mergeBudget(current.budgets, budget).slice(0, 6) : current.budgets,
     page: derivePage(current.page, event, payload),
   };
 }
@@ -176,6 +179,41 @@ function buildTask(
   };
 }
 
+function buildBudget(
+  event: SynapseEvent,
+  payload: Record<string, unknown>,
+): AgentBudgetItem | null {
+  if (event.event_type !== "budget.updated") {
+    return null;
+  }
+
+  const usage = payload.usage;
+  if (!usage || typeof usage !== "object") {
+    return null;
+  }
+
+  const usageRecord = usage as Record<string, unknown>;
+  const limits = (usageRecord.limits && typeof usageRecord.limits === "object"
+    ? usageRecord.limits
+    : {}) as Record<string, unknown>;
+
+  return {
+    agent: event.agent_id ?? "agent",
+    runtimeSeconds: Number(usageRecord.runtime_seconds ?? 0),
+    warnings: [
+      ...toStringArray(usageRecord.warnings),
+      ...(typeof payload.warning === "string" ? [payload.warning] : []),
+    ].slice(0, 4),
+    llmCostEstimate: Number(usageRecord.llm_cost_estimate ?? 0),
+    toolCostEstimate: Number(usageRecord.tool_cost_estimate ?? 0),
+    metrics: [
+      budgetMetric("Steps", usageRecord.steps_used, limits.max_steps),
+      budgetMetric("Pages", usageRecord.pages_opened, limits.max_pages),
+      budgetMetric("Tool Calls", usageRecord.tool_calls, limits.max_tool_calls),
+    ],
+  };
+}
+
 function derivePage(
   current: DashboardState["page"],
   event: SynapseEvent,
@@ -269,6 +307,8 @@ function summarizeEvent(eventType: string, payload: Record<string, unknown>): st
       return `Tool call finished: ${stringify(payload.tool_name) ?? "unknown tool"}.`;
     case "task.updated":
       return `Task ${stringify(payload.status) ?? "running"} for ${stringify(payload.goal) ?? "runtime work"}.`;
+    case "budget.updated":
+      return stringify(payload.warning) ?? "Agent budget usage updated.";
     case "loop.observed":
       return `Observed ${stringify(payload.event_count) ?? "0"} fresh events before planning.`;
     case "loop.planned":
@@ -316,4 +356,28 @@ function toRecordArray(value: unknown): Record<string, unknown>[] {
 function mergeTask(current: TaskItem[], next: TaskItem): TaskItem[] {
   const remaining = current.filter((task) => task.id !== next.id);
   return [next, ...remaining];
+}
+
+function mergeBudget(current: AgentBudgetItem[], next: AgentBudgetItem): AgentBudgetItem[] {
+  const remaining = current.filter((item) => item.agent !== next.agent);
+  return [next, ...remaining];
+}
+
+function budgetMetric(label: string, used: unknown, limit: unknown) {
+  const resolvedUsed = Number(used ?? 0);
+  const resolvedLimit = Number(limit ?? 0);
+  const percent = resolvedLimit > 0 ? Math.min(100, Math.round((resolvedUsed / resolvedLimit) * 100)) : 0;
+  return {
+    label,
+    used: resolvedUsed,
+    limit: resolvedLimit,
+    percent,
+  };
+}
+
+function toStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is string => typeof item === "string");
 }

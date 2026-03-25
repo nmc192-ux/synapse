@@ -13,7 +13,7 @@ from synapse.runtime.registry import AgentRegistry
 from synapse.runtime.planning import NavigationEvaluator, NavigationPlanner
 from synapse.runtime.security import AgentSecuritySandbox, SandboxPermissionError, SandboxRateLimitError
 from synapse.runtime.safety import AgentSafetyLayer
-from synapse.sdk import SynapseClient
+from synapse.sdk import Synapse, SynapseClient
 
 
 def test_healthcheck() -> None:
@@ -122,6 +122,32 @@ def test_sdk_client_exposes_memory() -> None:
     client = SynapseClient("http://127.0.0.1:8000")
     assert client.memory is not None
     client.close()
+
+
+def test_synapse_convenience_wrapper_extracts_page_matches() -> None:
+    browser = Synapse("http://127.0.0.1:8000")
+    original_find_element = browser.find_element
+    original_get_layout = browser.get_layout
+
+    def fake_find_element(element_type: str, text: str) -> list[PageElementMatch]:
+        assert text == "paper"
+        if element_type == "sections":
+            return [PageElementMatch(element_type="section", text="paper one", selector_hint="section.paper")]
+        return []
+
+    def fake_get_layout() -> StructuredPageModel:
+        return StructuredPageModel(title="ArXiv", url="https://arxiv.org")
+
+    browser.find_element = fake_find_element
+    browser.get_layout = fake_get_layout
+
+    matches = browser.find("paper")
+
+    assert matches[0].selector_hint == "section.paper"
+
+    browser.find_element = original_find_element
+    browser.get_layout = original_get_layout
+    browser.close()
 
 
 def test_codex_connector_normalizes_plan() -> None:

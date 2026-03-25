@@ -152,7 +152,28 @@ class SynapseBrowser:
         response.raise_for_status()
         return BrowserState.model_validate(response.json())
 
-    def extract(self, selector: str, attribute: str | None = None) -> ExtractionResult:
+    def extract(
+        self,
+        selector: str | PageElementMatch | list[PageElementMatch] | tuple[PageElementMatch, ...],
+        attribute: str | None = None,
+    ) -> ExtractionResult:
+        if isinstance(selector, PageElementMatch):
+            resolved_selector = selector.selector_hint
+            if resolved_selector is None:
+                raise ValueError("PageElementMatch is missing selector_hint.")
+            selector = resolved_selector
+
+        if isinstance(selector, (list, tuple)):
+            results = [self.extract(match, attribute=attribute) for match in selector]
+            if not results:
+                return ExtractionResult(session_id=self.session_id, matches=[], page=self.get_layout())
+            merged_matches = [item for result in results for item in result.matches]
+            return ExtractionResult(
+                session_id=self.session_id,
+                matches=merged_matches,
+                page=results[-1].page,
+            )
+
         payload = ExtractRequest(
             session_id=self.session_id,
             agent_id=self._agent_id,
@@ -183,6 +204,19 @@ class SynapseBrowser:
         response = self._client._http.post("/api/browser/find", json=payload.model_dump(mode="json"))
         response.raise_for_status()
         return [PageElementMatch.model_validate(item) for item in response.json()]
+
+    def find(self, text: str, element_types: list[str] | None = None) -> list[PageElementMatch]:
+        resolved_types = element_types or ["sections", "buttons", "inputs", "forms", "tables", "links"]
+        matches: list[PageElementMatch] = []
+        seen: set[tuple[str, str | None, str]] = set()
+        for element_type in resolved_types:
+            for match in self.find_element(element_type, text):
+                key = (match.element_type, match.selector_hint, match.text)
+                if key in seen:
+                    continue
+                seen.add(key)
+                matches.append(match)
+        return matches
 
     def inspect(self, selector: str) -> PageInspection:
         payload = InspectRequest(session_id=self.session_id, agent_id=self._agent_id, selector=selector)
@@ -300,6 +334,20 @@ class SynapseAgent:
 
     def save_checkpoint(self, state: dict[str, object] | None = None) -> dict[str, object]:
         return self.client.save_checkpoint(state=state, agent_id=self.name)
+
+    def close(self) -> None:
+        self.client.close()
+
+
+class Synapse(SynapseBrowser):
+    def __init__(
+        self,
+        base_url: str = "http://127.0.0.1:8000",
+        timeout: float = 30.0,
+        agent_id: str | None = None,
+    ) -> None:
+        self.client = SynapseClient(base_url=base_url, timeout=timeout, agent_id=agent_id)
+        super().__init__(self.client, agent_id=agent_id)
 
     def close(self) -> None:
         self.client.close()

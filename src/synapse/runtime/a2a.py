@@ -1,8 +1,9 @@
+import uuid
 from collections.abc import Awaitable, Callable
 
 from fastapi import WebSocket
 
-from synapse.models.a2a import A2AEnvelope, A2AMessageType, AgentPresence
+from synapse.models.a2a import A2AEnvelope, A2AMessageType, AgentPresence, AgentRegistrationRequest, AgentWireMessage
 from synapse.models.agent import AgentDefinition, AgentKind
 from synapse.models.task import TaskRequest, TaskResult
 from synapse.runtime.registry import AgentRegistry
@@ -20,14 +21,23 @@ class A2AHub:
     def set_task_executor(self, executor: TaskExecutor) -> None:
         self._task_executor = executor
 
+    def register_agent(self, request: AgentRegistrationRequest) -> AgentDefinition:
+        definition = AgentDefinition(
+            agent_id=request.agent_id,
+            kind=AgentKind.A2A,
+            name=request.name,
+            description=request.description,
+            metadata=request.metadata,
+        )
+        return self.agents.register(definition)
+
     async def connect(self, agent_id: str, websocket: WebSocket) -> None:
         await websocket.accept()
         self._connections[agent_id] = websocket
         if agent_id not in {agent.agent_id for agent in self.agents.list()}:
-            self.agents.register(
-                AgentDefinition(
+            self.register_agent(
+                AgentRegistrationRequest(
                     agent_id=agent_id,
-                    kind=AgentKind.A2A,
                     name=agent_id,
                     description="Auto-registered A2A agent connection.",
                 )
@@ -48,7 +58,7 @@ class A2AHub:
             {**payload, "sender_agent_id": sender_agent_id}
         )
 
-        if envelope.type == A2AMessageType.DISCOVER:
+        if envelope.type in {A2AMessageType.DISCOVER, A2AMessageType.DISCOVER_AGENTS}:
             response = A2AEnvelope(
                 type=A2AMessageType.DISCOVER_RESPONSE,
                 sender_agent_id="synapse",
@@ -64,10 +74,14 @@ class A2AHub:
             await self.send(response)
             return response
 
-        if envelope.type in {A2AMessageType.REQUEST, A2AMessageType.RESPONSE}:
+        if envelope.type in {
+            A2AMessageType.REQUEST,
+            A2AMessageType.RESPONSE,
+            A2AMessageType.SEND_MESSAGE,
+        }:
             return await self._send_or_error(envelope, sender_agent_id)
 
-        if envelope.type == A2AMessageType.DELEGATE:
+        if envelope.type in {A2AMessageType.DELEGATE, A2AMessageType.REQUEST_TASK}:
             if self._task_executor is None:
                 error = self._build_error(
                     sender_agent_id=sender_agent_id,
@@ -105,7 +119,54 @@ class A2AHub:
         if websocket is None:
             raise KeyError(f"Agent is not connected: {envelope.recipient_agent_id}")
 
-        await websocket.send_json(envelope.model_dump(mode="json"))
+        await websocket.send_json(self.to_wire_message(envelope).model_dump(mode="json"))
+
+    def to_wire_message(self, envelope: A2AEnvelope) -> AgentWireMessage:
+        target_agent = envelope.recipient_agent_id
+        if envelope.type in {A2AMessageType.REQUEST, A2AMessageType.RESPONSE, A2AMessageType.SEND_MESSAGE}:
+            message_type = A2AMessageType.SEND_MESSAGE
+        elif envelope.type in {A2AMessageType.DELEGATE, A2AMessageType.REQUEST_TASK}:
+            message_type = A2AMessageType.REQUEST_TASK
+        elif envelope.type == A2AMessageType.DISCOVER_RESPONSE:
+            message_type = A2AMessageType.DISCOVER_RESPONSE
+        elif envelope.type == A2AMessageType.TASK_RESULT:
+            message_type = A2AMessageType.TASK_RESULT
+        elif envelope.type in {A2AMessageType.ERROR, A2AMessageType.ERROR_LEGACY}:
+            message_type = A2AMessageType.ERROR
+        else:
+            message_type = envelope.type
+
+        payload = {**envelope.payload, "message_id": envelope.message_id}
+        if envelope.correlation_id:
+            payload["correlation_id"] = envelope.correlation_id
+        return AgentWireMessage(
+            type=message_type,
+            agent=envelope.sender_agent_id,
+            target_agent=target_agent,
+            payload=payload,
+        )
+
+    def from_wire_message(self, message: AgentWireMessage) -> A2AEnvelope:
+        payload = dict(message.payload)
+        message_id = str(payload.pop("message_id", uuid.uuid4()))
+        correlation_id = payload.pop("correlation_id", None)
+        if message.type == A2AMessageType.SEND_MESSAGE:
+            envelope_type = A2AMessageType.REQUEST
+        elif message.type == A2AMessageType.REQUEST_TASK:
+            envelope_type = A2AMessageType.DELEGATE
+        elif message.type == A2AMessageType.DISCOVER_AGENTS:
+            envelope_type = A2AMessageType.DISCOVER
+        else:
+            envelope_type = message.type
+
+        return A2AEnvelope(
+            message_id=message_id,
+            type=envelope_type,
+            sender_agent_id=message.agent,
+            recipient_agent_id=message.target_agent,
+            correlation_id=correlation_id,
+            payload=payload,
+        )
 
     def _build_error(
         self,

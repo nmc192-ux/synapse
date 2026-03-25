@@ -1,6 +1,6 @@
 import uuid
 
-from synapse.models.a2a import A2AEnvelope, AgentPresence
+from synapse.models.a2a import A2AEnvelope, A2AMessageType, AgentDelegateRequest, AgentPresence, AgentRegistrationRequest, AgentWireMessage
 from synapse.models.agent import AgentDefinition
 from synapse.models.browser import (
     BrowserState,
@@ -165,6 +165,17 @@ class RuntimeOrchestrator:
         )
         return agent
 
+    async def register_a2a_agent(self, request: AgentRegistrationRequest) -> AgentDefinition:
+        agent = self.a2a.register_agent(request)
+        await self.sockets.broadcast(
+            RuntimeEvent(
+                event_type=EventType.AGENT_REGISTERED,
+                agent_id=agent.agent_id,
+                payload=agent.model_dump(mode="json"),
+            )
+        )
+        return agent
+
     async def call_tool(self, tool_name: str, arguments: dict[str, object]) -> dict[str, object]:
         result = await self.tools.call(tool_name, arguments)
         await self.sockets.broadcast(
@@ -220,6 +231,20 @@ class RuntimeOrchestrator:
             )
         )
         return response
+
+    async def send_agent_wire_message(self, message: AgentWireMessage) -> AgentWireMessage:
+        envelope = self.a2a.from_wire_message(message)
+        response = await self.send_a2a(envelope)
+        return self.a2a.to_wire_message(response)
+
+    async def delegate_agent_task(self, request: AgentDelegateRequest) -> AgentWireMessage:
+        message = AgentWireMessage(
+            type=A2AMessageType.REQUEST_TASK,
+            agent=request.agent,
+            target_agent=request.target_agent,
+            payload=request.payload,
+        )
+        return await self.send_agent_wire_message(message)
 
     async def create_task_record(self, request: TaskCreateRequest) -> TaskRecord:
         return await self.task_manager.create_task(request)

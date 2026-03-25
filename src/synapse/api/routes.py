@@ -1,6 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 
-from synapse.models.a2a import A2AEnvelope, AgentPresence
+from synapse.models.a2a import (
+    A2AEnvelope,
+    AgentDelegateRequest,
+    AgentPresence,
+    AgentRegistrationRequest,
+    AgentWireMessage,
+)
 from synapse.models.agent import AgentDefinition
 from synapse.models.browser import (
     BrowserState,
@@ -146,6 +152,37 @@ async def register_agent(
 @router.get("/agents", response_model=list[AgentDefinition])
 async def list_agents(orchestrator: RuntimeOrchestrator = Depends(get_orchestrator)) -> list[AgentDefinition]:
     return orchestrator.agents.list()
+
+
+@router.post("/agents/register", response_model=AgentDefinition)
+async def register_a2a_agent(
+    request: AgentRegistrationRequest,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> AgentDefinition:
+    return await orchestrator.register_a2a_agent(request)
+
+
+@router.get("/agents/discover", response_model=list[AgentPresence])
+async def discover_a2a_agents(
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> list[AgentPresence]:
+    return await orchestrator.discover_agents()
+
+
+@router.post("/agents/message", response_model=AgentWireMessage)
+async def send_agent_message_wire(
+    request: AgentWireMessage,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> AgentWireMessage:
+    return await orchestrator.send_agent_wire_message(request)
+
+
+@router.post("/agents/delegate", response_model=AgentWireMessage)
+async def delegate_agent_task(
+    request: AgentDelegateRequest,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> AgentWireMessage:
+    return await orchestrator.delegate_agent_task(request)
 
 
 @router.get("/a2a/agents", response_model=list[AgentPresence])
@@ -294,7 +331,8 @@ async def websocket_a2a(websocket: WebSocket, agent_id: str) -> None:
     try:
         while True:
             payload = await websocket.receive_json()
-            response = await runtime.a2a.handle_message(agent_id, payload)
+            wire_message = AgentWireMessage.model_validate({**payload, "agent": agent_id})
+            response = await runtime.send_agent_wire_message(wire_message)
             if response is not None:
                 await runtime.sockets.broadcast(
                     RuntimeEvent(

@@ -8,13 +8,19 @@ from synapse.models.task import TaskRequest, TaskResult
 
 
 class A2AMessageType(str, Enum):
+    REGISTER_AGENT = "REGISTER_AGENT"
+    DISCOVER_AGENTS = "DISCOVER_AGENTS"
+    SEND_MESSAGE = "SEND_MESSAGE"
+    REQUEST_TASK = "REQUEST_TASK"
+    TASK_RESULT = "TASK_RESULT"
+    DISCOVER_RESPONSE = "DISCOVER_RESPONSE"
+    ERROR = "ERROR"
     DISCOVER = "discover"
-    DISCOVER_RESPONSE = "discover_response"
     REQUEST = "request"
     RESPONSE = "response"
     DELEGATE = "delegate"
-    TASK_RESULT = "task_result"
-    ERROR = "error"
+    TASK_RESULT_LEGACY = "task_result"
+    ERROR_LEGACY = "error"
 
 
 class A2AEnvelope(BaseModel):
@@ -41,3 +47,23 @@ class DelegatePayload(BaseModel):
 
 class TaskResultPayload(BaseModel):
     task: TaskResult
+
+
+class AgentRegistrationRequest(BaseModel):
+    agent_id: str
+    name: str
+    description: str | None = None
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+
+class AgentWireMessage(BaseModel):
+    type: A2AMessageType
+    agent: str
+    target_agent: str | None = None
+    payload: dict[str, object] = Field(default_factory=dict)
+
+
+class AgentDelegateRequest(BaseModel):
+    agent: str
+    target_agent: str
+    payload: dict[str, object] = Field(default_factory=dict)

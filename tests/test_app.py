@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
 
 from synapse.main import app
-from synapse.models.a2a import A2AEnvelope, A2AMessageType
+from synapse.models.a2a import A2AEnvelope, A2AMessageType, AgentWireMessage
 from synapse.models.browser import BrowserState, PageButton, PageLink, PageSection, StructuredPageModel
 from synapse.models.loop import AgentAction, AgentActionType
 from synapse.models.memory import MemorySearchRequest, MemoryStoreRequest, MemoryType
@@ -51,6 +51,18 @@ def test_a2a_envelope_serialization() -> None:
     dumped = envelope.model_dump()
     assert dumped["type"] == "request"
     assert dumped["payload"]["method"] == "ping"
+
+
+def test_agent_wire_message_serialization() -> None:
+    message = AgentWireMessage(
+        type=A2AMessageType.REQUEST_TASK,
+        agent="research_agent",
+        target_agent="analysis_agent",
+        payload={"task": {"task_id": "t-1", "agent_id": "analysis_agent", "goal": "Analyze findings"}},
+    )
+    dumped = message.model_dump()
+    assert dumped["type"] == "REQUEST_TASK"
+    assert dumped["target_agent"] == "analysis_agent"
 
 
 def test_tools_endpoint_returns_descriptors() -> None:

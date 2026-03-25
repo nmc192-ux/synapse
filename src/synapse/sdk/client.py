@@ -14,6 +14,7 @@ from synapse.models.browser import (
     TypeRequest,
 )
 from synapse.models.message import AgentMessage
+from synapse.models.memory import MemoryRecord, MemorySearchRequest, MemorySearchResult, MemoryStoreRequest, MemoryType
 from synapse.models.plugin import ToolDescriptor
 from synapse.runtime.session import BrowserSession
 
@@ -26,6 +27,10 @@ class SynapseClient:
     @property
     def browser(self) -> SynapseBrowser:
         return SynapseBrowser(self)
+
+    @property
+    def memory(self) -> SynapseMemory:
+        return SynapseMemory(self)
 
     def __enter__(self) -> SynapseClient:
         return self
@@ -137,3 +142,49 @@ class SynapseBrowser:
 
     def fork(self, session_id: str | None = None) -> SynapseBrowser:
         return SynapseBrowser(self._client, session_id=session_id or self._session_id)
+
+
+class SynapseMemory:
+    def __init__(self, client: SynapseClient) -> None:
+        self._client = client
+
+    def store(
+        self,
+        agent_id: str,
+        memory_type: MemoryType | str,
+        content: str,
+        embedding: list[float] | None = None,
+    ) -> MemoryRecord:
+        payload = MemoryStoreRequest(
+            agent_id=agent_id,
+            memory_type=memory_type,
+            content=content,
+            embedding=embedding or [],
+        )
+        response = self._client._http.post("/api/memory/store", json=payload.model_dump(mode="json"))
+        response.raise_for_status()
+        return MemoryRecord.model_validate(response.json())
+
+    def search(
+        self,
+        agent_id: str,
+        query: str | None = None,
+        embedding: list[float] | None = None,
+        memory_type: MemoryType | str | None = None,
+        limit: int = 5,
+    ) -> list[MemorySearchResult]:
+        payload = MemorySearchRequest(
+            agent_id=agent_id,
+            query=query,
+            embedding=embedding or [],
+            memory_type=memory_type,
+            limit=limit,
+        )
+        response = self._client._http.post("/api/memory/search", json=payload.model_dump(mode="json"))
+        response.raise_for_status()
+        return [MemorySearchResult.model_validate(item) for item in response.json()]
+
+    def get_recent(self, agent_id: str, limit: int = 10) -> list[MemoryRecord]:
+        response = self._client._http.get(f"/api/memory/{agent_id}/recent", params={"limit": limit})
+        response.raise_for_status()
+        return [MemoryRecord.model_validate(item) for item in response.json()]

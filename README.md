@@ -84,3 +84,19 @@ progress updates, and result submission.
 - `POST /api/tasks/{task_id}/claim`
 - `POST /api/tasks/{task_id}/update`
 - `GET /api/tasks/active`
+
+## Persistent Memory
+
+Synapse also includes persistent agent memory backed by PostgreSQL with `pgvector`.
+
+- `POST /api/memory/store`
+- `POST /api/memory/search`
+- `GET /api/memory/{agent_id}/recent`
+
+The Python SDK exposes:
+
+```python
+client.memory.store(agent_id="codex", memory_type="short_term", content="Observed stable login form.", embedding=[0.1, 0.2, 0.3])
+client.memory.search(agent_id="codex", embedding=[0.1, 0.2, 0.3])
+client.memory.get_recent(agent_id="codex", limit=5)
+```

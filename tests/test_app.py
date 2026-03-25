@@ -4,6 +4,7 @@ from synapse.main import app
 from synapse.models.a2a import A2AEnvelope, A2AMessageType
 from synapse.models.browser import BrowserState, PageData
 from synapse.models.loop import AgentAction, AgentActionType
+from synapse.models.memory import MemorySearchRequest, MemoryStoreRequest, MemoryType
 from synapse.models.plugin import ToolDescriptor
 from synapse.models.task import TaskCreateRequest, TaskRequest, TaskStatus
 from synapse.sdk import SynapseClient
@@ -70,3 +71,21 @@ def test_task_create_request_defaults() -> None:
     assert task.constraints == {}
     assert task.assigned_agent is None
     assert TaskStatus.CLAIMED == "claimed"
+
+
+def test_memory_requests_validate() -> None:
+    store_request = MemoryStoreRequest(
+        agent_id="agent-1",
+        memory_type=MemoryType.SHORT_TERM,
+        content="Stored page summary",
+        embedding=[0.1, 0.2],
+    )
+    search_request = MemorySearchRequest(agent_id="agent-1", embedding=[0.1, 0.2], limit=3)
+    assert store_request.memory_type == MemoryType.SHORT_TERM
+    assert search_request.limit == 3
+
+
+def test_sdk_client_exposes_memory() -> None:
+    client = SynapseClient("http://127.0.0.1:8000")
+    assert client.memory is not None
+    client.close()

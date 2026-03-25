@@ -14,12 +14,14 @@ from synapse.models.browser import (
 )
 from synapse.models.events import EventType, RuntimeEvent
 from synapse.models.message import AgentMessage
+from synapse.models.memory import MemoryRecord, MemorySearchRequest, MemorySearchResult, MemoryStoreRequest
 from synapse.models.plugin import PluginDescriptor, PluginReloadRequest, ToolDescriptor
 from synapse.models.task import ExtractionRequest, NavigationRequest, TaskRequest, TaskResult, TaskStatus
 from synapse.models.task import TaskClaimRequest, TaskCreateRequest, TaskRecord, TaskUpdateRequest
 from synapse.runtime.browser import BrowserRuntime
 from synapse.runtime.messaging import AgentMessageBus
 from synapse.runtime.a2a import A2AHub
+from synapse.runtime.memory import AgentMemoryManager
 from synapse.runtime.registry import AgentRegistry
 from synapse.runtime.session import BrowserSession
 from synapse.runtime.task_manager import TaskExecutionManager
@@ -35,6 +37,7 @@ class RuntimeOrchestrator:
         tools: ToolRegistry,
         messages: AgentMessageBus,
         a2a: A2AHub,
+        memory_manager: AgentMemoryManager,
         task_manager: TaskExecutionManager,
         sockets: WebSocketManager,
     ) -> None:
@@ -43,6 +46,7 @@ class RuntimeOrchestrator:
         self.tools = tools
         self.messages = messages
         self.a2a = a2a
+        self.memory_manager = memory_manager
         self.task_manager = task_manager
         self.sockets = sockets
 
@@ -176,6 +180,15 @@ class RuntimeOrchestrator:
             )
         )
         return stored
+
+    async def store_memory(self, request: MemoryStoreRequest) -> MemoryRecord:
+        return await self.memory_manager.store(request)
+
+    async def search_memory(self, request: MemorySearchRequest) -> list[MemorySearchResult]:
+        return await self.memory_manager.search(request)
+
+    async def get_recent_memory(self, agent_id: str, limit: int = 10) -> list[MemoryRecord]:
+        return await self.memory_manager.get_recent(agent_id, limit)
 
     async def discover_agents(self) -> list[AgentPresence]:
         return self.a2a.list_agents()

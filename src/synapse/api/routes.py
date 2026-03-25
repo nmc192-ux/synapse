@@ -14,6 +14,7 @@ from synapse.models.browser import (
 )
 from synapse.models.events import EventType, RuntimeEvent
 from synapse.models.message import AgentMessage
+from synapse.models.memory import MemoryRecord, MemorySearchRequest, MemorySearchResult, MemoryStoreRequest
 from synapse.models.plugin import PluginDescriptor, PluginReloadRequest, ToolDescriptor
 from synapse.models.task import (
     ExtractionRequest,
@@ -143,6 +144,31 @@ async def send_message(
 @router.get("/messages", response_model=list[AgentMessage])
 async def list_messages(orchestrator: RuntimeOrchestrator = Depends(get_orchestrator)) -> list[AgentMessage]:
     return orchestrator.messages.list_messages()
+
+
+@router.post("/memory/store", response_model=MemoryRecord)
+async def store_memory(
+    request: MemoryStoreRequest,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> MemoryRecord:
+    return await orchestrator.store_memory(request)
+
+
+@router.post("/memory/search", response_model=list[MemorySearchResult])
+async def search_memory(
+    request: MemorySearchRequest,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> list[MemorySearchResult]:
+    return await orchestrator.search_memory(request)
+
+
+@router.get("/memory/{agent_id}/recent", response_model=list[MemoryRecord])
+async def get_recent_memory(
+    agent_id: str,
+    limit: int = 10,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> list[MemoryRecord]:
+    return await orchestrator.get_recent_memory(agent_id, limit)
 
 
 @router.get("/tools", response_model=list[ToolDescriptor])

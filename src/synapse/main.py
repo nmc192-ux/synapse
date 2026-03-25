@@ -6,6 +6,7 @@ from synapse.api.routes import router
 from synapse.config import settings
 from synapse.runtime.a2a import A2AHub
 from synapse.runtime.browser import BrowserRuntime
+from synapse.runtime.memory import AgentMemoryManager
 from synapse.runtime.messaging import AgentMessageBus
 from synapse.runtime.orchestrator import RuntimeOrchestrator
 from synapse.runtime.registry import AgentRegistry
@@ -20,6 +21,7 @@ tool_registry = ToolRegistry()
 message_bus = AgentMessageBus()
 websocket_manager = WebSocketManager()
 a2a_hub = A2AHub(agent_registry)
+memory_manager = AgentMemoryManager()
 task_manager = TaskExecutionManager()
 orchestrator = RuntimeOrchestrator(
     browser=browser_runtime,
@@ -27,6 +29,7 @@ orchestrator = RuntimeOrchestrator(
     tools=tool_registry,
     messages=message_bus,
     a2a=a2a_hub,
+    memory_manager=memory_manager,
     task_manager=task_manager,
     sockets=websocket_manager,
 )
@@ -47,11 +50,13 @@ tool_registry.load_plugins(
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await browser_runtime.start()
+    await memory_manager.start()
     await task_manager.start()
     try:
         yield
     finally:
         await task_manager.stop()
+        await memory_manager.stop()
         await browser_runtime.stop()
 
 

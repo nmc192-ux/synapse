@@ -115,6 +115,7 @@ class BrowserService:
         self.sandbox.consume_browser_action(request.agent_id)
         payload = await self.browser.extract(request.session_id, request.selector, request.attribute)
         await self._enforce_page_safety(request.agent_id, request.session_id, "browser.extract", payload.page)
+        await self._emit_spm_compressed(request.agent_id, request.session_id, payload.page)
         await self.events.emit(
             EventType.DATA_EXTRACTED,
             session_id=request.session_id,
@@ -130,6 +131,7 @@ class BrowserService:
         self.sandbox.consume_browser_action(request.agent_id)
         result = await self.browser.screenshot(request.session_id)
         await self._enforce_page_safety(request.agent_id, request.session_id, "browser.screenshot", result.page)
+        await self._emit_spm_compressed(request.agent_id, request.session_id, result.page)
         await self.events.emit(
             EventType.SCREENSHOT_CAPTURED,
             session_id=request.session_id,
@@ -143,7 +145,9 @@ class BrowserService:
         await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.get_layout")
         self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
         self.sandbox.consume_browser_action(request.agent_id)
-        return await self.browser.get_layout(request.session_id)
+        layout = await self.browser.get_layout(request.session_id)
+        await self._emit_spm_compressed(request.agent_id, request.session_id, layout)
+        return layout
 
     async def find_element(self, request: FindElementRequest) -> list[PageElementMatch]:
         await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.find_element")
@@ -162,6 +166,7 @@ class BrowserService:
         self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
         self.sandbox.consume_browser_action(request.agent_id)
         state = await self.browser.dismiss_popups(request.session_id)
+        await self._emit_spm_compressed(request.agent_id, request.session_id, state.page)
         await self.events.emit(
             EventType.POPUP_DISMISSED,
             session_id=request.session_id,
@@ -176,6 +181,7 @@ class BrowserService:
         self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
         self.sandbox.consume_browser_action(request.agent_id)
         result = await self.browser.upload(request.session_id, request.selector, request.file_paths)
+        await self._emit_spm_compressed(request.agent_id, request.session_id, result.page)
         await self.events.emit(
             EventType.UPLOAD_COMPLETED,
             session_id=request.session_id,
@@ -190,6 +196,7 @@ class BrowserService:
         self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
         self.sandbox.consume_browser_action(request.agent_id)
         result = await self.browser.download(request.session_id, request.trigger_selector, request.timeout_ms)
+        await self._emit_spm_compressed(request.agent_id, request.session_id, result.page)
         await self.events.emit(
             EventType.DOWNLOAD_COMPLETED,
             session_id=request.session_id,
@@ -210,6 +217,7 @@ class BrowserService:
             max_scrolls=request.max_scrolls,
             scroll_step=request.scroll_step,
         )
+        await self._emit_spm_compressed(request.agent_id, request.session_id, result.page)
         await self.events.emit(
             EventType.DATA_EXTRACTED,
             session_id=request.session_id,
@@ -283,6 +291,7 @@ class BrowserService:
                 source="browser_service",
                 payload={**(payload or {}), **state.model_dump(mode="json")},
             )
+            await self._emit_spm_compressed(agent_id, state.session_id, state.page)
             await self._emit_browser_metadata_events(agent_id, state.session_id, state.metadata)
             return state
         except Exception as exc:
@@ -354,6 +363,37 @@ class BrowserService:
                 source="browser_service",
                 payload={"dismissed_blockers": dismissed},
             )
+
+    async def _emit_spm_compressed(
+        self,
+        agent_id: str | None,
+        session_id: str | None,
+        page: StructuredPageModel | None,
+    ) -> None:
+        if page is None:
+            return
+        compact_spm = getattr(page, "compact_spm", None)
+        if compact_spm is None:
+            return
+        await self.events.emit(
+            EventType.SPM_COMPRESSED,
+            agent_id=agent_id,
+            session_id=session_id,
+            source="browser_service",
+            payload={
+                "title": getattr(page, "title", ""),
+                "url": getattr(page, "url", ""),
+                "full_counts": {
+                    "sections": len(getattr(page, "sections", [])),
+                    "buttons": len(getattr(page, "buttons", [])),
+                    "inputs": len(getattr(page, "inputs", [])),
+                    "forms": len(getattr(page, "forms", [])),
+                    "tables": len(getattr(page, "tables", [])),
+                    "links": len(getattr(page, "links", [])),
+                },
+                "compact_spm": compact_spm.model_dump(mode="json"),
+            },
+        )
 
     async def _emit_browser_error(
         self,

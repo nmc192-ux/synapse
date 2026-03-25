@@ -48,6 +48,58 @@ class PageLink(BaseModel):
     selector_hint: str | None = None
 
 
+class SemanticRegionSummary(BaseModel):
+    region_type: str
+    label: str | None = None
+    selector_hint: str | None = None
+    summary: str = ""
+    actionable_count: int = 0
+
+
+class RepetitiveElementGroup(BaseModel):
+    element_type: str
+    group_label: str
+    count: int = 0
+    sample_texts: list[str] = Field(default_factory=list)
+    sample_selectors: list[str] = Field(default_factory=list)
+    summary: str = ""
+
+
+class CompactActionableElement(BaseModel):
+    element_type: str
+    action: str
+    label: str
+    selector_hint: str | None = None
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class CompactTableSummary(BaseModel):
+    selector_hint: str | None = None
+    headers: list[str] = Field(default_factory=list)
+    row_count: int = 0
+    sample_rows: list[list[str]] = Field(default_factory=list)
+
+
+class CompactFormSummary(BaseModel):
+    name: str | None = None
+    selector_hint: str | None = None
+    method: str | None = None
+    action: str | None = None
+    field_count: int = 0
+    field_names: list[str] = Field(default_factory=list)
+
+
+class CompactStructuredPageModel(BaseModel):
+    title: str
+    url: str
+    page_summary: str = ""
+    semantic_regions: list[SemanticRegionSummary] = Field(default_factory=list)
+    grouped_elements: list[RepetitiveElementGroup] = Field(default_factory=list)
+    actionable_elements: list[CompactActionableElement] = Field(default_factory=list)
+    table_summaries: list[CompactTableSummary] = Field(default_factory=list)
+    form_summaries: list[CompactFormSummary] = Field(default_factory=list)
+
+
 class PageElementMatch(BaseModel):
     element_type: str
     text: str
@@ -73,6 +125,8 @@ class StructuredPageModel(BaseModel):
     forms: list[PageForm] = Field(default_factory=list)
     tables: list[PageTable] = Field(default_factory=list)
     links: list[PageLink] = Field(default_factory=list)
+    full_spm: dict[str, object] = Field(default_factory=dict)
+    compact_spm: CompactStructuredPageModel | None = None
 
 
 class BrowserState(BaseModel):

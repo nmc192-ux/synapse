@@ -3,6 +3,10 @@ from __future__ import annotations
 from typing import Any
 
 from synapse.models.browser import (
+    CompactActionableElement,
+    CompactFormSummary,
+    CompactStructuredPageModel,
+    CompactTableSummary,
     PageButton,
     PageElementMatch,
     PageForm,
@@ -10,6 +14,8 @@ from synapse.models.browser import (
     PageInput,
     PageInspection,
     PageLink,
+    RepetitiveElementGroup,
+    SemanticRegionSummary,
     PageSection,
     PageTable,
     StructuredPageModel,
@@ -93,7 +99,7 @@ class SPMExtractor:
             }
             """
         )
-        return StructuredPageModel(
+        spm = StructuredPageModel(
             url=snapshot["url"],
             title=snapshot["title"],
             sections=[PageSection(**section) for section in snapshot["sections"]],
@@ -112,6 +118,223 @@ class SPMExtractor:
             tables=[PageTable(**table) for table in snapshot["tables"]],
             links=[PageLink(**link) for link in snapshot["links"]],
         )
+        return self.attach_compressed_views(spm)
+
+    def attach_compressed_views(self, spm: StructuredPageModel) -> StructuredPageModel:
+        full_spm = self.full_spm(spm)
+        return spm.model_copy(
+            update={
+                "full_spm": full_spm,
+                "compact_spm": self.build_compact_spm(spm),
+            }
+        )
+
+    def full_spm(self, spm: StructuredPageModel) -> dict[str, object]:
+        return {
+            "title": spm.title,
+            "url": spm.url,
+            "sections": [section.model_dump(mode="json") for section in spm.sections],
+            "buttons": [button.model_dump(mode="json") for button in spm.buttons],
+            "inputs": [item.model_dump(mode="json") for item in spm.inputs],
+            "forms": [form.model_dump(mode="json") for form in spm.forms],
+            "tables": [table.model_dump(mode="json") for table in spm.tables],
+            "links": [link.model_dump(mode="json") for link in spm.links],
+        }
+
+    def build_compact_spm(self, spm: StructuredPageModel) -> CompactStructuredPageModel:
+        page_summary = self._page_summary(spm)
+        semantic_regions = self._semantic_regions(spm)
+        grouped_elements = self._group_repetitive_elements(spm)
+        actionable_elements = self._actionable_elements(spm)
+        table_summaries = self._table_summaries(spm)
+        form_summaries = self._form_summaries(spm)
+        return CompactStructuredPageModel(
+            title=spm.title,
+            url=spm.url,
+            page_summary=page_summary,
+            semantic_regions=semantic_regions,
+            grouped_elements=grouped_elements,
+            actionable_elements=actionable_elements,
+            table_summaries=table_summaries,
+            form_summaries=form_summaries,
+        )
+
+    def _page_summary(self, spm: StructuredPageModel) -> str:
+        section_bits = [section.heading or section.text[:80] for section in spm.sections[:3] if (section.heading or section.text)]
+        button_bits = [button.text for button in spm.buttons[:4] if button.text]
+        return (
+            f"Page '{spm.title}' with {len(spm.sections)} sections, {len(spm.buttons)} buttons, "
+            f"{len(spm.inputs)} inputs, {len(spm.forms)} forms, {len(spm.tables)} tables, and {len(spm.links)} links. "
+            f"Key content: {', '.join(section_bits) or 'none'}. "
+            f"Primary actions: {', '.join(button_bits) or 'none'}."
+        )
+
+    def _semantic_regions(self, spm: StructuredPageModel) -> list[SemanticRegionSummary]:
+        regions: list[SemanticRegionSummary] = []
+        if spm.links:
+            nav_labels = [link.text or link.href or "" for link in spm.links[:6]]
+            regions.append(
+                SemanticRegionSummary(
+                    region_type="navigation",
+                    label="primary navigation",
+                    summary=f"Navigation links: {', '.join(filter(None, nav_labels)) or 'unnamed links'}.",
+                    actionable_count=min(len(spm.links), 6),
+                )
+            )
+        for section in spm.sections[:5]:
+            regions.append(
+                SemanticRegionSummary(
+                    region_type="content",
+                    label=section.heading,
+                    selector_hint=section.selector_hint,
+                    summary=(section.text[:180] + "...") if len(section.text) > 180 else section.text,
+                    actionable_count=0,
+                )
+            )
+        for form in spm.forms[:4]:
+            field_names = [field.name or field.field_type or "field" for field in form.fields[:5]]
+            regions.append(
+                SemanticRegionSummary(
+                    region_type="form",
+                    label=form.name,
+                    selector_hint=form.selector_hint,
+                    summary=f"{len(form.fields)} fields: {', '.join(field_names) or 'unnamed fields'}.",
+                    actionable_count=len(form.fields),
+                )
+            )
+        for table in spm.tables[:3]:
+            regions.append(
+                SemanticRegionSummary(
+                    region_type="table",
+                    label=", ".join(table.headers[:4]) or "data table",
+                    selector_hint=table.selector_hint,
+                    summary=f"Table with {len(table.rows)} rows and headers {', '.join(table.headers[:5]) or 'none'}.",
+                    actionable_count=0,
+                )
+            )
+        return regions[:12]
+
+    def _group_repetitive_elements(self, spm: StructuredPageModel) -> list[RepetitiveElementGroup]:
+        groups: list[RepetitiveElementGroup] = []
+        groups.extend(self._group_by_label("button", [button.text or "button" for button in spm.buttons], [button.selector_hint for button in spm.buttons]))
+        groups.extend(
+            self._group_by_label(
+                "input",
+                [item.name or item.placeholder or item.input_type or "input" for item in spm.inputs],
+                [item.selector_hint for item in spm.inputs],
+            )
+        )
+        groups.extend(
+            self._group_by_label(
+                "link",
+                [link.text or (link.href or "link") for link in spm.links],
+                [link.selector_hint for link in spm.links],
+            )
+        )
+        return sorted(groups, key=lambda group: group.count, reverse=True)[:10]
+
+    def _group_by_label(
+        self,
+        element_type: str,
+        labels: list[str],
+        selectors: list[str | None],
+    ) -> list[RepetitiveElementGroup]:
+        grouped: dict[str, dict[str, object]] = {}
+        for label, selector in zip(labels, selectors, strict=False):
+            normalized = (label or element_type).strip().lower() or element_type
+            bucket = grouped.setdefault(
+                normalized,
+                {
+                    "sample_texts": [],
+                    "sample_selectors": [],
+                    "count": 0,
+                },
+            )
+            bucket["count"] = int(bucket["count"]) + 1
+            if label and len(bucket["sample_texts"]) < 3:
+                bucket["sample_texts"].append(label)
+            if selector and len(bucket["sample_selectors"]) < 3:
+                bucket["sample_selectors"].append(selector)
+        return [
+            RepetitiveElementGroup(
+                element_type=element_type,
+                group_label=label,
+                count=int(values["count"]),
+                sample_texts=list(values["sample_texts"]),
+                sample_selectors=list(values["sample_selectors"]),
+                summary=f"{values['count']} {element_type} elements with similar labels.",
+            )
+            for label, values in grouped.items()
+            if int(values["count"]) > 1
+        ]
+
+    def _actionable_elements(self, spm: StructuredPageModel) -> list[CompactActionableElement]:
+        elements: list[CompactActionableElement] = []
+        for button in spm.buttons[:8]:
+            elements.append(
+                CompactActionableElement(
+                    element_type="button",
+                    action="click",
+                    label=button.text or "button",
+                    selector_hint=button.selector_hint,
+                    metadata={"role": button.role, "disabled": button.disabled},
+                )
+            )
+        for item in spm.inputs[:6]:
+            elements.append(
+                CompactActionableElement(
+                    element_type="input",
+                    action="type",
+                    label=item.name or item.placeholder or item.input_type or "input",
+                    selector_hint=item.selector_hint,
+                    metadata={"input_type": item.input_type, "placeholder": item.placeholder},
+                )
+            )
+        for form in spm.forms[:4]:
+            elements.append(
+                CompactActionableElement(
+                    element_type="form",
+                    action="submit",
+                    label=form.name or "form",
+                    selector_hint=form.selector_hint,
+                    metadata={"field_count": len(form.fields), "method": form.method},
+                )
+            )
+        for link in spm.links[:8]:
+            elements.append(
+                CompactActionableElement(
+                    element_type="navigation_link",
+                    action="open",
+                    label=link.text or link.href or "link",
+                    selector_hint=link.selector_hint,
+                    metadata={"href": link.href},
+                )
+            )
+        return elements[:20]
+
+    def _table_summaries(self, spm: StructuredPageModel) -> list[CompactTableSummary]:
+        return [
+            CompactTableSummary(
+                selector_hint=table.selector_hint,
+                headers=table.headers[:8],
+                row_count=len(table.rows),
+                sample_rows=table.rows[:3],
+            )
+            for table in spm.tables[:4]
+        ]
+
+    def _form_summaries(self, spm: StructuredPageModel) -> list[CompactFormSummary]:
+        return [
+            CompactFormSummary(
+                name=form.name,
+                selector_hint=form.selector_hint,
+                method=form.method,
+                action=form.action,
+                field_count=len(form.fields),
+                field_names=[field.name or field.field_type or "field" for field in form.fields[:8]],
+            )
+            for form in spm.forms[:5]
+        ]
 
     def find_element(self, spm: StructuredPageModel, element_type: str, text: str) -> list[PageElementMatch]:
         normalized_type = element_type.lower()

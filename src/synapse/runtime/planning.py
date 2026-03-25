@@ -79,7 +79,13 @@ class NavigationPlanner:
         if self.llm is None:
             return []
 
-        page_context = current_page.model_dump(mode="json") if current_page is not None else {}
+        page_context: dict[str, object] = {}
+        if current_page is not None:
+            page_context = (
+                current_page.compact_spm.model_dump(mode="json")
+                if current_page.compact_spm is not None
+                else current_page.model_dump(mode="json", exclude={"full_spm"})
+            )
         previous_actions = [
             {
                 "type": action.type.value,
@@ -93,6 +99,7 @@ class NavigationPlanner:
         raw_context = {
             "goal": task.goal,
             "page_state": page_context,
+            "full_page_state": current_page.full_spm if current_page is not None else {},
             "recent_memory": recent_memories,
             "memory_summary": memory_summary or "No memory available.",
             "recent_runtime_events": recent_events,

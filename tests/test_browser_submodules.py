@@ -1,6 +1,6 @@
 import asyncio
 
-from synapse.models.browser import DownloadArtifact, PageButton, PageSection, StructuredPageModel
+from synapse.models.browser import DownloadArtifact, PageButton, PageForm, PageFormField, PageInput, PageLink, PageSection, PageTable, StructuredPageModel
 from synapse.runtime.browser import BrowserRuntime
 from synapse.runtime.browser.download_manager import DownloadManager
 from synapse.runtime.browser.interaction_engine import InteractionEngine
@@ -97,11 +97,13 @@ def _runtime_with_fake_page(page: _FakePage) -> BrowserRuntime:
     runtime.session_manager._session_agents["s1"] = "agent-1"
 
     async def fake_snapshot(_: _FakePage) -> StructuredPageModel:
-        return StructuredPageModel(
+        return runtime.spm_extractor.attach_compressed_views(
+            StructuredPageModel(
             title="Example",
             url=page.url,
             sections=[PageSection(heading="Overview", text="Testing")],
             buttons=[PageButton(text="Continue", selector_hint="button.submit")],
+            )
         )
 
     async def fake_stabilize(_: _FakePage) -> None:
@@ -134,14 +136,60 @@ def test_session_manager_save_restore() -> None:
 
 def test_spm_extractor_find_element() -> None:
     extractor = SPMExtractor()
-    page = StructuredPageModel(
+    page = extractor.attach_compressed_views(StructuredPageModel(
         title="Example",
         url="https://example.com",
         sections=[PageSection(heading="Papers", text="paper listing", selector_hint="section.paper")],
         buttons=[PageButton(text="Continue", selector_hint="button.submit")],
-    )
+    ))
     matches = extractor.find_element(page, "sections", "paper")
     assert matches[0].selector_hint == "section.paper"
+
+
+def test_spm_extractor_builds_compact_spm() -> None:
+    extractor = SPMExtractor()
+    page = extractor.attach_compressed_views(
+        StructuredPageModel(
+            title="Catalog",
+            url="https://example.com/catalog",
+            sections=[
+                PageSection(heading="Featured Papers", text="A long listing of research papers."),
+                PageSection(heading="Top Authors", text="Profiles and links."),
+            ],
+            buttons=[
+                PageButton(text="Load more", selector_hint="button.load"),
+                PageButton(text="Load more", selector_hint="button.load.secondary"),
+            ],
+            inputs=[PageInput(name="query", input_type="search", selector_hint="input.search")],
+            forms=[
+                PageForm(
+                    name="search",
+                    selector_hint="form.search",
+                    method="get",
+                    action="/search",
+                    fields=[PageFormField(name="query", field_type="search", selector_hint="input.search")],
+                )
+            ],
+            tables=[
+                PageTable(
+                    selector_hint="table.results",
+                    headers=["Title", "Author"],
+                    rows=[["Paper A", "Alice"], ["Paper B", "Bob"], ["Paper C", "Carol"]],
+                )
+            ],
+            links=[
+                PageLink(text="Paper A", href="https://example.com/paper-a", selector_hint="a.paper-a"),
+                PageLink(text="Paper B", href="https://example.com/paper-b", selector_hint="a.paper-b"),
+            ],
+        )
+    )
+
+    assert page.full_spm["title"] == "Catalog"
+    assert page.compact_spm is not None
+    assert page.compact_spm.page_summary
+    assert any(region.region_type == "content" for region in page.compact_spm.semantic_regions)
+    assert any(group.element_type == "button" for group in page.compact_spm.grouped_elements)
+    assert any(item.action == "click" for item in page.compact_spm.actionable_elements)
 
 
 def test_recovery_engine_helpers() -> None:

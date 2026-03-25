@@ -1,7 +1,7 @@
 import asyncio
 
 from synapse.models.agent import AgentDefinition, AgentKind
-from synapse.models.browser import OpenRequest
+from synapse.models.browser import CompactStructuredPageModel, OpenRequest
 from synapse.models.events import EventType, RuntimeEvent
 from synapse.models.memory import MemoryStoreRequest, MemoryType
 from synapse.models.plugin import PluginReloadRequest
@@ -36,6 +36,7 @@ class _StubBrowser:
                 "forms": [],
                 "tables": [],
                 "links": [],
+                "compact_spm": CompactStructuredPageModel(title="Example", url=url, page_summary="compact"),
                 "model_dump": lambda self, mode="json": {
                     "title": "Example",
                     "url": url,
@@ -45,6 +46,7 @@ class _StubBrowser:
                     "forms": [],
                     "tables": [],
                     "links": [],
+                    "compact_spm": {"title": "Example", "url": url, "page_summary": "compact", "semantic_regions": [], "grouped_elements": [], "actionable_elements": [], "table_summaries": [], "form_summaries": []},
                 },
             },
         )()
@@ -156,8 +158,10 @@ def test_browser_service_open_delegates_and_emits_navigation() -> None:
             state = await browser_service.open(OpenRequest(session_id="session-1", agent_id="agent-1", url="https://example.com"))
             first = await queue.get()
             second = await queue.get()
+            third = await queue.get()
             assert state.session_id == "session-1"
             assert first.event_type == EventType.BUDGET_UPDATED
             assert second.event_type == EventType.PAGE_NAVIGATED
+            assert third.event_type == EventType.SPM_COMPRESSED
 
     asyncio.run(scenario())

@@ -7,6 +7,9 @@ from synapse.models.agent import AgentBudgetUsage, AgentCheckpoint, AgentDefinit
 from synapse.models.browser import (
     BrowserState,
     ClickRequest,
+    DismissRequest,
+    DownloadRequest,
+    DownloadResult,
     ExtractionResult,
     ExtractRequest,
     FindElementRequest,
@@ -17,8 +20,12 @@ from synapse.models.browser import (
     PageInspection,
     ScreenshotRequest,
     ScreenshotResult,
+    ScrollExtractRequest,
+    ScrollExtractResult,
     StructuredPageModel,
     TypeRequest,
+    UploadRequest,
+    UploadResult,
 )
 from synapse.models.events import EventType, RuntimeEvent
 from synapse.models.message import AgentMessage
@@ -113,67 +120,82 @@ class RuntimeOrchestrator:
         return session
 
     async def open(self, request: OpenRequest) -> BrowserState:
-        self.sandbox.authorize_domain(request.agent_id, str(request.url))
-        self.sandbox.consume_browser_action(request.agent_id)
-        if request.agent_id:
-            usage = self.budget_manager.increment_page(self.agents.get(request.agent_id))
-            await self._broadcast_budget_update(request.agent_id, usage)
-            await self._check_budget_limits(request.agent_id)
-        state = await self.browser.open(request.session_id, str(request.url))
-        await self._enforce_page_safety(
-            agent_id=request.agent_id,
-            session_id=state.session_id,
-            action="browser.open",
-            page=state.page,
-        )
-        await self.sockets.broadcast(
-            RuntimeEvent(
-                event_type=EventType.PAGE_NAVIGATED,
+        try:
+            self.sandbox.authorize_domain(request.agent_id, str(request.url))
+            self.sandbox.consume_browser_action(request.agent_id)
+            if request.agent_id:
+                usage = self.budget_manager.increment_page(self.agents.get(request.agent_id))
+                await self._broadcast_budget_update(request.agent_id, usage)
+                await self._check_budget_limits(request.agent_id)
+            state = await self.browser.open(request.session_id, str(request.url))
+            await self._enforce_page_safety(
+                agent_id=request.agent_id,
                 session_id=state.session_id,
-                payload=state.model_dump(mode="json"),
+                action="browser.open",
+                page=state.page,
             )
-        )
-        return state
+            await self.sockets.broadcast(
+                RuntimeEvent(
+                    event_type=EventType.PAGE_NAVIGATED,
+                    session_id=state.session_id,
+                    payload=state.model_dump(mode="json"),
+                )
+            )
+            await self._emit_browser_metadata_events(request.agent_id, state.session_id, state.metadata)
+            return state
+        except Exception as exc:
+            await self._emit_browser_error("open", request.agent_id, request.session_id, exc)
+            raise
 
     async def click(self, request: ClickRequest) -> BrowserState:
-        await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.click")
-        self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
-        self.sandbox.consume_browser_action(request.agent_id)
-        state = await self.browser.click(request.session_id, request.selector)
-        await self._enforce_page_safety(
-            agent_id=request.agent_id,
-            session_id=state.session_id,
-            action="browser.click",
-            page=state.page,
-        )
-        await self.sockets.broadcast(
-            RuntimeEvent(
-                event_type=EventType.PAGE_NAVIGATED,
+        try:
+            await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.click")
+            self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
+            self.sandbox.consume_browser_action(request.agent_id)
+            state = await self.browser.click(request.session_id, request.selector)
+            await self._enforce_page_safety(
+                agent_id=request.agent_id,
                 session_id=state.session_id,
-                payload={"action": "click", "selector": request.selector, **state.model_dump(mode="json")},
+                action="browser.click",
+                page=state.page,
             )
-        )
-        return state
+            await self.sockets.broadcast(
+                RuntimeEvent(
+                    event_type=EventType.PAGE_NAVIGATED,
+                    session_id=state.session_id,
+                    payload={"action": "click", "selector": request.selector, **state.model_dump(mode="json")},
+                )
+            )
+            await self._emit_browser_metadata_events(request.agent_id, state.session_id, state.metadata)
+            return state
+        except Exception as exc:
+            await self._emit_browser_error("click", request.agent_id, request.session_id, exc)
+            raise
 
     async def type(self, request: TypeRequest) -> BrowserState:
-        await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.type")
-        self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
-        self.sandbox.consume_browser_action(request.agent_id)
-        state = await self.browser.type(request.session_id, request.selector, request.text)
-        await self._enforce_page_safety(
-            agent_id=request.agent_id,
-            session_id=state.session_id,
-            action="browser.type",
-            page=state.page,
-        )
-        await self.sockets.broadcast(
-            RuntimeEvent(
-                event_type=EventType.PAGE_NAVIGATED,
+        try:
+            await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.type")
+            self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
+            self.sandbox.consume_browser_action(request.agent_id)
+            state = await self.browser.type(request.session_id, request.selector, request.text)
+            await self._enforce_page_safety(
+                agent_id=request.agent_id,
                 session_id=state.session_id,
-                payload={"action": "type", "selector": request.selector, **state.model_dump(mode="json")},
+                action="browser.type",
+                page=state.page,
             )
-        )
-        return state
+            await self.sockets.broadcast(
+                RuntimeEvent(
+                    event_type=EventType.PAGE_NAVIGATED,
+                    session_id=state.session_id,
+                    payload={"action": "type", "selector": request.selector, **state.model_dump(mode="json")},
+                )
+            )
+            await self._emit_browser_metadata_events(request.agent_id, state.session_id, state.metadata)
+            return state
+        except Exception as exc:
+            await self._emit_browser_error("type", request.agent_id, request.session_id, exc)
+            raise
 
     async def extract(self, request: ExtractionRequest) -> ExtractionResult:
         await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.extract")
@@ -252,6 +274,76 @@ class RuntimeOrchestrator:
         self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
         self.sandbox.consume_browser_action(request.agent_id)
         return await self.browser.inspect(request.session_id, request.selector)
+
+    async def dismiss_popups(self, request: DismissRequest) -> BrowserState:
+        await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.dismiss")
+        self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
+        self.sandbox.consume_browser_action(request.agent_id)
+        state = await self.browser.dismiss_popups(request.session_id)
+        await self.sockets.broadcast(
+            RuntimeEvent(
+                event_type=EventType.POPUP_DISMISSED,
+                session_id=request.session_id,
+                agent_id=request.agent_id,
+                payload=state.metadata,
+            )
+        )
+        return state
+
+    async def upload(self, request: UploadRequest) -> UploadResult:
+        await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.upload")
+        self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
+        self.sandbox.consume_browser_action(request.agent_id)
+        result = await self.browser.upload(request.session_id, request.selector, request.file_paths)
+        await self.sockets.broadcast(
+            RuntimeEvent(
+                event_type=EventType.UPLOAD_COMPLETED,
+                session_id=request.session_id,
+                agent_id=request.agent_id,
+                payload=result.model_dump(mode="json"),
+            )
+        )
+        return result
+
+    async def download(self, request: DownloadRequest) -> DownloadResult:
+        await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.download")
+        self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
+        self.sandbox.consume_browser_action(request.agent_id)
+        result = await self.browser.download(
+            request.session_id,
+            trigger_selector=request.trigger_selector,
+            timeout_ms=request.timeout_ms,
+        )
+        await self.sockets.broadcast(
+            RuntimeEvent(
+                event_type=EventType.DOWNLOAD_COMPLETED,
+                session_id=request.session_id,
+                agent_id=request.agent_id,
+                payload=result.model_dump(mode="json"),
+            )
+        )
+        return result
+
+    async def scroll_extract(self, request: ScrollExtractRequest) -> ScrollExtractResult:
+        await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.scroll_extract")
+        self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
+        self.sandbox.consume_browser_action(request.agent_id)
+        result = await self.browser.scroll_extract(
+            request.session_id,
+            selector=request.selector,
+            attribute=request.attribute,
+            max_scrolls=request.max_scrolls,
+            scroll_step=request.scroll_step,
+        )
+        await self.sockets.broadcast(
+            RuntimeEvent(
+                event_type=EventType.DATA_EXTRACTED,
+                session_id=request.session_id,
+                agent_id=request.agent_id,
+                payload=result.model_dump(mode="json"),
+            )
+        )
+        return result
 
     async def register_agent(self, definition: AgentDefinition) -> AgentDefinition:
         agent = self.agents.register(definition)
@@ -697,3 +789,54 @@ class RuntimeOrchestrator:
 
         for warning in warnings:
             await self._broadcast_budget_update(agent_id, usage, warning=warning)
+
+    async def _emit_browser_metadata_events(
+        self,
+        agent_id: str | None,
+        session_id: str | None,
+        metadata: dict[str, object],
+    ) -> None:
+        if metadata.get("route_changed"):
+            await self.sockets.broadcast(
+                RuntimeEvent(
+                    event_type=EventType.NAVIGATION_ROUTE_CHANGED,
+                    agent_id=agent_id,
+                    session_id=session_id,
+                    payload=metadata,
+                )
+            )
+        if metadata.get("session_expired"):
+            await self.sockets.broadcast(
+                RuntimeEvent(
+                    event_type=EventType.SESSION_EXPIRED,
+                    agent_id=agent_id,
+                    session_id=session_id,
+                    payload=metadata,
+                )
+            )
+        dismissed = metadata.get("dismissed_blockers")
+        if isinstance(dismissed, list) and dismissed:
+            await self.sockets.broadcast(
+                RuntimeEvent(
+                    event_type=EventType.POPUP_DISMISSED,
+                    agent_id=agent_id,
+                    session_id=session_id,
+                    payload={"dismissed_blockers": dismissed},
+                )
+            )
+
+    async def _emit_browser_error(
+        self,
+        action: str,
+        agent_id: str | None,
+        session_id: str | None,
+        exc: Exception,
+    ) -> None:
+        await self.sockets.broadcast(
+            RuntimeEvent(
+                event_type=EventType.BROWSER_ERROR,
+                agent_id=agent_id,
+                session_id=session_id,
+                payload={"action": action, "error": str(exc)},
+            )
+        )

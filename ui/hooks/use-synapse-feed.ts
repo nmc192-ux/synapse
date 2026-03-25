@@ -110,7 +110,10 @@ function buildAction(
     !event.event_type.includes("page") &&
     !event.event_type.includes("tool") &&
     !event.event_type.includes("task") &&
-    !event.event_type.includes("screenshot")
+    !event.event_type.includes("screenshot") &&
+    !event.event_type.includes("upload") &&
+    !event.event_type.includes("download") &&
+    !event.event_type.includes("popup")
   ) {
     return null;
   }
@@ -323,6 +326,18 @@ function summarizeEvent(eventType: string, payload: Record<string, unknown>): st
       return `A2A exchange: ${stringify(payload.type) ?? "message"}.`;
     case "screenshot.captured":
       return `Captured a new page screenshot artifact.`;
+    case "popup.dismissed":
+      return "Dismissed blocking modal or consent dialog before interaction.";
+    case "download.completed":
+      return `Download captured: ${stringify(payload?.artifact && (payload.artifact as Record<string, unknown>).suggested_filename) ?? "artifact"}.`;
+    case "upload.completed":
+      return `Uploaded ${(payload.uploaded_files as unknown[] | undefined)?.length ?? 0} file(s).`;
+    case "navigation.route_changed":
+      return `Detected route change to ${stringify(payload.to_url) ?? "new route"}.`;
+    case "session.expired":
+      return "Session expiration was detected while browsing.";
+    case "browser.error":
+      return stringify(payload.error) ?? "Browser interaction error captured.";
     default:
       return `Received ${eventType}.`;
   }

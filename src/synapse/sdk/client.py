@@ -6,6 +6,9 @@ from synapse.models.agent import AgentBudgetUsage, AgentDefinition, AgentExecuti
 from synapse.models.browser import (
     BrowserState,
     ClickRequest,
+    DismissRequest,
+    DownloadRequest,
+    DownloadResult,
     ExtractionResult,
     ExtractRequest,
     FindElementRequest,
@@ -16,8 +19,12 @@ from synapse.models.browser import (
     PageInspection,
     ScreenshotRequest,
     ScreenshotResult,
+    ScrollExtractRequest,
+    ScrollExtractResult,
     StructuredPageModel,
     TypeRequest,
+    UploadRequest,
+    UploadResult,
 )
 from synapse.models.message import AgentMessage
 from synapse.models.memory import MemoryRecord, MemorySearchRequest, MemorySearchResult, MemoryStoreRequest, MemoryType
@@ -226,6 +233,48 @@ class SynapseBrowser:
 
     def call_tool(self, tool_name: str, arguments: dict[str, object] | None = None) -> dict[str, object]:
         return self._client.call_tool(tool_name, arguments)
+
+    def dismiss_popups(self) -> BrowserState:
+        payload = DismissRequest(session_id=self.session_id, agent_id=self._agent_id)
+        response = self._client._http.post("/api/browser/dismiss", json=payload.model_dump(mode="json"))
+        response.raise_for_status()
+        return BrowserState.model_validate(response.json())
+
+    def upload(self, selector: str, file_paths: list[str]) -> UploadResult:
+        payload = UploadRequest(session_id=self.session_id, agent_id=self._agent_id, selector=selector, file_paths=file_paths)
+        response = self._client._http.post("/api/browser/upload", json=payload.model_dump(mode="json"))
+        response.raise_for_status()
+        return UploadResult.model_validate(response.json())
+
+    def download(self, trigger_selector: str | None = None, timeout_ms: int = 15000) -> DownloadResult:
+        payload = DownloadRequest(
+            session_id=self.session_id,
+            agent_id=self._agent_id,
+            trigger_selector=trigger_selector,
+            timeout_ms=timeout_ms,
+        )
+        response = self._client._http.post("/api/browser/download", json=payload.model_dump(mode="json"))
+        response.raise_for_status()
+        return DownloadResult.model_validate(response.json())
+
+    def scroll_extract(
+        self,
+        selector: str,
+        attribute: str | None = None,
+        max_scrolls: int = 8,
+        scroll_step: int = 700,
+    ) -> ScrollExtractResult:
+        payload = ScrollExtractRequest(
+            session_id=self.session_id,
+            agent_id=self._agent_id,
+            selector=selector,
+            attribute=attribute,
+            max_scrolls=max_scrolls,
+            scroll_step=scroll_step,
+        )
+        response = self._client._http.post("/api/browser/scroll_extract", json=payload.model_dump(mode="json"))
+        response.raise_for_status()
+        return ScrollExtractResult.model_validate(response.json())
 
     def send_agent_message(
         self,

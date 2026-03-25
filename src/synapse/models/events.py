@@ -28,6 +28,12 @@ class EventType(str, Enum):
     CONNECTION_STALE = "connection.stale"
     CHECKPOINT_SAVED = "checkpoint.saved"
     CHECKPOINT_RESUMED = "checkpoint.resumed"
+    POPUP_DISMISSED = "popup.dismissed"
+    DOWNLOAD_COMPLETED = "download.completed"
+    UPLOAD_COMPLETED = "upload.completed"
+    NAVIGATION_ROUTE_CHANGED = "navigation.route_changed"
+    BROWSER_ERROR = "browser.error"
+    SESSION_EXPIRED = "session.expired"
 
 
 class RuntimeEvent(BaseModel):

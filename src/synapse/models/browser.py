@@ -130,6 +130,34 @@ class InspectRequest(BaseModel):
     selector: str
 
 
+class DismissRequest(BaseModel):
+    session_id: str
+    agent_id: str | None = None
+
+
+class UploadRequest(BaseModel):
+    session_id: str
+    agent_id: str | None = None
+    selector: str
+    file_paths: list[str] = Field(default_factory=list)
+
+
+class DownloadRequest(BaseModel):
+    session_id: str
+    agent_id: str | None = None
+    trigger_selector: str | None = None
+    timeout_ms: int = 15000
+
+
+class ScrollExtractRequest(BaseModel):
+    session_id: str
+    agent_id: str | None = None
+    selector: str
+    attribute: str | None = None
+    max_scrolls: int = 8
+    scroll_step: int = 700
+
+
 class ExtractedElement(BaseModel):
     selector: str
     text: str | None = None
@@ -149,3 +177,33 @@ class ScreenshotResult(BaseModel):
     image_base64: str
     format: str = "png"
     page: StructuredPageModel
+
+
+class DownloadArtifact(BaseModel):
+    suggested_filename: str | None = None
+    path: str | None = None
+    url: str | None = None
+    mime_type: str | None = None
+    size_bytes: int | None = None
+    status: str = "completed"
+
+
+class DownloadResult(BaseModel):
+    session_id: str
+    artifact: DownloadArtifact
+    page: StructuredPageModel
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class UploadResult(BaseModel):
+    session_id: str
+    uploaded_files: list[str] = Field(default_factory=list)
+    page: StructuredPageModel
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class ScrollExtractResult(BaseModel):
+    session_id: str
+    matches: list[ExtractedElement] = Field(default_factory=list)
+    page: StructuredPageModel
+    metadata: dict[str, object] = Field(default_factory=dict)

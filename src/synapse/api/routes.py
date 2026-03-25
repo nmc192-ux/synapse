@@ -11,6 +11,9 @@ from synapse.models.agent import AgentBudgetUsage, AgentCheckpoint, AgentDefinit
 from synapse.models.browser import (
     BrowserState,
     ClickRequest,
+    DismissRequest,
+    DownloadRequest,
+    DownloadResult,
     ExtractionResult,
     ExtractRequest,
     FindElementRequest,
@@ -21,8 +24,12 @@ from synapse.models.browser import (
     OpenRequest,
     ScreenshotRequest,
     ScreenshotResult,
+    ScrollExtractRequest,
+    ScrollExtractResult,
     StructuredPageModel,
     TypeRequest,
+    UploadRequest,
+    UploadResult,
 )
 from synapse.models.events import EventType, RuntimeEvent
 from synapse.models.message import AgentMessage
@@ -225,6 +232,66 @@ async def inspect(
 ) -> PageInspection:
     try:
         return await orchestrator.inspect(request)
+    except SecurityAlertError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except SandboxPermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except SandboxRateLimitError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+
+
+@router.post("/browser/dismiss", response_model=BrowserState)
+async def dismiss_popups(
+    request: DismissRequest,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> BrowserState:
+    try:
+        return await orchestrator.dismiss_popups(request)
+    except SecurityAlertError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except SandboxPermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except SandboxRateLimitError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+
+
+@router.post("/browser/upload", response_model=UploadResult)
+async def upload(
+    request: UploadRequest,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> UploadResult:
+    try:
+        return await orchestrator.upload(request)
+    except SecurityAlertError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except SandboxPermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except SandboxRateLimitError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+
+
+@router.post("/browser/download", response_model=DownloadResult)
+async def download(
+    request: DownloadRequest,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> DownloadResult:
+    try:
+        return await orchestrator.download(request)
+    except SecurityAlertError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except SandboxPermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except SandboxRateLimitError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+
+
+@router.post("/browser/scroll_extract", response_model=ScrollExtractResult)
+async def scroll_extract(
+    request: ScrollExtractRequest,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> ScrollExtractResult:
+    try:
+        return await orchestrator.scroll_extract(request)
     except SecurityAlertError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxPermissionError as exc:

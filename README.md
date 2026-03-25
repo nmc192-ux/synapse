@@ -197,3 +197,26 @@ Synapse now persists runtime state to Redis with namespace keys:
 
 Connection heartbeats update agent liveness. If an A2A connection misses heartbeat
 TTL (default `60s`), it is marked stale/offline and emits `connection.stale`.
+
+## Browser Hardening
+
+Synapse browser runtime now includes:
+- session auth resilience with cookie/storage persistence and restore
+- popup/modal dismissal helpers
+- retryable click/type for stale element recovery
+- download and upload flows with runtime events
+- SPA route-change metadata and bounded scroll extraction helpers
+
+New browser endpoints:
+- `POST /api/browser/dismiss`
+- `POST /api/browser/upload`
+- `POST /api/browser/download`
+- `POST /api/browser/scroll_extract`
+
+New browser observability events:
+- `popup.dismissed`
+- `download.completed`
+- `upload.completed`
+- `navigation.route_changed`
+- `browser.error`
+- `session.expired`

@@ -31,9 +31,13 @@ class BrowserSessionState(BaseModel):
     agent_id: str | None = None
     current_url: str | None = None
     cookies: list[dict[str, object]] = Field(default_factory=list)
+    local_storage: dict[str, str] = Field(default_factory=dict)
+    session_storage: dict[str, str] = Field(default_factory=dict)
     last_active_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     page_title: str | None = None
     tabs: list[dict[str, object]] = Field(default_factory=list)
+    auth_state: dict[str, object] = Field(default_factory=dict)
+    downloads: list[dict[str, object]] = Field(default_factory=list)
 
 
 class ConnectionState(BaseModel):

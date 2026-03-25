@@ -3,12 +3,27 @@ from contextlib import asynccontextmanager
 import base64
 from datetime import datetime, timezone
 import logging
+from pathlib import Path
+import tempfile
+from typing import Any
 
-from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
+try:
+    from playwright.async_api import Browser, BrowserContext, Error as PlaywrightError, Page, Playwright, async_playwright
+except Exception:  # pragma: no cover - optional import for environments without playwright.
+    Browser = Any  # type: ignore[assignment]
+    BrowserContext = Any  # type: ignore[assignment]
+    Page = Any  # type: ignore[assignment]
+    Playwright = Any  # type: ignore[assignment]
+    PlaywrightError = Exception  # type: ignore[assignment]
+
+    async def async_playwright() -> Any:  # type: ignore[misc]
+        raise RuntimeError("playwright package is not installed.")
 
 from synapse.config import settings
 from synapse.models.browser import (
     BrowserState,
+    DownloadArtifact,
+    DownloadResult,
     ExtractedElement,
     ExtractionResult,
     PageButton,
@@ -21,7 +36,9 @@ from synapse.models.browser import (
     PageSection,
     PageTable,
     ScreenshotResult,
+    ScrollExtractResult,
     StructuredPageModel,
+    UploadResult,
 )
 from synapse.models.runtime_state import BrowserSessionState
 from synapse.runtime.session import BrowserSession
@@ -41,6 +58,8 @@ class BrowserRuntime:
         self._pages: dict[str, Page] = {}
         self._session_agents: dict[str, str | None] = {}
         self._state_store = state_store
+        self._downloads: dict[str, list[dict[str, object]]] = {}
+        self._last_urls: dict[str, str | None] = {}
 
     def set_state_store(self, state_store: RuntimeStateStore) -> None:
         self._state_store = state_store
@@ -78,35 +97,52 @@ class BrowserRuntime:
         self._contexts[session_id] = context
         self._pages[session_id] = page
         self._session_agents[session_id] = agent_id
+        self._downloads.setdefault(session_id, [])
+        self._last_urls[session_id] = None
         await self.save_session_state(session_id)
         return BrowserSession(session_id=session_id, page=await self._snapshot_page(page))
 
     async def open(self, session_id: str, url: str) -> BrowserState:
         page = self._require_page(session_id)
-        await page.goto(url)
-        await page.wait_for_load_state("domcontentloaded")
-        await self._stabilize_page(page)
-        await self.save_session_state(session_id)
-        return BrowserState(session_id=session_id, page=await self._snapshot_page(page))
+        before_url = page.url
+        try:
+            await page.goto(url)
+            await self._wait_for_navigation_ready(page)
+            dismissed = await self._dismiss_blockers(page)
+            snapshot = await self._snapshot_page(page)
+            metadata = self._route_change_metadata(before_url, snapshot.url)
+            metadata["dismissed_blockers"] = dismissed
+            metadata["session_expired"] = self._detect_session_expired(session_id, snapshot)
+            await self.save_session_state(session_id)
+            return BrowserState(session_id=session_id, page=snapshot, metadata=metadata)
+        except Exception as exc:
+            raise RuntimeError(self._classify_browser_error("open", exc)) from exc
 
     async def click(self, session_id: str, selector: str) -> BrowserState:
         page = self._require_page(session_id)
-        await page.locator(selector).first.click()
-        await page.wait_for_load_state("domcontentloaded")
-        await self._stabilize_page(page)
+        before_url = page.url
+        await self._dismiss_blockers(page)
+        await self._retry_click(page, selector)
+        await self._wait_for_navigation_ready(page)
+        dismissed = await self._dismiss_blockers(page)
+        snapshot = await self._snapshot_page(page)
+        metadata = self._route_change_metadata(before_url, snapshot.url)
+        metadata["dismissed_blockers"] = dismissed
+        metadata["session_expired"] = self._detect_session_expired(session_id, snapshot)
         await self.save_session_state(session_id)
-        return BrowserState(session_id=session_id, page=await self._snapshot_page(page))
+        return BrowserState(session_id=session_id, page=snapshot, metadata=metadata)
 
     async def type(self, session_id: str, selector: str, text: str) -> BrowserState:
         page = self._require_page(session_id)
-        locator = page.locator(selector).first
-        await locator.fill(text)
+        await self._dismiss_blockers(page)
+        await self._retry_type(page, selector, text)
         await self._stabilize_page(page)
+        snapshot = await self._snapshot_page(page)
         await self.save_session_state(session_id)
         return BrowserState(
             session_id=session_id,
-            page=await self._snapshot_page(page),
-            metadata={"typed_selector": selector},
+            page=snapshot,
+            metadata={"typed_selector": selector, "session_expired": self._detect_session_expired(session_id, snapshot)},
         )
 
     async def extract(
@@ -116,6 +152,7 @@ class BrowserRuntime:
         attribute: str | None = None,
     ) -> ExtractionResult:
         page = self._require_page(session_id)
+        await self._dismiss_blockers(page)
         locator = page.locator(selector)
         count = await locator.count()
         matches: list[ExtractedElement] = []
@@ -142,6 +179,7 @@ class BrowserRuntime:
 
     async def screenshot(self, session_id: str) -> ScreenshotResult:
         page = self._require_page(session_id)
+        await self._dismiss_blockers(page)
         await self._stabilize_page(page)
         image_bytes = await page.screenshot(full_page=True, type="png")
         payload = ScreenshotResult(
@@ -154,6 +192,7 @@ class BrowserRuntime:
 
     async def get_layout(self, session_id: str) -> StructuredPageModel:
         page = self._require_page(session_id)
+        await self._dismiss_blockers(page)
         await self._stabilize_page(page)
         await self.save_session_state(session_id)
         return await self._snapshot_page(page)
@@ -263,6 +302,66 @@ class BrowserRuntime:
         state = await self.open(session_id, url)
         return BrowserSession(session_id=session_id, current_url=state.page.url, page=state.page)
 
+    async def dismiss_popups(self, session_id: str) -> BrowserState:
+        page = self._require_page(session_id)
+        dismissed = await self._dismiss_blockers(page)
+        snapshot = await self._snapshot_page(page)
+        await self.save_session_state(session_id)
+        return BrowserState(session_id=session_id, page=snapshot, metadata={"dismissed_blockers": dismissed})
+
+    async def upload(self, session_id: str, selector: str, file_paths: list[str]) -> UploadResult:
+        page = self._require_page(session_id)
+        await self._dismiss_blockers(page)
+        await page.locator(selector).first.set_input_files(file_paths)
+        await self._stabilize_page(page)
+        snapshot = await self._snapshot_page(page)
+        await self.save_session_state(session_id)
+        return UploadResult(
+            session_id=session_id,
+            uploaded_files=file_paths,
+            page=snapshot,
+            metadata={"selector": selector, "uploaded_count": len(file_paths)},
+        )
+
+    async def download(
+        self,
+        session_id: str,
+        trigger_selector: str | None = None,
+        timeout_ms: int = 15000,
+    ) -> DownloadResult:
+        page = self._require_page(session_id)
+        await self._dismiss_blockers(page)
+        selector = trigger_selector or "a[download], a[href*='download'], a[href$='.pdf']"
+        artifact = await self._capture_download(page, selector=selector, timeout_ms=timeout_ms)
+        self._downloads.setdefault(session_id, []).append(artifact.model_dump(mode="json"))
+        snapshot = await self._snapshot_page(page)
+        await self.save_session_state(session_id)
+        return DownloadResult(
+            session_id=session_id,
+            artifact=artifact,
+            page=snapshot,
+            metadata={"trigger_selector": selector},
+        )
+
+    async def scroll_extract(
+        self,
+        session_id: str,
+        selector: str,
+        attribute: str | None = None,
+        max_scrolls: int = 8,
+        scroll_step: int = 700,
+    ) -> ScrollExtractResult:
+        page = self._require_page(session_id)
+        await self._dismiss_blockers(page)
+        await self._bounded_scroll(page, max_scrolls=max_scrolls, scroll_step=scroll_step)
+        extracted = await self.extract(session_id=session_id, selector=selector, attribute=attribute)
+        return ScrollExtractResult(
+            session_id=session_id,
+            matches=extracted.matches,
+            page=extracted.page,
+            metadata={"max_scrolls": max_scrolls, "scroll_step": scroll_step},
+        )
+
     async def close_session(self, session_id: str) -> None:
         page = self._pages.pop(session_id, None)
         if page is not None:
@@ -272,6 +371,8 @@ class BrowserRuntime:
         if context is not None:
             await context.close()
         self._session_agents.pop(session_id, None)
+        self._downloads.pop(session_id, None)
+        self._last_urls.pop(session_id, None)
         if self._state_store is not None:
             await self._state_store.delete_session(session_id)
 
@@ -287,17 +388,25 @@ class BrowserRuntime:
             cookies = await context.cookies()
         except Exception:
             cookies = []
+        storage = await self._snapshot_storage(page)
+        snapshot = await self._snapshot_page(page)
+        auth_state = self._auth_state_for_snapshot(snapshot, cookies)
 
         state = BrowserSessionState(
             session_id=session_id,
             agent_id=self._session_agents.get(session_id),
             current_url=page.url or None,
             cookies=[dict(cookie) for cookie in cookies],
+            local_storage=storage["local_storage"],
+            session_storage=storage["session_storage"],
             last_active_at=datetime.now(timezone.utc),
             page_title=await page.title(),
             tabs=[{"index": 0, "url": page.url or None, "title": await page.title()}],
+            auth_state=auth_state,
+            downloads=list(self._downloads.get(session_id, [])),
         )
         await self._state_store.store_session(session_id, state.model_dump(mode="json"))
+        self._last_urls[session_id] = state.current_url
         return state
 
     async def restore_session_state(self, session_id: str) -> BrowserSession | None:
@@ -323,6 +432,8 @@ class BrowserRuntime:
                 await page.wait_for_load_state("domcontentloaded")
             except Exception as exc:
                 logger.warning("Failed to navigate session %s to %s: %s", session_id, state.current_url, exc)
+        await self._restore_storage(page, state.local_storage, state.session_storage)
+        self._downloads[session_id] = list(state.downloads)
 
         snapshot = await self._snapshot_page(page)
         await self.save_session_state(session_id)
@@ -337,9 +448,13 @@ class BrowserRuntime:
                         session_id=session_id,
                         agent_id=self._session_agents.get(session_id),
                         current_url=page.url or None,
+                        local_storage={},
+                        session_storage={},
                         last_active_at=datetime.now(timezone.utc),
                         page_title=await page.title(),
                         tabs=[{"index": 0, "url": page.url or None, "title": await page.title()}],
+                        auth_state={},
+                        downloads=list(self._downloads.get(session_id, [])),
                     )
                 )
             if agent_id is None:
@@ -594,7 +709,6 @@ class BrowserRuntime:
             await page.wait_for_load_state("networkidle", timeout=1000)
         except Exception:
             pass
-
         try:
             await page.evaluate(
                 """
@@ -616,25 +730,220 @@ class BrowserRuntime:
                     document.documentElement?.scrollHeight || 0
                   );
                   const viewport = window.innerHeight || 800;
-                  for (let offset = 0; offset <= maxScroll; offset += Math.max(200, Math.floor(viewport * 0.75))) {
+                  for (let offset = 0; offset <= maxScroll; offset += Math.max(250, Math.floor(viewport * 0.75))) {
                     window.scrollTo({ top: offset, behavior: "auto" });
-                    await wait(100);
+                    await wait(80);
                   }
                   window.scrollTo({ top: 0, behavior: "auto" });
 
                   for (let index = 0; index < 8; index += 1) {
                     await wait(100);
-                    if (Date.now() - lastMutation >= 250) {
-                      break;
-                    }
+                    if (Date.now() - lastMutation >= 250) break;
                   }
-
                   observer.disconnect();
                 }
                 """
             )
         except Exception:
             pass
+
+    async def _wait_for_navigation_ready(self, page: Page) -> None:
+        await page.wait_for_load_state("domcontentloaded")
+        await self._stabilize_page(page)
+
+    async def _dismiss_blockers(self, page: Page) -> list[str]:
+        selectors = [
+            "button:has-text('Accept')",
+            "button:has-text('I Agree')",
+            "button:has-text('Agree')",
+            "button:has-text('Allow all')",
+            "button:has-text('Close')",
+            "[aria-label='Close']",
+            ".cookie-banner button",
+            ".consent button",
+            "[role='dialog'] button",
+            ".modal button",
+        ]
+        dismissed: list[str] = []
+        for selector in selectors:
+            try:
+                locator = page.locator(selector).first
+                if await locator.count() > 0 and await locator.is_visible():
+                    await locator.click(timeout=500)
+                    dismissed.append(selector)
+            except Exception:
+                continue
+        return dismissed
+
+    async def _retry_click(self, page: Page, selector: str, retries: int = 3) -> None:
+        last_error: Exception | None = None
+        for attempt in range(retries):
+            try:
+                await page.locator(selector).first.click(timeout=2500)
+                return
+            except Exception as exc:
+                last_error = exc
+                if attempt < retries - 1:
+                    await self._stabilize_page(page)
+                    candidate = await self._fallback_selector(selector)
+                    if candidate:
+                        selector = candidate
+        raise RuntimeError(self._classify_browser_error("click", last_error or RuntimeError("click failed")))
+
+    async def _retry_type(self, page: Page, selector: str, text: str, retries: int = 3) -> None:
+        last_error: Exception | None = None
+        for attempt in range(retries):
+            try:
+                await page.locator(selector).first.fill(text, timeout=2500)
+                return
+            except Exception as exc:
+                last_error = exc
+                if attempt < retries - 1:
+                    await self._stabilize_page(page)
+                    candidate = await self._fallback_selector(selector)
+                    if candidate:
+                        selector = candidate
+        raise RuntimeError(self._classify_browser_error("type", last_error or RuntimeError("type failed")))
+
+    async def _fallback_selector(self, selector: str) -> str | None:
+        stripped = selector.strip()
+        if stripped.startswith("text="):
+            text = stripped.removeprefix("text=").strip().strip("\"'")
+            return f"button:has-text('{text}'), [role='button']:has-text('{text}'), a:has-text('{text}')"
+        if stripped.startswith("#"):
+            return stripped
+        if "[" in stripped:
+            return stripped
+        return None
+
+    async def _bounded_scroll(self, page: Page, max_scrolls: int, scroll_step: int) -> None:
+        bounded_scrolls = max(1, min(max_scrolls, 20))
+        bounded_step = max(200, min(scroll_step, 2000))
+        await page.evaluate(
+            """
+            async ({ maxScrolls, step }) => {
+              const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+              let loops = 0;
+              let lastHeight = document.body.scrollHeight;
+              while (loops < maxScrolls) {
+                window.scrollBy(0, step);
+                await wait(150);
+                const height = document.body.scrollHeight;
+                if (height === lastHeight) break;
+                lastHeight = height;
+                loops += 1;
+              }
+            }
+            """,
+            {"maxScrolls": bounded_scrolls, "step": bounded_step},
+        )
+        await self._stabilize_page(page)
+
+    async def _capture_download(self, page: Page, selector: str, timeout_ms: int) -> DownloadArtifact:
+        bounded_timeout = max(1000, min(timeout_ms, 120_000))
+        async with page.expect_download(timeout=bounded_timeout) as download_info:
+            await self._retry_click(page, selector)
+        download = await download_info.value
+        target_path = Path(tempfile.gettempdir()) / download.suggested_filename
+        await download.save_as(str(target_path))
+        size = target_path.stat().st_size if target_path.exists() else None
+        return DownloadArtifact(
+            suggested_filename=download.suggested_filename,
+            path=str(target_path),
+            url=download.url,
+            size_bytes=size,
+            status="completed",
+        )
+
+    async def _snapshot_storage(self, page: Page) -> dict[str, dict[str, str]]:
+        try:
+            payload = await page.evaluate(
+                """
+                () => {
+                  const collect = (storage) => {
+                    const out = {};
+                    for (let i = 0; i < storage.length; i += 1) {
+                      const key = storage.key(i);
+                      if (key) out[key] = storage.getItem(key) || "";
+                    }
+                    return out;
+                  };
+                  return { local_storage: collect(window.localStorage), session_storage: collect(window.sessionStorage) };
+                }
+                """
+            )
+            return {
+                "local_storage": dict(payload.get("local_storage", {})),
+                "session_storage": dict(payload.get("session_storage", {})),
+            }
+        except Exception:
+            return {"local_storage": {}, "session_storage": {}}
+
+    async def _restore_storage(self, page: Page, local_storage: dict[str, str], session_storage: dict[str, str]) -> None:
+        if not local_storage and not session_storage:
+            return
+        try:
+            await page.evaluate(
+                """
+                ({ localStorageData, sessionStorageData }) => {
+                  Object.entries(localStorageData || {}).forEach(([key, value]) => window.localStorage.setItem(key, value));
+                  Object.entries(sessionStorageData || {}).forEach(([key, value]) => window.sessionStorage.setItem(key, value));
+                }
+                """,
+                {"localStorageData": local_storage, "sessionStorageData": session_storage},
+            )
+        except Exception as exc:
+            logger.warning("Failed to restore storage state: %s", exc)
+
+    def _auth_state_for_snapshot(self, snapshot: StructuredPageModel, cookies: list[dict[str, object]]) -> dict[str, object]:
+        cookie_names = {str(cookie.get("name", "")).lower() for cookie in cookies}
+        has_auth_cookie = any(name for name in cookie_names if any(token in name for token in ["session", "auth", "token", "sid"]))
+        login_inputs = [
+            field
+            for field in snapshot.inputs
+            if (field.input_type or "").lower() in {"password", "email"}
+            or "login" in (field.placeholder or "").lower()
+            or "sign in" in (field.placeholder or "").lower()
+        ]
+        return {"authenticated": bool(has_auth_cookie and not login_inputs), "has_auth_cookie": bool(has_auth_cookie)}
+
+    def _detect_session_expired(self, session_id: str, snapshot: StructuredPageModel) -> bool:
+        previous = self._last_urls.get(session_id)
+        self._last_urls[session_id] = snapshot.url
+        login_inputs = [
+            field
+            for field in snapshot.inputs
+            if (field.input_type or "").lower() in {"password", "email"}
+            or "login" in (field.placeholder or "").lower()
+            or "sign in" in (field.placeholder or "").lower()
+        ]
+        return bool(previous and previous != snapshot.url and login_inputs)
+
+    @staticmethod
+    def _route_change_metadata(before_url: str | None, after_url: str | None) -> dict[str, object]:
+        if before_url is None or after_url is None or before_url == after_url:
+            return {}
+        before_path = before_url.split("#")[0]
+        after_path = after_url.split("#")[0]
+        return {
+            "route_changed": True,
+            "spa_route_change": before_path.split("?")[0] != after_path.split("?")[0],
+            "from_url": before_url,
+            "to_url": after_url,
+        }
+
+    @staticmethod
+    def _classify_browser_error(action: str, exc: Exception) -> str:
+        message = str(exc).lower()
+        if "timeout" in message:
+            category = "timeout"
+        elif "net::" in message or "dns" in message:
+            category = "network"
+        elif "stale" in message or "detached" in message:
+            category = "stale_element"
+        else:
+            category = "interaction"
+        return f"browser.{action}.{category}: {exc}"
 
 
 @asynccontextmanager

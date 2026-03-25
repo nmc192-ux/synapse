@@ -42,6 +42,21 @@ src/synapse/
   adapters/      Agent adapter interfaces and built-in implementations
   api/           FastAPI routes
   models/        Pydantic models
+  sdk/           Python SDK for agent clients
   runtime/       Browser runtime, orchestration, tools, registry
   transports/    WebSocket connection management
 ```
+
+## Python SDK
+
+```python
+from synapse.sdk import SynapseClient
+
+with SynapseClient("http://127.0.0.1:8000") as client:
+    browser = client.browser
+    page = browser.open("https://example.com")
+    data = browser.extract("h1")
+    tool_result = browser.call_tool("web.search", {"query": "Synapse"})
+```
+
+Example agents are available in `examples/` for OpenClaw, Codex, and Claude Code.

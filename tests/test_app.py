@@ -6,6 +6,7 @@ from synapse.models.browser import BrowserState, PageData
 from synapse.models.loop import AgentAction, AgentActionType
 from synapse.models.plugin import ToolDescriptor
 from synapse.models.task import TaskRequest
+from synapse.sdk import SynapseClient
 
 
 def test_healthcheck() -> None:
@@ -55,3 +56,9 @@ def test_tools_endpoint_returns_descriptors() -> None:
     assert response.status_code == 200
     tools = [ToolDescriptor.model_validate(item) for item in response.json()]
     assert any(tool.name == "github.search" for tool in tools)
+
+
+def test_sdk_client_exposes_browser() -> None:
+    client = SynapseClient("http://127.0.0.1:8000")
+    assert client.browser is not None
+    client.close()

@@ -1,0 +1,139 @@
+from __future__ import annotations
+
+import httpx
+
+from synapse.models.agent import AgentDefinition
+from synapse.models.browser import (
+    BrowserState,
+    ClickRequest,
+    ExtractionResult,
+    ExtractRequest,
+    OpenRequest,
+    ScreenshotRequest,
+    ScreenshotResult,
+    TypeRequest,
+)
+from synapse.models.message import AgentMessage
+from synapse.models.plugin import ToolDescriptor
+from synapse.runtime.session import BrowserSession
+
+
+class SynapseClient:
+    def __init__(self, base_url: str = "http://127.0.0.1:8000", timeout: float = 30.0) -> None:
+        self.base_url = base_url.rstrip("/")
+        self._http = httpx.Client(base_url=self.base_url, timeout=timeout)
+
+    @property
+    def browser(self) -> SynapseBrowser:
+        return SynapseBrowser(self)
+
+    def __enter__(self) -> SynapseClient:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self._http.close()
+
+    def create_session(self) -> BrowserSession:
+        response = self._http.post("/api/sessions")
+        response.raise_for_status()
+        return BrowserSession.model_validate(response.json())
+
+    def register_agent(self, agent: AgentDefinition) -> AgentDefinition:
+        response = self._http.post("/api/agents", json=agent.model_dump(mode="json"))
+        response.raise_for_status()
+        return AgentDefinition.model_validate(response.json())
+
+    def list_tools(self) -> list[ToolDescriptor]:
+        response = self._http.get("/api/tools")
+        response.raise_for_status()
+        return [ToolDescriptor.model_validate(item) for item in response.json()]
+
+    def call_tool(self, tool_name: str, arguments: dict[str, object] | None = None) -> dict[str, object]:
+        response = self._http.post(
+            "/api/tools/call",
+            json={"tool_name": tool_name, "arguments": arguments or {}},
+        )
+        response.raise_for_status()
+        return dict(response.json())
+
+    def send_agent_message(
+        self,
+        sender_agent_id: str,
+        recipient_agent_id: str,
+        content: str,
+        metadata: dict[str, object] | None = None,
+    ) -> AgentMessage:
+        message = AgentMessage(
+            sender_agent_id=sender_agent_id,
+            recipient_agent_id=recipient_agent_id,
+            content=content,
+            metadata=metadata or {},
+        )
+        response = self._http.post("/api/messages", json=message.model_dump(mode="json"))
+        response.raise_for_status()
+        return AgentMessage.model_validate(response.json())
+
+
+class SynapseBrowser:
+    def __init__(self, client: SynapseClient, session_id: str | None = None) -> None:
+        self._client = client
+        self._session_id = session_id
+
+    @property
+    def session_id(self) -> str:
+        if self._session_id is None:
+            self._session_id = self._client.create_session().session_id
+        return self._session_id
+
+    def open(self, url: str) -> BrowserState:
+        payload = OpenRequest(session_id=self.session_id, url=url)
+        response = self._client._http.post("/api/browser/open", json=payload.model_dump(mode="json"))
+        response.raise_for_status()
+        return BrowserState.model_validate(response.json())
+
+    def click(self, selector: str) -> BrowserState:
+        payload = ClickRequest(session_id=self.session_id, selector=selector)
+        response = self._client._http.post("/api/browser/click", json=payload.model_dump(mode="json"))
+        response.raise_for_status()
+        return BrowserState.model_validate(response.json())
+
+    def type(self, selector: str, text: str) -> BrowserState:
+        payload = TypeRequest(session_id=self.session_id, selector=selector, text=text)
+        response = self._client._http.post("/api/browser/type", json=payload.model_dump(mode="json"))
+        response.raise_for_status()
+        return BrowserState.model_validate(response.json())
+
+    def extract(self, selector: str, attribute: str | None = None) -> ExtractionResult:
+        payload = ExtractRequest(session_id=self.session_id, selector=selector, attribute=attribute)
+        response = self._client._http.post("/api/browser/extract", json=payload.model_dump(mode="json"))
+        response.raise_for_status()
+        return ExtractionResult.model_validate(response.json())
+
+    def screenshot(self) -> ScreenshotResult:
+        payload = ScreenshotRequest(session_id=self.session_id)
+        response = self._client._http.post("/api/browser/screenshot", json=payload.model_dump(mode="json"))
+        response.raise_for_status()
+        return ScreenshotResult.model_validate(response.json())
+
+    def call_tool(self, tool_name: str, arguments: dict[str, object] | None = None) -> dict[str, object]:
+        return self._client.call_tool(tool_name, arguments)
+
+    def send_agent_message(
+        self,
+        sender_agent_id: str,
+        recipient_agent_id: str,
+        content: str,
+        metadata: dict[str, object] | None = None,
+    ) -> AgentMessage:
+        return self._client.send_agent_message(
+            sender_agent_id=sender_agent_id,
+            recipient_agent_id=recipient_agent_id,
+            content=content,
+            metadata=metadata,
+        )
+
+    def fork(self, session_id: str | None = None) -> SynapseBrowser:
+        return SynapseBrowser(self._client, session_id=session_id or self._session_id)

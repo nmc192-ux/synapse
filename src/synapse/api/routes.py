@@ -15,7 +15,7 @@ from synapse.models.browser import (
 from synapse.models.events import EventType, RuntimeEvent
 from synapse.models.message import AgentMessage
 from synapse.models.plugin import PluginDescriptor, PluginReloadRequest, ToolDescriptor
-from synapse.models.task import ExtractionRequest, NavigationRequest, TaskRequest
+from synapse.models.task import ExtractionRequest, NavigationRequest, TaskRequest, ToolCallRequest
 from synapse.runtime.orchestrator import RuntimeOrchestrator
 from synapse.runtime.session import BrowserSession
 
@@ -139,6 +139,14 @@ async def list_messages(orchestrator: RuntimeOrchestrator = Depends(get_orchestr
 @router.get("/tools", response_model=list[ToolDescriptor])
 async def list_tools(orchestrator: RuntimeOrchestrator = Depends(get_orchestrator)) -> list[ToolDescriptor]:
     return await orchestrator.list_tools()
+
+
+@router.post("/tools/call")
+async def call_tool(
+    request: ToolCallRequest,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> dict[str, object]:
+    return await orchestrator.call_tool(request.tool_name, request.arguments)
 
 
 @router.get("/plugins", response_model=list[PluginDescriptor])

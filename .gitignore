@@ -5,3 +5,7 @@ __pycache__/
 dist/
 build/
 *.pyc
+node_modules/
+.next/
+out/
+npm-debug.log*

@@ -45,6 +45,7 @@ src/synapse/
   sdk/           Python SDK for agent clients
   runtime/       Browser runtime, orchestration, tools, registry
   transports/    WebSocket connection management
+ui/              Next.js operator interface
 ```
 
 ## Python SDK
@@ -60,3 +61,15 @@ with SynapseClient("http://127.0.0.1:8000") as client:
 ```
 
 Example agents are available in `examples/` for OpenClaw, Codex, and Claude Code.
+
+## Next.js UI
+
+```bash
+cd ui
+npm install
+npm run dev
+```
+
+The UI renders a Synapse operator dashboard with agent activity, page view, thoughts,
+actions log, memory, and agent communication. It listens to `NEXT_PUBLIC_SYNAPSE_WS_URL`
+and defaults to `ws://127.0.0.1:8000/api/ws`.

@@ -63,7 +63,13 @@ class EventDrivenAgentLoop:
             if current_page is not None:
                 await self._increment_tokens(task, self._page_text(current_page))
             await self._store_observation_memory(task, observed, current_page)
-            remaining_actions = await self.planner.plan(task, completed_actions=completed_actions, current_page=current_page)
+            memory_summary = await self._memory_summary(task.agent_id)
+            remaining_actions = await self.planner.generate_plan(
+                task=task,
+                completed_actions=completed_actions,
+                current_page=current_page,
+                memory_summary=memory_summary,
+            )
             await self._broadcast_plan(task, remaining_actions)
 
             while remaining_actions:
@@ -288,6 +294,16 @@ class EventDrivenAgentLoop:
             )
         )
         await self._increment_memory_write(task)
+
+    async def _memory_summary(self, agent_id: str) -> str:
+        try:
+            recent = await self.memory_manager.get_recent(agent_id, limit=5)
+        except Exception:
+            return ""
+        if not recent:
+            return ""
+        ordered = sorted(recent, key=lambda item: item.timestamp)
+        return " | ".join(item.content for item in ordered if item.content)
 
     async def _increment_step(self, task: TaskRequest) -> None:
         usage = self.budget_manager.increment_step(self.definition)

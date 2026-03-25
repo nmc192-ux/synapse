@@ -7,6 +7,7 @@ from synapse.models.browser import StructuredPageModel
 from synapse.models.loop import AgentAction, AgentActionType, LoopEvaluation
 from synapse.models.task import TaskRequest
 from synapse.runtime.llm import LLMProvider
+from synapse.runtime.prompts import PLANNER_PROMPT
 
 
 class NavigationPlanner:
@@ -19,12 +20,31 @@ class NavigationPlanner:
         completed_actions: list[AgentAction],
         current_page: StructuredPageModel | None = None,
     ) -> list[AgentAction]:
+        return await self.generate_plan(
+            task=task,
+            completed_actions=completed_actions,
+            current_page=current_page,
+            memory_summary="",
+        )
+
+    async def generate_plan(
+        self,
+        task: TaskRequest,
+        completed_actions: list[AgentAction],
+        current_page: StructuredPageModel | None = None,
+        memory_summary: str = "",
+    ) -> list[AgentAction]:
         explicit_actions = self._explicit_actions(task)
         if explicit_actions:
             completed_ids = {action.action_id for action in completed_actions}
             return [action for action in explicit_actions if action.action_id not in completed_ids]
 
-        llm_actions = await self._plan_with_llm(task, completed_actions, current_page)
+        llm_actions = await self._plan_with_llm(
+            task=task,
+            completed_actions=completed_actions,
+            current_page=current_page,
+            memory_summary=memory_summary,
+        )
         if llm_actions:
             return llm_actions
 
@@ -35,11 +55,13 @@ class NavigationPlanner:
         task: TaskRequest,
         completed_actions: list[AgentAction],
         current_page: StructuredPageModel | None,
+        memory_summary: str,
     ) -> list[AgentAction]:
         if self.llm is None:
             return []
 
-        completed = [
+        page_context = current_page.model_dump(mode="json") if current_page is not None else {}
+        previous_actions = [
             {
                 "type": action.type.value,
                 "selector": action.selector,
@@ -49,24 +71,15 @@ class NavigationPlanner:
             }
             for action in completed_actions
         ]
-        page_context = current_page.model_dump(mode="json") if current_page is not None else None
-        prompt = json.dumps(
-            {
-                "goal": task.goal,
-                "start_url": str(task.start_url) if task.start_url is not None else None,
-                "constraints": task.constraints,
-                "completed_actions": completed,
-                "current_page": page_context,
-                "instruction": (
-                    "Return a JSON array of next browser actions. "
-                    "Allowed action types: open, click, type, extract, screenshot. "
-                    "Each item may include type, selector, text, url, and attribute."
-                ),
-            }
+        prompt = PLANNER_PROMPT.format(
+            goal=task.goal,
+            page_state=json.dumps(page_context, ensure_ascii=True),
+            memory_summary=memory_summary or "No memory available.",
+            previous_actions=json.dumps(previous_actions, ensure_ascii=True),
+            constraints=json.dumps(task.constraints, ensure_ascii=True),
         )
         system = (
-            "You generate minimal browser action plans for Synapse. "
-            "Respond with JSON only. Do not include markdown fences."
+            "You are Synapse planner. Return strict JSON that matches the required output schema."
         )
 
         try:
@@ -74,16 +87,15 @@ class NavigationPlanner:
         except Exception:
             return []
 
-        try:
-            decoded = json.loads(raw)
-        except json.JSONDecodeError:
+        decoded = self._decode_llm_json(raw)
+        if decoded is None:
             return []
-
-        if not isinstance(decoded, list):
+        actions_payload = decoded.get("actions")
+        if not isinstance(actions_payload, list):
             return []
 
         actions: list[AgentAction] = []
-        for spec in decoded:
+        for spec in actions_payload:
             if not isinstance(spec, dict):
                 continue
             action_type = spec.get("type")
@@ -105,6 +117,19 @@ class NavigationPlanner:
 
         completed_ids = {action.action_id for action in completed_actions}
         return [action for action in actions if action.action_id not in completed_ids]
+
+    @staticmethod
+    def _decode_llm_json(raw: str) -> dict[str, object] | None:
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`")
+            if cleaned.startswith("json"):
+                cleaned = cleaned[4:].strip()
+        try:
+            decoded = json.loads(cleaned)
+        except json.JSONDecodeError:
+            return None
+        return decoded if isinstance(decoded, dict) else None
 
     def _heuristic_plan(
         self,

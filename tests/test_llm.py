@@ -1,6 +1,10 @@
+import asyncio
 from types import SimpleNamespace
 
+from synapse.models.loop import AgentActionType
+from synapse.models.task import TaskRequest
 from synapse.runtime.llm import AnthropicProvider, LocalModelProvider, OpenAIProvider, create_llm_provider
+from synapse.runtime.planning import NavigationPlanner
 
 
 def test_create_llm_provider_returns_none_when_disabled() -> None:
@@ -46,3 +50,28 @@ def test_create_llm_provider_builds_local_provider() -> None:
     provider = create_llm_provider(settings)
     assert isinstance(provider, LocalModelProvider)
     assert provider.endpoint == "http://127.0.0.1:11434/api/generate"
+
+
+def test_navigation_planner_generate_plan_uses_llm_json_actions() -> None:
+    class StubProvider:
+        async def generate(self, prompt: str, system: str | None = None) -> str:
+            return '{"actions":[{"type":"open","url":"https://example.com"},{"type":"click","selector":"button.submit"}]}'
+
+    planner = NavigationPlanner(llm=StubProvider())
+    task = TaskRequest(task_id="task-1", agent_id="agent-1", goal="Open and click")
+
+    actions = asyncio.run(planner.generate_plan(task, completed_actions=[], memory_summary="recent memory"))
+    assert [action.type for action in actions] == [AgentActionType.OPEN, AgentActionType.CLICK]
+    assert actions[0].url == "https://example.com"
+
+
+def test_navigation_planner_generate_plan_falls_back_on_invalid_llm_output() -> None:
+    class BadProvider:
+        async def generate(self, prompt: str, system: str | None = None) -> str:
+            return "not json"
+
+    planner = NavigationPlanner(llm=BadProvider())
+    task = TaskRequest(task_id="task-2", agent_id="agent-2", goal="Extract heading and screenshot")
+
+    actions = asyncio.run(planner.generate_plan(task, completed_actions=[]))
+    assert [action.type for action in actions] == [AgentActionType.EXTRACT, AgentActionType.SCREENSHOT]

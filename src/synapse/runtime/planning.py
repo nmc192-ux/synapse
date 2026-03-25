@@ -7,7 +7,7 @@ from synapse.models.browser import StructuredPageModel
 from synapse.models.loop import AgentAction, AgentActionType, LoopEvaluation
 from synapse.models.task import TaskRequest
 from synapse.runtime.llm import LLMProvider
-from synapse.runtime.prompts import PLANNER_PROMPT
+from synapse.runtime.prompts import EVALUATOR_PROMPT, PLANNER_PROMPT
 
 
 class NavigationPlanner:
@@ -231,6 +231,7 @@ class NavigationPlanner:
 
 class NavigationEvaluator:
     def __init__(self, llm: LLMProvider | None = None) -> None:
+        self.llm = llm
         self.planner = NavigationPlanner(llm=llm)
 
     async def evaluate(
@@ -241,9 +242,24 @@ class NavigationEvaluator:
         completed_actions: list[AgentAction],
         remaining_actions: list[AgentAction],
         current_page: StructuredPageModel | None = None,
+        memory_summary: str = "",
     ) -> LoopEvaluation:
-        success, notes = self._success_for_action(action, action_result)
-        next_actions = [candidate.model_copy() for candidate in remaining_actions]
+        evaluation = await self.evaluate_action(
+            goal=task.goal,
+            last_action=action,
+            page_state=current_page,
+            memory=memory_summary,
+            previous_actions=completed_actions,
+            constraints=task.constraints,
+            action_result=action_result,
+        )
+        if evaluation is None:
+            success, notes = self._success_for_action(action, action_result)
+            next_actions = [candidate.model_copy() for candidate in remaining_actions]
+        else:
+            success = evaluation["success"]
+            notes = evaluation["reason"]
+            next_actions = evaluation["next_actions"] or [candidate.model_copy() for candidate in remaining_actions]
 
         if success and not next_actions:
             planned = await self.planner.plan(task, completed_actions=completed_actions, current_page=current_page)
@@ -256,6 +272,93 @@ class NavigationEvaluator:
             notes=notes,
             next_actions=next_actions,
         )
+
+    async def evaluate_action(
+        self,
+        goal: str,
+        last_action: AgentAction,
+        page_state: StructuredPageModel | None,
+        memory: str,
+        previous_actions: list[AgentAction] | None = None,
+        constraints: dict[str, object] | None = None,
+        action_result: dict[str, object] | None = None,
+    ) -> dict[str, bool | str | list[AgentAction]] | None:
+        if self.llm is None:
+            return None
+
+        page_payload = page_state.model_dump(mode="json") if page_state is not None else {}
+        previous_actions = previous_actions or []
+        constraints = constraints or {}
+        action_result = action_result or {}
+        previous_payload = [
+            {
+                "type": action.type.value,
+                "selector": action.selector,
+                "text": action.text,
+                "url": action.url,
+                "status": action.status,
+            }
+            for action in previous_actions
+        ]
+        prompt = EVALUATOR_PROMPT.format(
+            goal=goal,
+            page_state=json.dumps(page_payload, ensure_ascii=True),
+            memory_summary=memory or "No memory available.",
+            previous_actions=json.dumps(previous_payload, ensure_ascii=True),
+            constraints=json.dumps(constraints, ensure_ascii=True),
+            last_action=json.dumps(
+                {
+                    "type": last_action.type.value,
+                    "selector": last_action.selector,
+                    "text": last_action.text,
+                    "url": last_action.url,
+                    "attribute": last_action.attribute,
+                },
+                ensure_ascii=True,
+            ),
+            action_result=json.dumps(action_result, ensure_ascii=True),
+        )
+        system = "You are Synapse evaluator. Return strict JSON with success, reason, and next_actions."
+
+        try:
+            raw = await self.llm.generate(prompt=prompt, system=system)
+        except Exception:
+            return None
+
+        decoded = NavigationPlanner._decode_llm_json(raw)
+        if decoded is None:
+            return None
+
+        success = decoded.get("success")
+        reason = decoded.get("reason")
+        next_actions_payload = decoded.get("next_actions", [])
+        if not isinstance(success, bool) or not isinstance(reason, str):
+            return None
+        if not isinstance(next_actions_payload, list):
+            return None
+
+        parsed_actions: list[AgentAction] = []
+        for spec in next_actions_payload:
+            if not isinstance(spec, dict):
+                continue
+            action_type = spec.get("type")
+            if action_type not in {item.value for item in AgentActionType}:
+                continue
+            try:
+                parsed_actions.append(
+                    AgentAction(
+                        action_id=str(spec.get("action_id", uuid.uuid4())),
+                        type=AgentActionType(action_type),
+                        selector=spec.get("selector"),
+                        text=spec.get("text"),
+                        url=spec.get("url"),
+                        attribute=spec.get("attribute"),
+                    )
+                )
+            except ValueError:
+                continue
+
+        return {"success": success, "reason": reason, "next_actions": parsed_actions}
 
     @staticmethod
     def _success_for_action(action: AgentAction, action_result: dict[str, object]) -> tuple[bool, str]:

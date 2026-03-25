@@ -1,10 +1,10 @@
 import asyncio
 from types import SimpleNamespace
 
-from synapse.models.loop import AgentActionType
+from synapse.models.loop import AgentAction, AgentActionType
 from synapse.models.task import TaskRequest
 from synapse.runtime.llm import AnthropicProvider, LocalModelProvider, OpenAIProvider, create_llm_provider
-from synapse.runtime.planning import NavigationPlanner
+from synapse.runtime.planning import NavigationEvaluator, NavigationPlanner
 
 
 def test_create_llm_provider_returns_none_when_disabled() -> None:
@@ -75,3 +75,48 @@ def test_navigation_planner_generate_plan_falls_back_on_invalid_llm_output() -> 
 
     actions = asyncio.run(planner.generate_plan(task, completed_actions=[]))
     assert [action.type for action in actions] == [AgentActionType.EXTRACT, AgentActionType.SCREENSHOT]
+
+
+def test_navigation_evaluator_evaluate_action_uses_llm_response() -> None:
+    class EvalProvider:
+        async def generate(self, prompt: str, system: str | None = None) -> str:
+            return (
+                '{"success":true,"reason":"Action completed successfully.",'
+                '"next_actions":[{"type":"click","selector":"button.next"}]}'
+            )
+
+    evaluator = NavigationEvaluator(llm=EvalProvider())
+    last_action = AgentAction(action_id="a1", type=AgentActionType.OPEN, url="https://example.com")
+    result = asyncio.run(
+        evaluator.evaluate_action(
+            goal="Open page",
+            last_action=last_action,
+            page_state=None,
+            memory="recent memory",
+        )
+    )
+
+    assert result is not None
+    assert result["success"] is True
+    assert result["reason"] == "Action completed successfully."
+    next_actions = result["next_actions"]
+    assert isinstance(next_actions, list)
+    assert next_actions[0].type == AgentActionType.CLICK
+
+
+def test_navigation_evaluator_evaluate_action_returns_none_on_invalid_json() -> None:
+    class BadEvalProvider:
+        async def generate(self, prompt: str, system: str | None = None) -> str:
+            return "not-json"
+
+    evaluator = NavigationEvaluator(llm=BadEvalProvider())
+    last_action = AgentAction(action_id="a2", type=AgentActionType.EXTRACT, selector="h1")
+    result = asyncio.run(
+        evaluator.evaluate_action(
+            goal="Extract heading",
+            last_action=last_action,
+            page_state=None,
+            memory="",
+        )
+    )
+    assert result is None

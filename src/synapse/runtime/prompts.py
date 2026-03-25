@@ -38,7 +38,7 @@ Input:
 Output JSON ONLY with the exact schema:
 {{
   "success": true,
-  "notes": "Short explanation",
+  "reason": "Short explanation",
   "next_actions": [
     {{ "type": "click", "selector": "..." }}
   ]

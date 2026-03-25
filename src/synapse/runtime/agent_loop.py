@@ -102,6 +102,7 @@ class EventDrivenAgentLoop:
                     completed_actions=completed_actions,
                     remaining_actions=remaining_actions,
                     current_page=current_page,
+                    memory_summary=await self._memory_summary(task.agent_id),
                 )
                 remaining_actions = [candidate.model_copy() for candidate in evaluation.next_actions]
                 await self.sockets.broadcast(

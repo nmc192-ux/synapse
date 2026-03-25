@@ -1,3 +1,4 @@
+from synapse.connectors.codex import CodexConnector
 from fastapi.testclient import TestClient
 
 from synapse.main import app
@@ -116,3 +117,20 @@ def test_sdk_client_exposes_memory() -> None:
     client = SynapseClient("http://127.0.0.1:8000")
     assert client.memory is not None
     client.close()
+
+
+def test_codex_connector_normalizes_plan() -> None:
+    connector = CodexConnector(SynapseClient("http://127.0.0.1:8000"))
+    normalized = connector.normalize_task(
+        {
+            "goal": "Inspect homepage",
+            "plan": {
+                "actions": [{"type": "click", "selector": "button"}],
+                "extract": [{"selector": "h1"}],
+                "screenshot": True,
+            },
+        }
+    )
+    assert normalized["goal"] == "Inspect homepage"
+    assert normalized["actions"][0]["type"] == "click"
+    connector.client.close()

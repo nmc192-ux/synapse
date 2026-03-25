@@ -42,6 +42,9 @@ class LoopPlan(BaseModel):
     task_id: str
     phase: LoopPhase = LoopPhase.PLAN
     actions: list[AgentAction] = Field(default_factory=list)
+    raw_context_size: int = 0
+    compressed_context_size: int = 0
+    compression_ratio: float = 1.0
 
 
 class LoopReflection(BaseModel):

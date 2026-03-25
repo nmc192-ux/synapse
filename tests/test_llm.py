@@ -77,6 +77,49 @@ def test_navigation_planner_generate_plan_falls_back_on_invalid_llm_output() -> 
     assert [action.type for action in actions] == [AgentActionType.EXTRACT, AgentActionType.SCREENSHOT]
 
 
+def test_navigation_planner_records_compression_telemetry() -> None:
+    class StubProvider:
+        async def generate(self, prompt: str, system: str | None = None) -> str:
+            return '{"actions":[{"type":"screenshot"}]}'
+
+    class StubCompression:
+        async def compress_text(self, text: str, context: dict | None = None) -> str:
+            return text[:5]
+
+        async def compress_json(self, data: dict, context: dict | None = None) -> dict:
+            return {"compressed": True, "keys": sorted(data.keys())}
+
+        async def summarize_events(self, events: list[dict], context: dict | None = None) -> dict:
+            return {"count": len(events)}
+
+        async def summarize_memory(self, memories: list[dict], context: dict | None = None) -> dict:
+            return {"count": len(memories)}
+
+    planner = NavigationPlanner(llm=StubProvider(), compression=StubCompression())
+    task = TaskRequest(task_id="task-telemetry", agent_id="agent-1", goal="Open and inspect")
+
+    actions = asyncio.run(
+        planner.generate_plan(
+            task,
+            completed_actions=[],
+            memory_summary="recent memory",
+            recent_memories=[{"memory_id": "m1", "content": "memory"}],
+            recent_events=[{"event_type": "task.updated"}],
+        )
+    )
+
+    telemetry = planner.get_last_context_telemetry()
+    assert actions[0].type == AgentActionType.SCREENSHOT
+    assert telemetry["raw_context_size"] > 0
+    assert telemetry["compressed_context_size"] > 0
+    assert telemetry["compression_ratio"] == round(
+        telemetry["compressed_context_size"] / telemetry["raw_context_size"],
+        4,
+    )
+    assert "raw_context" in telemetry
+    assert "compressed_context" in telemetry
+
+
 def test_navigation_evaluator_evaluate_action_uses_llm_response() -> None:
     class EvalProvider:
         async def generate(self, prompt: str, system: str | None = None) -> str:

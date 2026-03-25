@@ -5,8 +5,9 @@ from synapse.models.agent import AgentDefinition
 from synapse.models.task import TaskRequest, TaskResult
 from synapse.runtime.agent_loop import EventDrivenAgentLoop
 from synapse.runtime.budget import AgentBudgetManager
+from synapse.runtime.compression.base import CompressionProvider
 from synapse.runtime.llm import LLMProvider
-from synapse.runtime.memory import AgentMemoryManager
+from synapse.runtime.memory_service import MemoryService
 from synapse.runtime.security import AgentSecuritySandbox
 from synapse.runtime.safety import AgentSafetyLayer
 from synapse.transports.websocket_manager import WebSocketManager
@@ -23,9 +24,10 @@ class AgentAdapter(ABC):
         sockets: WebSocketManager,
         sandbox: AgentSecuritySandbox,
         safety: AgentSafetyLayer,
-        memory_manager: AgentMemoryManager,
+        memory_service: MemoryService,
         budget_manager: AgentBudgetManager,
         llm: LLMProvider | None = None,
+        compression_provider: CompressionProvider | None = None,
     ) -> None:
         self.definition = definition
         self.loop = EventDrivenAgentLoop(
@@ -34,9 +36,10 @@ class AgentAdapter(ABC):
             sockets=sockets,
             sandbox=sandbox,
             safety=safety,
-            memory_manager=memory_manager,
+            memory_service=memory_service,
             budget_manager=budget_manager,
             llm=llm,
+            compression_provider=compression_provider,
         )
 
     @abstractmethod

@@ -49,6 +49,7 @@ orchestrator = RuntimeOrchestrator(
     budget_manager=budget_manager,
     state_store=runtime_state_store,
     llm=llm_provider,
+    compression_provider=compression_provider,
 )
 a2a_hub.set_task_executor(orchestrator.execute_task)
 

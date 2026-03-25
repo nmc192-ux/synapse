@@ -38,6 +38,7 @@ from synapse.runtime.budget import AgentBudgetManager
 from synapse.runtime.budget_service import BudgetService
 from synapse.runtime.browser_service import BrowserService
 from synapse.runtime.checkpoint_service import CheckpointService
+from synapse.runtime.compression.base import CompressionProvider
 from synapse.runtime.event_bus import EventBus
 from synapse.runtime.llm import LLMProvider
 from synapse.runtime.memory import AgentMemoryManager
@@ -70,6 +71,7 @@ class RuntimeController:
         budget_manager: AgentBudgetManager,
         state_store: RuntimeStateStore | None = None,
         llm: LLMProvider | None = None,
+        compression_provider: CompressionProvider | None = None,
     ) -> None:
         self.browser = browser
         self.agents = agents
@@ -84,11 +86,12 @@ class RuntimeController:
         self.budget_manager = budget_manager
         self._state_store = state_store
         self.llm = llm
+        self.compression_provider = compression_provider
 
         self.event_bus = EventBus(sockets)
         self.budget_service = BudgetService(budget_manager, agents, self.event_bus)
         self.browser_service = BrowserService(browser, sandbox, safety, self.event_bus, self.budget_service, state_store)
-        self.memory_service = MemoryService(memory_manager, self.budget_service)
+        self.memory_service = MemoryService(memory_manager, self.budget_service, state_store=state_store)
         self.tool_service = ToolService(tools, sandbox, safety, self.event_bus, self.budget_service)
         self.checkpoint_service = CheckpointService(state_store, self.browser_service, self.event_bus)
         self.task_runtime = TaskRuntime(
@@ -101,6 +104,7 @@ class RuntimeController:
             events=self.event_bus,
             safety=safety,
             llm=llm,
+            compression_provider=compression_provider,
         )
 
     @property
@@ -112,6 +116,7 @@ class RuntimeController:
         self._state_store = state_store
         self.browser_service.set_state_store(state_store) if hasattr(self, "browser_service") else None
         self.checkpoint_service.set_state_store(state_store) if hasattr(self, "checkpoint_service") else None
+        self.memory_service.set_state_store(state_store) if hasattr(self, "memory_service") else None
         if state_store is not None and hasattr(self, "event_bus"):
             self.event_bus.set_state_store(state_store)
 

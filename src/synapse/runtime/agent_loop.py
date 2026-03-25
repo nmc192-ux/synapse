@@ -8,8 +8,10 @@ from synapse.models.runtime_event import EventSeverity, EventType, RuntimeEvent
 from synapse.models.task import TaskRequest, TaskResult, TaskStatus
 from synapse.runtime.budget import AgentBudgetLimitExceeded, AgentBudgetManager
 from synapse.runtime.browser import BrowserRuntime
+from synapse.runtime.compression.base import CompressionProvider
+from synapse.runtime.compression.noop import NoOpCompressionProvider
 from synapse.runtime.llm import LLMProvider
-from synapse.runtime.memory import AgentMemoryManager
+from synapse.runtime.memory_service import MemoryService
 from synapse.runtime.planning import NavigationEvaluator, NavigationPlanner, NavigationReflector
 from synapse.runtime.security import AgentSecuritySandbox
 from synapse.runtime.safety import AgentSafetyLayer, SecurityAlertError
@@ -24,20 +26,22 @@ class EventDrivenAgentLoop:
         sockets: WebSocketManager,
         sandbox: AgentSecuritySandbox,
         safety: AgentSafetyLayer,
-        memory_manager: AgentMemoryManager,
+        memory_service: MemoryService,
         budget_manager: AgentBudgetManager,
         llm: LLMProvider | None = None,
+        compression_provider: CompressionProvider | None = None,
     ) -> None:
         self.definition = definition
         self.browser = browser
         self.sockets = sockets
         self.sandbox = sandbox
         self.safety = safety
-        self.memory_manager = memory_manager
+        self.memory_service = memory_service
         self.budget_manager = budget_manager
         self.llm = llm
-        self.planner = NavigationPlanner(llm=llm)
-        self.evaluator = NavigationEvaluator(llm=llm)
+        self.compression_provider = compression_provider or NoOpCompressionProvider()
+        self.planner = NavigationPlanner(llm=llm, compression=self.compression_provider)
+        self.evaluator = NavigationEvaluator(llm=llm, compression=self.compression_provider)
         self.reflector = NavigationReflector(llm=llm)
 
     async def run(self, task: TaskRequest) -> TaskResult:
@@ -69,11 +73,15 @@ class EventDrivenAgentLoop:
                 await self._increment_tokens(task, self._page_text(current_page))
             await self._store_observation_memory(task, observed, current_page)
             memory_summary = await self._memory_summary(task.agent_id)
+            recent_memories = await self.memory_service.get_recent_memory_dicts(task.agent_id, limit=5)
+            recent_events = await self.memory_service.get_recent_runtime_events(task.agent_id, task_id=task.task_id, limit=10)
             remaining_actions = await self.planner.generate_plan(
                 task=task,
                 completed_actions=completed_actions,
                 current_page=current_page,
                 memory_summary=memory_summary,
+                recent_memories=recent_memories,
+                recent_events=recent_events,
             )
             await self._broadcast_plan(task, remaining_actions)
 
@@ -248,6 +256,19 @@ class EventDrivenAgentLoop:
             raise SecurityAlertError(finding)
 
     async def _broadcast_plan(self, task: TaskRequest, actions: list[AgentAction]) -> None:
+        telemetry = self.planner.get_last_context_telemetry()
+        if telemetry:
+            await self.sockets.broadcast(
+                RuntimeEvent(
+                    event_type=EventType.PLANNER_CONTEXT_COMPRESSED,
+                    session_id=task.session_id,
+                    agent_id=task.agent_id,
+                    task_id=task.task_id,
+                    source="agent_loop",
+                    payload=telemetry,
+                    correlation_id=task.task_id,
+                )
+            )
         await self.sockets.broadcast(
             RuntimeEvent(
                 event_type=EventType.LOOP_PLANNED,
@@ -255,7 +276,13 @@ class EventDrivenAgentLoop:
                 agent_id=task.agent_id,
                 task_id=task.task_id,
                 source="agent_loop",
-                payload=LoopPlan(task_id=task.task_id, actions=actions).model_dump(mode="json"),
+                payload=LoopPlan(
+                    task_id=task.task_id,
+                    actions=actions,
+                    raw_context_size=int(telemetry.get("raw_context_size", 0)),
+                    compressed_context_size=int(telemetry.get("compressed_context_size", 0)),
+                    compression_ratio=float(telemetry.get("compression_ratio", 1.0)),
+                ).model_dump(mode="json"),
                 correlation_id=task.task_id,
             )
         )
@@ -283,7 +310,7 @@ class EventDrivenAgentLoop:
         if current_page is not None:
             page_summary = f" page={current_page.title} url={current_page.url}"
 
-        await self.memory_manager.store(
+        await self.memory_service.memory_manager.store(
             MemoryStoreRequest(
                 agent_id=task.agent_id,
                 memory_type=MemoryType.SHORT_TERM,
@@ -306,7 +333,7 @@ class EventDrivenAgentLoop:
         if current_page is not None:
             page_summary = f" page={current_page.title}"
 
-        await self.memory_manager.store(
+        await self.memory_service.memory_manager.store(
             MemoryStoreRequest(
                 agent_id=task.agent_id,
                 memory_type=MemoryType.TASK,
@@ -320,7 +347,7 @@ class EventDrivenAgentLoop:
 
     async def _memory_summary(self, agent_id: str) -> str:
         try:
-            recent = await self.memory_manager.get_recent(agent_id, limit=5)
+            recent = await self.memory_service.get_recent(agent_id, limit=5)
         except Exception:
             return ""
         if not recent:
@@ -343,7 +370,7 @@ class EventDrivenAgentLoop:
         if not reflection:
             return
 
-        await self.memory_manager.store(
+        await self.memory_service.memory_manager.store(
             MemoryStoreRequest(
                 agent_id=task.agent_id,
                 memory_type=MemoryType.LONG_TERM,

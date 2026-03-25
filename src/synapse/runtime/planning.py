@@ -6,25 +6,37 @@ import uuid
 from synapse.models.browser import StructuredPageModel
 from synapse.models.loop import AgentAction, AgentActionType, LoopEvaluation
 from synapse.models.task import TaskRequest
-from synapse.runtime.llm import LLMProvider
+from synapse.runtime.compression.base import CompressionProvider
+from synapse.runtime.compression.noop import NoOpCompressionProvider
+from synapse.runtime.llm import LLMProvider, estimate_token_count
 from synapse.runtime.prompts import EVALUATOR_PROMPT, PLANNER_PROMPT, REFLECTION_PROMPT
 
 
 class NavigationPlanner:
-    def __init__(self, llm: LLMProvider | None = None) -> None:
+    def __init__(
+        self,
+        llm: LLMProvider | None = None,
+        compression: CompressionProvider | None = None,
+    ) -> None:
         self.llm = llm
+        self.compression = compression or NoOpCompressionProvider()
+        self.last_context_debug: dict[str, object] = {}
 
     async def plan(
         self,
         task: TaskRequest,
         completed_actions: list[AgentAction],
         current_page: StructuredPageModel | None = None,
+        recent_memories: list[dict[str, object]] | None = None,
+        recent_events: list[dict[str, object]] | None = None,
     ) -> list[AgentAction]:
         return await self.generate_plan(
             task=task,
             completed_actions=completed_actions,
             current_page=current_page,
             memory_summary="",
+            recent_memories=recent_memories,
+            recent_events=recent_events,
         )
 
     async def generate_plan(
@@ -33,8 +45,11 @@ class NavigationPlanner:
         completed_actions: list[AgentAction],
         current_page: StructuredPageModel | None = None,
         memory_summary: str = "",
+        recent_memories: list[dict[str, object]] | None = None,
+        recent_events: list[dict[str, object]] | None = None,
     ) -> list[AgentAction]:
         explicit_actions = self._explicit_actions(task)
+        self.last_context_debug = {}
         if explicit_actions:
             completed_ids = {action.action_id for action in completed_actions}
             return [action for action in explicit_actions if action.action_id not in completed_ids]
@@ -44,6 +59,8 @@ class NavigationPlanner:
             completed_actions=completed_actions,
             current_page=current_page,
             memory_summary=memory_summary,
+            recent_memories=recent_memories or [],
+            recent_events=recent_events or [],
         )
         if llm_actions:
             return llm_actions
@@ -56,6 +73,8 @@ class NavigationPlanner:
         completed_actions: list[AgentAction],
         current_page: StructuredPageModel | None,
         memory_summary: str,
+        recent_memories: list[dict[str, object]],
+        recent_events: list[dict[str, object]],
     ) -> list[AgentAction]:
         if self.llm is None:
             return []
@@ -71,12 +90,57 @@ class NavigationPlanner:
             }
             for action in completed_actions
         ]
+        raw_context = {
+            "goal": task.goal,
+            "page_state": page_context,
+            "recent_memory": recent_memories,
+            "memory_summary": memory_summary or "No memory available.",
+            "recent_runtime_events": recent_events,
+            "previous_actions": previous_actions,
+            "constraints": task.constraints,
+        }
+        compressed_context = {
+            "goal": await self.compression.compress_text(
+                task.goal,
+                context={"task_id": task.task_id, "field": "goal", "channel": "planner"},
+            ),
+            "page_state": await self.compression.compress_json(
+                page_context,
+                context={"task_id": task.task_id, "field": "page_state", "channel": "planner"},
+            ),
+            "memory_summary": await self.compression.summarize_memory(
+                recent_memories,
+                context={"task_id": task.task_id, "field": "memory", "channel": "planner"},
+            ),
+            "recent_runtime_events": await self.compression.summarize_events(
+                recent_events,
+                context={"task_id": task.task_id, "field": "events", "channel": "planner"},
+            ),
+            "previous_actions": await self.compression.compress_json(
+                {"actions": previous_actions},
+                context={"task_id": task.task_id, "field": "previous_actions", "channel": "planner"},
+            ),
+            "constraints": await self.compression.compress_json(
+                task.constraints,
+                context={"task_id": task.task_id, "field": "constraints", "channel": "planner"},
+            ),
+        }
+        raw_context_size = estimate_token_count(raw_context)
+        compressed_context_size = estimate_token_count(compressed_context)
+        compression_ratio = round((compressed_context_size / raw_context_size) if raw_context_size else 1.0, 4)
+        self.last_context_debug = {
+            "raw_context": raw_context,
+            "compressed_context": compressed_context,
+            "raw_context_size": raw_context_size,
+            "compressed_context_size": compressed_context_size,
+            "compression_ratio": compression_ratio,
+        }
         prompt = PLANNER_PROMPT.format(
-            goal=task.goal,
-            page_state=json.dumps(page_context, ensure_ascii=True),
-            memory_summary=memory_summary or "No memory available.",
-            previous_actions=json.dumps(previous_actions, ensure_ascii=True),
-            constraints=json.dumps(task.constraints, ensure_ascii=True),
+            goal=str(compressed_context["goal"]),
+            page_state=json.dumps(compressed_context["page_state"], ensure_ascii=True),
+            memory_summary=json.dumps(compressed_context["memory_summary"], ensure_ascii=True),
+            previous_actions=json.dumps(compressed_context["previous_actions"], ensure_ascii=True),
+            constraints=json.dumps(compressed_context["constraints"], ensure_ascii=True),
         )
         system = (
             "You are Synapse planner. Return strict JSON that matches the required output schema."
@@ -117,6 +181,9 @@ class NavigationPlanner:
 
         completed_ids = {action.action_id for action in completed_actions}
         return [action for action in actions if action.action_id not in completed_ids]
+
+    def get_last_context_telemetry(self) -> dict[str, object]:
+        return dict(self.last_context_debug)
 
     @staticmethod
     def _decode_llm_json(raw: str) -> dict[str, object] | None:
@@ -230,9 +297,13 @@ class NavigationPlanner:
 
 
 class NavigationEvaluator:
-    def __init__(self, llm: LLMProvider | None = None) -> None:
+    def __init__(
+        self,
+        llm: LLMProvider | None = None,
+        compression: CompressionProvider | None = None,
+    ) -> None:
         self.llm = llm
-        self.planner = NavigationPlanner(llm=llm)
+        self.planner = NavigationPlanner(llm=llm, compression=compression)
 
     async def evaluate(
         self,

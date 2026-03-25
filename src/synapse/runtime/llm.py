@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import json
 from typing import Any
 
 import httpx
@@ -10,6 +11,14 @@ class LLMProvider(ABC):
     @abstractmethod
     async def generate(self, prompt: str, system: str | None = None) -> str:
         """Generate text from the configured model provider."""
+
+
+def estimate_token_count(content: str | dict[str, Any] | list[Any] | None) -> int:
+    if content is None:
+        return 0
+    if not isinstance(content, str):
+        content = json.dumps(content, ensure_ascii=True)
+    return max(1, len(content) // 4) if content else 0
 
 
 class OpenAIProvider(LLMProvider):

@@ -6,6 +6,7 @@ from synapse.models.runtime_event import EventSeverity, EventType
 from synapse.models.task import TaskClaimRequest, TaskCreateRequest, TaskRecord, TaskRequest, TaskResult, TaskStatus, TaskUpdateRequest
 from synapse.runtime.browser_service import BrowserService
 from synapse.runtime.checkpoint_service import CheckpointService
+from synapse.runtime.compression.base import CompressionProvider
 from synapse.runtime.event_bus import EventBus
 from synapse.runtime.llm import LLMProvider
 from synapse.runtime.memory_service import MemoryService
@@ -27,6 +28,7 @@ class TaskRuntime:
         events: EventBus,
         safety: AgentSafetyLayer,
         llm: LLMProvider | None = None,
+        compression_provider: CompressionProvider | None = None,
     ) -> None:
         self.agents = agents
         self.browser_service = browser_service
@@ -37,6 +39,7 @@ class TaskRuntime:
         self.events = events
         self.safety = safety
         self.llm = llm
+        self.compression_provider = compression_provider
 
     async def create_task(self, request: TaskCreateRequest) -> TaskRecord:
         return await self.task_manager.create_task(request)
@@ -67,9 +70,10 @@ class TaskRuntime:
             sockets=self.events.sockets,
             sandbox=self.browser_service.sandbox,
             safety=self.safety,
-            memory_manager=self.memory_service.memory_manager,
+            memory_service=self.memory_service,
             budget_manager=self.browser_service.budget_service.budget_manager,
             llm=self.llm,
+            compression_provider=self.compression_provider,
         )
         result = await adapter.execute_task(request)
         final_result = result.model_copy(

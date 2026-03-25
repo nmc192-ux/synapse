@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING
 from synapse.models.agent import AgentDefinition, AgentDiscoveryEntry, AgentKind
 from synapse.models.runtime_state import AgentRuntimeRecord, AgentRuntimeStatus
 from synapse.runtime.budget import AgentBudgetManager
+from synapse.runtime.compression.base import CompressionProvider
 from synapse.runtime.llm import LLMProvider
-from synapse.runtime.memory import AgentMemoryManager
 from synapse.runtime.security import AgentSecuritySandbox
 from synapse.runtime.safety import AgentSafetyLayer
 from synapse.runtime.state_store import RuntimeStateStore
@@ -16,6 +16,7 @@ from synapse.transports.websocket_manager import WebSocketManager
 if TYPE_CHECKING:
     from synapse.adapters.base import AgentAdapter
     from synapse.runtime.browser import BrowserRuntime
+    from synapse.runtime.memory_service import MemoryService
 
 
 class AgentRegistry:
@@ -182,9 +183,10 @@ class AgentRegistry:
         sockets: WebSocketManager,
         sandbox: AgentSecuritySandbox,
         safety: AgentSafetyLayer,
-        memory_manager: AgentMemoryManager,
+        memory_service: MemoryService,
         budget_manager: AgentBudgetManager,
         llm: LLMProvider | None = None,
+        compression_provider: CompressionProvider | None = None,
     ) -> AgentAdapter:
         from synapse.adapters.a2a import A2AAdapter
         from synapse.adapters.claude_code import ClaudeCodeAdapter
@@ -207,7 +209,8 @@ class AgentRegistry:
             sockets=sockets,
             sandbox=sandbox,
             safety=safety,
-            memory_manager=memory_manager,
+            memory_service=memory_service,
             budget_manager=budget_manager,
             llm=llm,
+            compression_provider=compression_provider,
         )

@@ -16,6 +16,7 @@ class EventType(str, Enum):
     BUDGET_UPDATED = "budget.updated"
     LOOP_OBSERVED = "loop.observed"
     LOOP_PLANNED = "loop.planned"
+    PLANNER_CONTEXT_COMPRESSED = "planner.context.compressed"
     LOOP_ACTED = "loop.acted"
     LOOP_EVALUATED = "loop.evaluated"
     LOOP_REFLECTED = "loop.reflected"

@@ -39,6 +39,7 @@ class EventType(str, Enum):
     NAVIGATION_ROUTE_CHANGED = "navigation.route_changed"
     BROWSER_ERROR = "browser.error"
     SESSION_EXPIRED = "session.expired"
+    MEMORY_COMPRESSED = "memory.compressed"
 
 
 class EventSeverity(str, Enum):

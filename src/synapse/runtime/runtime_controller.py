@@ -91,7 +91,13 @@ class RuntimeController:
         self.event_bus = EventBus(sockets)
         self.budget_service = BudgetService(budget_manager, agents, self.event_bus)
         self.browser_service = BrowserService(browser, sandbox, safety, self.event_bus, self.budget_service, state_store)
-        self.memory_service = MemoryService(memory_manager, self.budget_service, state_store=state_store)
+        self.memory_service = MemoryService(
+            memory_manager,
+            self.budget_service,
+            state_store=state_store,
+            events=self.event_bus,
+            compression_provider=compression_provider,
+        )
         self.tool_service = ToolService(tools, sandbox, safety, self.event_bus, self.budget_service)
         self.checkpoint_service = CheckpointService(state_store, self.browser_service, self.event_bus)
         self.task_runtime = TaskRuntime(

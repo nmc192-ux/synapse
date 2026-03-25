@@ -72,8 +72,13 @@ class EventDrivenAgentLoop:
             if current_page is not None:
                 await self._increment_tokens(task, self._page_text(current_page))
             await self._store_observation_memory(task, observed, current_page)
-            memory_summary = await self._memory_summary(task.agent_id)
-            recent_memories = await self.memory_service.get_recent_memory_dicts(task.agent_id, limit=5)
+            memory_context = await self.memory_service.get_planner_memory_context(
+                task.agent_id,
+                task_id=task.task_id,
+                limit_per_type=4,
+            )
+            memory_summary = str(memory_context.get("memory_summary", ""))
+            recent_memories = list(memory_context.get("memories", []))
             recent_events = await self.memory_service.get_recent_runtime_events(task.agent_id, task_id=task.task_id, limit=10)
             remaining_actions = await self.planner.generate_plan(
                 task=task,

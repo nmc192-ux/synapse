@@ -1,12 +1,14 @@
 import asyncio
+from datetime import datetime, timezone
 
 from synapse.models.agent import AgentDefinition, AgentKind
 from synapse.models.browser import CompactStructuredPageModel, OpenRequest
 from synapse.models.events import EventType, RuntimeEvent
-from synapse.models.memory import MemoryStoreRequest, MemoryType
+from synapse.models.memory import MemoryRecord, MemoryStoreRequest, MemoryType
 from synapse.models.plugin import PluginReloadRequest
 from synapse.runtime.budget import AgentBudgetManager
 from synapse.runtime.budget_service import BudgetService
+from synapse.runtime.compression.base import CompressionProvider
 from synapse.runtime.browser_service import BrowserService
 from synapse.runtime.event_bus import EventBus
 from synapse.runtime.memory_service import MemoryService
@@ -76,6 +78,15 @@ class _StubBrowser:
 
 
 class _StubMemoryManager:
+    def __init__(self) -> None:
+        now = datetime.now(timezone.utc)
+        self.records = [
+            MemoryRecord(memory_id="m1", agent_id="agent-1", memory_type=MemoryType.SHORT_TERM, content="Remember current page heading", embedding=[1.0, 0.0], timestamp=now),
+            MemoryRecord(memory_id="m2", agent_id="agent-1", memory_type=MemoryType.SHORT_TERM, content="Remember current page heading", embedding=[1.0, 0.0], timestamp=now),
+            MemoryRecord(memory_id="m3", agent_id="agent-1", memory_type=MemoryType.TASK, content="Task success: extracted paper list", embedding=[0.0, 1.0], timestamp=now),
+            MemoryRecord(memory_id="m4", agent_id="agent-1", memory_type=MemoryType.LONG_TERM, content="Important strategy: prefer navigation links before forms", embedding=[0.3, 0.7], timestamp=now),
+        ]
+
     async def store(self, request):
         return request
 
@@ -83,7 +94,33 @@ class _StubMemoryManager:
         return []
 
     async def get_recent(self, agent_id: str, limit: int = 10):
-        return []
+        return self.records[:limit]
+
+    async def get_recent_by_type(self, agent_id: str, limit_per_type: int = 4):
+        grouped: dict[MemoryType, list[MemoryRecord]] = {}
+        for record in self.records:
+            grouped.setdefault(record.memory_type, [])
+            if len(grouped[record.memory_type]) < limit_per_type:
+                grouped[record.memory_type].append(record)
+        return grouped
+
+
+class _StubCompressionProvider(CompressionProvider):
+    async def compress_text(self, text: str, context: dict | None = None) -> str:
+        return text
+
+    async def compress_json(self, data: dict, context: dict | None = None) -> dict:
+        return data
+
+    async def summarize_events(self, events: list[dict], context: dict | None = None) -> dict:
+        return {"count": len(events)}
+
+    async def summarize_memory(self, memories: list[dict], context: dict | None = None) -> dict:
+        memory_type = (context or {}).get("memory_type", "unknown")
+        return {
+            "summary": f"{memory_type}:{len(memories)}",
+            "count": len(memories),
+        }
 
 
 async def _capture_events(bus: EventBus, count: int = 1) -> list[RuntimeEvent]:
@@ -142,6 +179,35 @@ def test_memory_service_applies_budget_tracking() -> None:
             event = await queue.get()
             assert event.event_type == EventType.BUDGET_UPDATED
             assert record.content == "hello"
+
+    asyncio.run(scenario())
+
+
+def test_memory_service_compresses_planner_context() -> None:
+    async def scenario() -> None:
+        registry = AgentRegistry()
+        registry.register(AgentDefinition(agent_id="agent-1", kind=AgentKind.CUSTOM, name="Agent 1"))
+        bus = EventBus(WebSocketManager(state_store=InMemoryRuntimeStateStore()))
+        budget = BudgetService(AgentBudgetManager(), registry, bus)
+        service = MemoryService(
+            _StubMemoryManager(),
+            budget,
+            state_store=InMemoryRuntimeStateStore(),
+            events=bus,
+            compression_provider=_StubCompressionProvider(),
+        )
+
+        async with bus.subscribe("subscriber") as queue:
+            payload = await service.get_planner_memory_context("agent-1", task_id="task-1", limit_per_type=4)
+            event = await queue.get()
+            assert event.event_type == EventType.MEMORY_COMPRESSED
+            assert payload["retrieved_memory_count"] == 4
+            assert payload["compressed_memory_count"] == 3
+            assert payload["memory_compression_ratio"] == 0.75
+            assert "short_term" in payload["memory_summary"]
+            assert "task" in payload["memory_summary"]
+            assert "long_term" in payload["memory_summary"]
+            assert len(payload["memories"]) == 3
 
     asyncio.run(scenario())
 

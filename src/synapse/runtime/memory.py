@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncpg
+from collections import defaultdict
 
 from synapse.config import settings
-from synapse.models.memory import MemoryRecord, MemorySearchRequest, MemorySearchResult, MemoryStoreRequest
+from synapse.models.memory import MemoryRecord, MemorySearchRequest, MemorySearchResult, MemoryStoreRequest, MemoryType
 
 
 class AgentMemoryManager:
@@ -95,6 +96,35 @@ class AgentMemoryManager:
             limit,
         )
         return [self._to_record(row) for row in rows]
+
+    async def get_recent_by_type(self, agent_id: str, limit_per_type: int = 4) -> dict[MemoryType, list[MemoryRecord]]:
+        pool = self._require_pool()
+        rows = await pool.fetch(
+            """
+            SELECT memory_id, agent_id, memory_type, content, embedding::text AS embedding, timestamp
+            FROM (
+                SELECT
+                    memory_id,
+                    agent_id,
+                    memory_type,
+                    content,
+                    embedding,
+                    timestamp,
+                    ROW_NUMBER() OVER (PARTITION BY memory_type ORDER BY timestamp DESC) AS row_number
+                FROM synapse_memory
+                WHERE agent_id = $1
+            ) AS ranked
+            WHERE row_number <= $2
+            ORDER BY timestamp DESC
+            """,
+            agent_id,
+            limit_per_type,
+        )
+        grouped: dict[MemoryType, list[MemoryRecord]] = defaultdict(list)
+        for row in rows:
+            record = self._to_record(row)
+            grouped[record.memory_type].append(record)
+        return dict(grouped)
 
     async def _ensure_schema(self) -> None:
         pool = self._require_pool()

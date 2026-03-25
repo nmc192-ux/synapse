@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     local_model_endpoint: str = "http://127.0.0.1:11434/api/generate"
     local_model_name: str | None = "llama3.1"
     local_model_api_key: str | None = None
+    compression_provider: str = "noop"
     redis_url: str = "redis://localhost:6379/0"
     redis_required: bool = False
     runtime_state_fallback_memory: bool = True

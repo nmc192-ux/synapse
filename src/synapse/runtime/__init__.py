@@ -1,5 +1,6 @@
 """Core runtime services for Synapse."""
 
+from synapse.runtime.compression.base import CompressionProvider, create_compression_provider
 from synapse.runtime.llm import AnthropicProvider, LLMProvider, LocalModelProvider, OpenAIProvider, create_llm_provider
 from synapse.runtime.event_bus import EventBus
 from synapse.runtime.browser_service import BrowserService
@@ -21,6 +22,7 @@ __all__ = [
     "BrowserService",
     "BudgetService",
     "CheckpointService",
+    "CompressionProvider",
     "EventBus",
     "LLMProvider",
     "LocalModelProvider",
@@ -32,6 +34,7 @@ __all__ = [
     "RuntimeStateStore",
     "TaskRuntime",
     "ToolService",
+    "create_compression_provider",
     "create_llm_provider",
     "create_runtime_state_store",
 ]

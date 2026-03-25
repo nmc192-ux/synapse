@@ -7,6 +7,7 @@ from synapse.config import settings
 from synapse.runtime.a2a import A2AHub
 from synapse.runtime.budget import AgentBudgetManager
 from synapse.runtime.browser import BrowserRuntime
+from synapse.runtime.compression.base import create_compression_provider
 from synapse.runtime.llm import create_llm_provider
 from synapse.runtime.memory import AgentMemoryManager
 from synapse.runtime.messaging import AgentMessageBus
@@ -33,6 +34,7 @@ sandbox = AgentSecuritySandbox(agent_registry)
 safety = AgentSafetyLayer()
 budget_manager = AgentBudgetManager()
 llm_provider = create_llm_provider(settings)
+compression_provider = create_compression_provider(settings)
 orchestrator = RuntimeOrchestrator(
     browser=browser_runtime,
     agents=agent_registry,

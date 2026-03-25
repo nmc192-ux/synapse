@@ -48,6 +48,16 @@ export OPENAI_MODEL=gpt-4o-mini
 Supported providers are `openai`, `anthropic`, and `local`. Local models can be
 configured with `SYNAPSE_LOCAL_MODEL_ENDPOINT` and `SYNAPSE_LOCAL_MODEL_NAME`.
 
+Optional compression provider configuration:
+
+```bash
+export SYNAPSE_COMPRESSION_PROVIDER=noop
+```
+
+Supported compression providers are `noop` and `turboquant`. The TurboQuant
+provider is currently a stub integration layer so the runtime can adopt a real
+TurboQuant SDK later without changing service interfaces.
+
 Runtime durability configuration:
 
 ```bash

@@ -1,0 +1,19 @@
+{
+  "name": "@synapse-dev/sdk",
+  "version": "0.1.0",
+  "description": "JavaScript SDK for the Synapse agent runtime.",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": {
+      "import": "./src/index.js",
+      "types": "./src/index.d.ts"
+    }
+  },
+  "files": [
+    "src"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

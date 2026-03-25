@@ -46,6 +46,7 @@ src/synapse/
   sdk/           Python SDK for agent clients
   runtime/       Browser runtime, orchestration, tools, registry
   transports/    WebSocket connection management
+sdk/javascript/  JavaScript SDK for agent clients
 ui/              Next.js operator interface
 ```
 
@@ -77,6 +78,39 @@ Example agents are available in `examples/` for OpenClaw, Codex, and Claude Code
 
 Agent actions are sandboxed by default. Register each agent with explicit
 `allowed_domains`, `allowed_tools`, and rate limits before issuing browser or tool calls.
+
+## JavaScript SDK
+
+```bash
+cd sdk/javascript
+node ./examples/codex-agent.mjs
+```
+
+```javascript
+import { SynapseClient, createAgentDefinition } from "@synapse-dev/sdk";
+
+const client = new SynapseClient({
+  baseUrl: "http://127.0.0.1:8000",
+  agentId: "codex-js"
+});
+
+await client.registerAgent(
+  createAgentDefinition({
+    agentId: "codex-js",
+    kind: "codex",
+    name: "Codex JS",
+    allowedDomains: ["example.com"],
+    allowedTools: ["github.search"]
+  })
+);
+
+const browser = client.browser;
+await browser.open("https://example.com");
+const heading = await browser.extract("h1");
+const repos = await browser.callTool("github.search", { query: "browser agents python" });
+```
+
+JavaScript example agents are available in [`/Users/jahanzebhussain/Synapse/sdk/javascript/examples/openclaw-agent.mjs`](/Users/jahanzebhussain/Synapse/sdk/javascript/examples/openclaw-agent.mjs), [`/Users/jahanzebhussain/Synapse/sdk/javascript/examples/claude-code-agent.mjs`](/Users/jahanzebhussain/Synapse/sdk/javascript/examples/claude-code-agent.mjs), and [`/Users/jahanzebhussain/Synapse/sdk/javascript/examples/codex-agent.mjs`](/Users/jahanzebhussain/Synapse/sdk/javascript/examples/codex-agent.mjs).
 
 ## Next.js UI
 

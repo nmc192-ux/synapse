@@ -10,6 +10,7 @@ from synapse.models.memory import MemorySearchRequest, MemoryStoreRequest, Memor
 from synapse.models.plugin import ToolDescriptor
 from synapse.models.task import TaskCreateRequest, TaskRequest, TaskStatus
 from synapse.runtime.registry import AgentRegistry
+from synapse.runtime.planning import NavigationEvaluator, NavigationPlanner
 from synapse.runtime.security import AgentSecuritySandbox, SandboxPermissionError, SandboxRateLimitError
 from synapse.runtime.safety import AgentSafetyLayer
 from synapse.sdk import SynapseClient
@@ -291,3 +292,44 @@ def test_agent_safety_layer_validates_tool_urls() -> None:
     )
     assert finding is not None
     assert finding.category == "tool_validation"
+
+
+def test_navigation_planner_generates_actions_from_goal_and_start_url() -> None:
+    planner = NavigationPlanner()
+    task = TaskRequest(
+        task_id="task-plan",
+        agent_id="agent-1",
+        goal="Open the site, extract the heading, and take a screenshot",
+        start_url="https://example.com",
+    )
+
+    actions = planner.plan(task, completed_actions=[])
+
+    assert [action.type for action in actions] == [
+        AgentActionType.OPEN,
+        AgentActionType.EXTRACT,
+        AgentActionType.SCREENSHOT,
+    ]
+
+
+def test_navigation_evaluator_marks_extract_success() -> None:
+    evaluator = NavigationEvaluator()
+    task = TaskRequest(
+        task_id="task-eval",
+        agent_id="agent-1",
+        goal="Extract the main heading",
+    )
+    action = AgentAction(action_id="extract-1", type=AgentActionType.EXTRACT, selector="h1")
+    evaluation = evaluator.evaluate(
+        task,
+        action,
+        action_result={
+            "matches": [{"selector": "h1", "text": "Example Domain"}],
+            "page": {"title": "Example", "url": "https://example.com"},
+        },
+        completed_actions=[action],
+        remaining_actions=[],
+    )
+
+    assert evaluation.success is True
+    assert evaluation.notes == "Extraction returned matches."

@@ -7,6 +7,7 @@ class LoopPhase(str, Enum):
     OBSERVE = "observe"
     PLAN = "plan"
     ACT = "act"
+    EVALUATE = "evaluate"
     REFLECT = "reflect"
 
 
@@ -49,3 +50,12 @@ class LoopReflection(BaseModel):
     completed_actions: int = 0
     remaining_actions: int = 0
     notes: str = ""
+
+
+class LoopEvaluation(BaseModel):
+    task_id: str
+    action_id: str
+    phase: LoopPhase = LoopPhase.EVALUATE
+    success: bool = False
+    notes: str = ""
+    next_actions: list[AgentAction] = Field(default_factory=list)

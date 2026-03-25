@@ -13,6 +13,7 @@ class EventType(str, Enum):
     LOOP_OBSERVED = "loop.observed"
     LOOP_PLANNED = "loop.planned"
     LOOP_ACTED = "loop.acted"
+    LOOP_EVALUATED = "loop.evaluated"
     LOOP_REFLECTED = "loop.reflected"
     TOOL_CALLED = "tool.called"
     AGENT_REGISTERED = "agent.registered"

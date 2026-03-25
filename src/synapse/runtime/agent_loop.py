@@ -1,11 +1,11 @@
 import asyncio
-import uuid
 
-from synapse.models.browser import ClickRequest, ExtractRequest, OpenRequest, ScreenshotRequest, StructuredPageModel, TypeRequest
+from synapse.models.browser import StructuredPageModel
 from synapse.models.events import EventType, RuntimeEvent
-from synapse.models.loop import AgentAction, AgentActionType, LoopObservation, LoopPlan, LoopReflection
+from synapse.models.loop import AgentAction, AgentActionType, LoopEvaluation, LoopObservation, LoopPlan, LoopReflection
 from synapse.models.task import TaskRequest, TaskResult, TaskStatus
 from synapse.runtime.browser import BrowserRuntime
+from synapse.runtime.planning import NavigationEvaluator, NavigationPlanner
 from synapse.runtime.security import AgentSecuritySandbox
 from synapse.runtime.safety import AgentSafetyLayer, SecurityAlertError
 from synapse.transports.websocket_manager import WebSocketManager
@@ -23,12 +23,13 @@ class EventDrivenAgentLoop:
         self.sockets = sockets
         self.sandbox = sandbox
         self.safety = safety
+        self.planner = NavigationPlanner()
+        self.evaluator = NavigationEvaluator()
 
     async def run(self, task: TaskRequest) -> TaskResult:
         if task.session_id is None:
             raise ValueError("Task session_id is required before starting the agent loop.")
 
-        actions = self._build_actions(task)
         completed_actions: list[AgentAction] = []
         artifacts: dict[str, object] = {"actions": []}
 
@@ -43,16 +44,12 @@ class EventDrivenAgentLoop:
                 )
             )
 
-            await self.sockets.broadcast(
-                RuntimeEvent(
-                    event_type=EventType.LOOP_PLANNED,
-                    session_id=task.session_id,
-                    agent_id=task.agent_id,
-                    payload=LoopPlan(task_id=task.task_id, actions=actions).model_dump(mode="json"),
-                )
-            )
+            current_page = await self._current_page(task)
+            remaining_actions = self.planner.plan(task, completed_actions=completed_actions, current_page=current_page)
+            await self._broadcast_plan(task, remaining_actions)
 
-            for action in actions:
+            while remaining_actions:
+                action = remaining_actions.pop(0)
                 result = await self._act(task, action)
                 action.status = "completed"
                 action.result = result
@@ -67,11 +64,32 @@ class EventDrivenAgentLoop:
                     )
                 )
 
+                current_page = self._page_from_result(result) or await self._current_page(task)
+                evaluation = self.evaluator.evaluate(
+                    task,
+                    action,
+                    result,
+                    completed_actions=completed_actions,
+                    remaining_actions=remaining_actions,
+                    current_page=current_page,
+                )
+                remaining_actions = [candidate.model_copy() for candidate in evaluation.next_actions]
+                await self.sockets.broadcast(
+                    RuntimeEvent(
+                        event_type=EventType.LOOP_EVALUATED,
+                        session_id=task.session_id,
+                        agent_id=task.agent_id,
+                        payload=evaluation.model_dump(mode="json"),
+                    )
+                )
+                if remaining_actions:
+                    await self._broadcast_plan(task, remaining_actions)
+
             reflection = LoopReflection(
                 task_id=task.task_id,
                 completed_actions=len(completed_actions),
-                remaining_actions=max(0, len(actions) - len(completed_actions)),
-                notes=f"Executed {len(completed_actions)} actions via browser engine.",
+                remaining_actions=len(remaining_actions),
+                notes=f"Planner executed {len(completed_actions)} browser actions and evaluator updated the plan after each step.",
             )
             await self.sockets.broadcast(
                 RuntimeEvent(
@@ -160,46 +178,6 @@ class EventDrivenAgentLoop:
 
         raise ValueError(f"Unsupported action type: {action.type}")
 
-    def _build_actions(self, task: TaskRequest) -> list[AgentAction]:
-        if task.actions:
-            return [action.model_copy() for action in task.actions]
-
-        actions: list[AgentAction] = []
-        if task.start_url is not None:
-            actions.append(
-                AgentAction(
-                    action_id=str(uuid.uuid4()),
-                    type=AgentActionType.OPEN,
-                    url=str(task.start_url),
-                )
-            )
-
-        action_specs = task.constraints.get("action_plan", [])
-        if isinstance(action_specs, list):
-            for spec in action_specs:
-                if not isinstance(spec, dict) or "type" not in spec:
-                    continue
-                actions.append(
-                    AgentAction(
-                        action_id=str(spec.get("action_id", uuid.uuid4())),
-                        type=AgentActionType(spec["type"]),
-                        selector=spec.get("selector"),
-                        text=spec.get("text"),
-                        url=spec.get("url"),
-                        attribute=spec.get("attribute"),
-                    )
-                )
-
-        if not actions:
-            actions.append(
-                AgentAction(
-                    action_id=str(uuid.uuid4()),
-                    type=AgentActionType.SCREENSHOT,
-                )
-            )
-
-        return actions
-
     async def _ensure_current_page_safe(self, task: TaskRequest, action: str) -> None:
         page = await self.browser.get_layout(task.session_id)
         await self._ensure_page_safe(task, page, action)
@@ -216,3 +194,26 @@ class EventDrivenAgentLoop:
                 )
             )
             raise SecurityAlertError(finding)
+
+    async def _broadcast_plan(self, task: TaskRequest, actions: list[AgentAction]) -> None:
+        await self.sockets.broadcast(
+            RuntimeEvent(
+                event_type=EventType.LOOP_PLANNED,
+                session_id=task.session_id,
+                agent_id=task.agent_id,
+                payload=LoopPlan(task_id=task.task_id, actions=actions).model_dump(mode="json"),
+            )
+        )
+
+    async def _current_page(self, task: TaskRequest) -> StructuredPageModel | None:
+        try:
+            return await self.browser.get_layout(task.session_id)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _page_from_result(action_result: dict[str, object]) -> StructuredPageModel | None:
+        page = action_result.get("page")
+        if isinstance(page, dict):
+            return StructuredPageModel.model_validate(page)
+        return None

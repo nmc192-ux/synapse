@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class EventType(str, Enum):
@@ -60,6 +60,83 @@ class RuntimeEvent(BaseModel):
     session_id: str | None = None
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     source: str = "runtime"
+    phase: str | None = None
     payload: dict[str, object] = Field(default_factory=dict)
     severity: EventSeverity = EventSeverity.INFO
     correlation_id: str | None = None
+
+    @model_validator(mode="after")
+    def _populate_phase(self) -> "RuntimeEvent":
+        if self.phase is None:
+            self.phase = infer_event_phase(self.event_type)
+        return self
+
+
+class RunTimelineEntry(BaseModel):
+    event_id: str
+    run_id: str
+    timestamp: datetime
+    event_type: str
+    phase: str
+    payload: dict[str, object] = Field(default_factory=dict)
+    correlation_id: str | None = None
+    source: str = "runtime"
+    severity: EventSeverity = EventSeverity.INFO
+    task_id: str | None = None
+    session_id: str | None = None
+
+
+class RunTimeline(BaseModel):
+    run_id: str
+    status: str
+    started_at: datetime | None = None
+    updated_at: datetime | None = None
+    event_count: int = 0
+    phases: list[str] = Field(default_factory=list)
+    entries: list[RunTimelineEntry] = Field(default_factory=list)
+
+
+class RunReplayView(BaseModel):
+    run_id: str
+    phase_transitions: list[dict[str, object]] = Field(default_factory=list)
+    browser_actions: list[dict[str, object]] = Field(default_factory=list)
+    planner_outputs: list[dict[str, object]] = Field(default_factory=list)
+    evaluation_results: list[dict[str, object]] = Field(default_factory=list)
+    checkpoints: list[dict[str, object]] = Field(default_factory=list)
+    budget_updates: list[dict[str, object]] = Field(default_factory=list)
+    timeline: list[RunTimelineEntry] = Field(default_factory=list)
+
+
+def infer_event_phase(event_type: EventType | str) -> str:
+    value = event_type.value if isinstance(event_type, EventType) else str(event_type)
+    if value.startswith("loop.observed"):
+        return "observe"
+    if value in {EventType.LOOP_PLANNED.value, EventType.PLANNER_CONTEXT_COMPRESSED.value, EventType.SPM_COMPRESSED.value}:
+        return "plan"
+    if value in {
+        EventType.LOOP_ACTED.value,
+        EventType.PAGE_NAVIGATED.value,
+        EventType.DATA_EXTRACTED.value,
+        EventType.SCREENSHOT_CAPTURED.value,
+        EventType.TOOL_CALLED.value,
+        EventType.DOWNLOAD_COMPLETED.value,
+        EventType.UPLOAD_COMPLETED.value,
+        EventType.POPUP_DISMISSED.value,
+        EventType.NAVIGATION_ROUTE_CHANGED.value,
+    }:
+        return "act"
+    if value in {EventType.LOOP_EVALUATED.value, EventType.BUDGET_UPDATED.value, EventType.BROWSER_ERROR.value}:
+        return "evaluate"
+    if value in {EventType.LOOP_REFLECTED.value, EventType.MEMORY_COMPRESSED.value}:
+        return "reflect"
+    if value.startswith("checkpoint."):
+        return "checkpoint"
+    if value.startswith("task."):
+        return "task"
+    if value.startswith("a2a."):
+        return "a2a"
+    if value.startswith("session."):
+        return "session"
+    if value.startswith("agent."):
+        return "agent"
+    return "runtime"

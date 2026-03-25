@@ -31,7 +31,7 @@ from synapse.models.browser import (
     UploadRequest,
     UploadResult,
 )
-from synapse.models.runtime_event import EventType, RuntimeEvent
+from synapse.models.runtime_event import EventType, RunReplayView, RunTimeline, RuntimeEvent
 from synapse.models.message import AgentMessage
 from synapse.models.memory import MemoryRecord, MemorySearchRequest, MemorySearchResult, MemoryStoreRequest
 from synapse.models.plugin import PluginDescriptor, PluginReloadRequest, ToolDescriptor
@@ -626,6 +626,28 @@ async def get_run_events(
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[dict[str, object]]:
     return await orchestrator.get_run_events(run_id)
+
+
+@router.get("/runs/{run_id}/timeline", response_model=RunTimeline)
+async def get_run_timeline(
+    run_id: str,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> RunTimeline:
+    try:
+        return await orchestrator.get_run_timeline(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/runs/{run_id}/replay", response_model=RunReplayView)
+async def get_run_replay(
+    run_id: str,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> RunReplayView:
+    try:
+        return await orchestrator.get_run_replay(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/runs/{run_id}/checkpoints", response_model=list[RuntimeCheckpoint])

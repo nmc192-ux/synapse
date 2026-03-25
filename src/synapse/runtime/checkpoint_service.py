@@ -57,6 +57,7 @@ class CheckpointService:
             task_id=checkpoint.task_id,
             session_id=checkpoint.browser_session_reference,
             source="checkpoint_service",
+            phase="checkpoint",
             payload=checkpoint.model_dump(mode="json"),
             correlation_id=checkpoint.checkpoint_id,
         )
@@ -122,6 +123,7 @@ class CheckpointService:
             task_id=checkpoint.task_id,
             session_id=checkpoint.browser_session_reference,
             source="checkpoint_service",
+            phase="checkpoint",
             payload={
                 "checkpoint_id": checkpoint.checkpoint_id,
                 "task_id": checkpoint.task_id,

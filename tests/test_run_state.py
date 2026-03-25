@@ -187,6 +187,80 @@ def test_run_api_endpoints() -> None:
     assert events_response.status_code == 200
     assert any(event["run_id"] == run_id for event in events_response.json())
 
+    timeline_response = client.get(f"/api/runs/{run_id}/timeline")
+    assert timeline_response.status_code == 200
+    assert timeline_response.json()["run_id"] == run_id
+    assert timeline_response.json()["event_count"] >= 1
+    assert "task" in timeline_response.json()["phases"]
+
+    replay_response = client.get(f"/api/runs/{run_id}/replay")
+    assert replay_response.status_code == 200
+    assert replay_response.json()["run_id"] == run_id
+    assert len(replay_response.json()["timeline"]) >= 1
+
     cancel_response = client.post(f"/api/runs/{run_id}/cancel")
     assert cancel_response.status_code == 200
     assert cancel_response.json()["status"] == "cancelled"
+
+
+def test_run_timeline_orders_events_and_groups_replay() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        run = await run_store.create_run(task_id="task-1", agent_id="agent-1", correlation_id="task-1")
+
+        await store.store_runtime_event(
+            "evt-2",
+            {
+                "event_id": "evt-2",
+                "run_id": run.run_id,
+                "event_type": "loop.acted",
+                "timestamp": "2026-03-26T10:00:02+00:00",
+                "phase": "act",
+                "payload": {"action": "click"},
+                "correlation_id": "task-1",
+                "severity": "info",
+                "source": "agent_loop",
+            },
+        )
+        await store.store_runtime_event(
+            "evt-1",
+            {
+                "event_id": "evt-1",
+                "run_id": run.run_id,
+                "event_type": "loop.planned",
+                "timestamp": "2026-03-26T10:00:01+00:00",
+                "phase": "plan",
+                "payload": {"actions": [{"type": "click"}]},
+                "correlation_id": "task-1",
+                "severity": "info",
+                "source": "agent_loop",
+            },
+        )
+        await store.store_runtime_event(
+            "evt-3",
+            {
+                "event_id": "evt-3",
+                "run_id": run.run_id,
+                "event_type": "budget.updated",
+                "timestamp": "2026-03-26T10:00:03+00:00",
+                "phase": "evaluate",
+                "payload": {"usage": {"steps_used": 1}},
+                "correlation_id": "task-1",
+                "severity": "info",
+                "source": "budget_service",
+            },
+        )
+
+        timeline = await run_store.get_timeline(run.run_id)
+        replay = await run_store.get_replay(run.run_id, checkpoints=[{"checkpoint_id": "cp-1"}])
+
+        assert [entry.event_id for entry in timeline.entries] == ["evt-1", "evt-2", "evt-3"]
+        assert timeline.phases == ["plan", "act", "evaluate"]
+        assert replay.phase_transitions[0]["phase"] == "plan"
+        assert replay.browser_actions[0]["event_id"] == "evt-2"
+        assert replay.planner_outputs[0]["event_id"] == "evt-1"
+        assert replay.budget_updates[0]["event_id"] == "evt-3"
+        assert replay.checkpoints == [{"checkpoint_id": "cp-1"}]
+
+    asyncio.run(scenario())

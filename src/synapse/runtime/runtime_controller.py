@@ -27,7 +27,7 @@ from synapse.models.browser import (
     UploadRequest,
     UploadResult,
 )
-from synapse.models.runtime_event import EventType
+from synapse.models.runtime_event import EventType, RunReplayView, RunTimeline
 from synapse.models.message import AgentMessage
 from synapse.models.memory import MemoryRecord, MemorySearchRequest, MemorySearchResult, MemoryStoreRequest
 from synapse.models.plugin import PluginDescriptor, PluginReloadRequest, ToolDescriptor
@@ -302,6 +302,16 @@ class RuntimeController:
         if self.state_store is None:
             return []
         return await self.state_store.get_runtime_events(run_id=run_id, limit=200)
+
+    async def get_run_timeline(self, run_id: str, limit: int = 500) -> RunTimeline:
+        return await self.run_store.get_timeline(run_id, limit=limit)
+
+    async def get_run_replay(self, run_id: str, limit: int = 500) -> RunReplayView:
+        checkpoints = [
+            checkpoint.model_dump(mode="json")
+            for checkpoint in await self.checkpoint_service.list_checkpoints(run_id=run_id)
+        ]
+        return await self.run_store.get_replay(run_id, checkpoints=checkpoints, limit=limit)
 
     async def get_run_checkpoints(self, run_id: str) -> list[RuntimeCheckpoint]:
         return await self.checkpoint_service.list_checkpoints(run_id=run_id)

@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import WebSocket
 
-from synapse.models.runtime_event import EventSeverity, EventType, RuntimeEvent
+from synapse.models.runtime_event import EventSeverity, EventType, RuntimeEvent, infer_event_phase
 from synapse.runtime.compression.base import CompressionProvider
 from synapse.runtime.compression.noop import NoOpCompressionProvider
 from synapse.runtime.state_store import RuntimeStateStore
@@ -54,8 +54,9 @@ class EventBus:
             yield queue
 
     async def publish(self, event: RuntimeEvent) -> None:
-        await self.sockets.broadcast(event)
-        await self._maybe_publish_compressed_summary(event)
+        normalized = self._normalize_event(event)
+        await self.sockets.broadcast(normalized)
+        await self._maybe_publish_compressed_summary(normalized)
 
     async def emit(
         self,
@@ -66,6 +67,7 @@ class EventBus:
         task_id: str | None = None,
         session_id: str | None = None,
         source: str = "runtime",
+        phase: str | None = None,
         payload: dict[str, object] | None = None,
         severity: EventSeverity = EventSeverity.INFO,
         correlation_id: str | None = None,
@@ -78,6 +80,7 @@ class EventBus:
                 task_id=task_id,
                 session_id=session_id,
                 source=source,
+                phase=phase,
                 payload=payload or {},
                 severity=severity,
                 correlation_id=correlation_id,
@@ -139,3 +142,9 @@ class EventBus:
         )
         await self.sockets.broadcast(compact_event)
         self._recent_event_groups[key] = bucket[-2:]
+
+    @staticmethod
+    def _normalize_event(event: RuntimeEvent) -> RuntimeEvent:
+        if event.phase is not None:
+            return event
+        return event.model_copy(update={"phase": infer_event_phase(event.event_type)})

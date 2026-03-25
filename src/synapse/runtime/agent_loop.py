@@ -1,13 +1,14 @@
 import asyncio
 
-from synapse.models.agent import AgentBudgetUsage, AgentDefinition
+from synapse.models.agent import AgentDefinition
 from synapse.models.browser import StructuredPageModel
 from synapse.models.loop import AgentAction, AgentActionType, LoopEvaluation, LoopObservation, LoopPlan, LoopReflection
-from synapse.models.memory import MemoryStoreRequest, MemoryType
+from synapse.models.memory import MemoryScope, MemoryStoreRequest, MemoryType
 from synapse.models.runtime_event import EventSeverity, EventType, RuntimeEvent
 from synapse.models.task import TaskRequest, TaskResult, TaskStatus
-from synapse.runtime.budget import AgentBudgetLimitExceeded, AgentBudgetManager
+from synapse.runtime.budget import AgentBudgetLimitExceeded
 from synapse.runtime.browser import BrowserRuntime
+from synapse.runtime.budget_service import BudgetService
 from synapse.runtime.compression.base import CompressionProvider
 from synapse.runtime.compression.noop import NoOpCompressionProvider
 from synapse.runtime.llm import LLMProvider
@@ -27,7 +28,7 @@ class EventDrivenAgentLoop:
         sandbox: AgentSecuritySandbox,
         safety: AgentSafetyLayer,
         memory_service: MemoryService,
-        budget_manager: AgentBudgetManager,
+        budget_service: BudgetService,
         llm: LLMProvider | None = None,
         compression_provider: CompressionProvider | None = None,
     ) -> None:
@@ -37,7 +38,7 @@ class EventDrivenAgentLoop:
         self.sandbox = sandbox
         self.safety = safety
         self.memory_service = memory_service
-        self.budget_manager = budget_manager
+        self.budget_service = budget_service
         self.llm = llm
         self.compression_provider = compression_provider or NoOpCompressionProvider()
         self.planner = NavigationPlanner(llm=llm, compression=self.compression_provider)
@@ -50,7 +51,7 @@ class EventDrivenAgentLoop:
 
         completed_actions: list[AgentAction] = []
         artifacts: dict[str, object] = {"actions": []}
-        self.budget_manager.get_or_create(self.definition)
+        await self.budget_service.ensure_run_budget(task.agent_id, task.run_id or task.task_id)
         await self._increment_tokens(task, task.goal)
         await self._check_limits(task)
 
@@ -131,7 +132,7 @@ class EventDrivenAgentLoop:
                     completed_actions=completed_actions,
                     remaining_actions=remaining_actions,
                     current_page=current_page,
-                    memory_summary=await self._memory_summary(task.agent_id),
+                    memory_summary=await self._memory_summary(task),
                 )
                 remaining_actions = [candidate.model_copy() for candidate in evaluation.next_actions]
                 await self.sockets.broadcast(
@@ -328,18 +329,19 @@ class EventDrivenAgentLoop:
         if current_page is not None:
             page_summary = f" page={current_page.title} url={current_page.url}"
 
-        await self.memory_service.memory_manager.store(
+        await self.memory_service.store(
             MemoryStoreRequest(
                 agent_id=task.agent_id,
                 run_id=task.run_id,
+                task_id=task.task_id,
                 memory_type=MemoryType.SHORT_TERM,
+                memory_scope=MemoryScope.RUN,
                 content=(
                     f"observe cycle task={task.task_id} goal={task.goal} "
                     f"events={observation.event_count}{page_summary}"
                 ),
             )
         )
-        await self._increment_memory_write(task)
 
     async def _store_evaluation_memory(
         self,
@@ -352,22 +354,26 @@ class EventDrivenAgentLoop:
         if current_page is not None:
             page_summary = f" page={current_page.title}"
 
-        await self.memory_service.memory_manager.store(
+        await self.memory_service.store(
             MemoryStoreRequest(
                 agent_id=task.agent_id,
                 run_id=task.run_id,
+                task_id=task.task_id,
                 memory_type=MemoryType.TASK,
+                memory_scope=MemoryScope.TASK,
                 content=(
                     f"evaluate cycle task={task.task_id} action={action.type.value} "
                     f"success={evaluation.success} notes={evaluation.notes}{page_summary}"
                 ),
             )
         )
-        await self._increment_memory_write(task)
 
-    async def _memory_summary(self, agent_id: str) -> str:
+    async def _memory_summary(self, task: TaskRequest) -> str:
         try:
-            recent = await self.memory_service.get_recent(agent_id, limit=5)
+            if task.run_id:
+                summary = await self.memory_service.summarize_run_context(task.run_id)
+                return str(summary.get("summary", ""))
+            recent = await self.memory_service.get_recent(task.agent_id, limit=5)
         except Exception:
             return ""
         if not recent:
@@ -385,91 +391,88 @@ class EventDrivenAgentLoop:
             task=task,
             completed_actions=completed_actions,
             current_page=current_page,
-            memory_summary=await self._memory_summary(task.agent_id),
+            memory_summary=await self._memory_summary(task),
         )
         if not reflection:
             return
 
-        await self.memory_service.memory_manager.store(
+        await self.memory_service.store(
             MemoryStoreRequest(
                 agent_id=task.agent_id,
                 run_id=task.run_id,
+                task_id=task.task_id,
                 memory_type=MemoryType.LONG_TERM,
+                memory_scope=MemoryScope.LONG_TERM,
                 content=f"reflect cycle task={task.task_id} summary={reflection}",
             )
         )
         await self._increment_tokens(task, reflection)
-        await self._increment_memory_write(task)
 
     async def _increment_step(self, task: TaskRequest) -> None:
-        usage = self.budget_manager.increment_step(self.definition)
-        await self._broadcast_budget_update(task, usage)
-        await self._check_limits(task)
+        await self.budget_service.increment_step(
+            task.agent_id,
+            run_id=task.run_id,
+            task_id=task.task_id,
+            session_id=task.session_id,
+            correlation_id=task.run_id or task.task_id,
+        )
 
     async def _increment_page(self, task: TaskRequest) -> None:
-        usage = self.budget_manager.increment_page(self.definition)
-        await self._broadcast_budget_update(task, usage)
-        await self._check_limits(task)
+        await self.budget_service.increment_page(
+            task.agent_id,
+            run_id=task.run_id,
+            task_id=task.task_id,
+            session_id=task.session_id,
+            correlation_id=task.run_id or task.task_id,
+        )
 
     async def _increment_tokens(self, task: TaskRequest, content: str) -> None:
         estimated = max(1, len(content) // 4) if content else 0
         if estimated == 0:
             return
-        usage = self.budget_manager.increment_tokens(self.definition, estimated)
-        await self._broadcast_budget_update(task, usage)
-        await self._check_limits(task)
+        await self.budget_service.increment_tokens(
+            task.agent_id,
+            estimated,
+            run_id=task.run_id,
+            task_id=task.task_id,
+            session_id=task.session_id,
+            correlation_id=task.run_id or task.task_id,
+        )
 
     async def _increment_memory_write(self, task: TaskRequest) -> None:
-        usage = self.budget_manager.increment_memory_write(self.definition)
-        await self._broadcast_budget_update(task, usage)
-        await self._check_limits(task)
+        await self.budget_service.increment_memory_write(
+            task.agent_id,
+            run_id=task.run_id,
+            task_id=task.task_id,
+            session_id=task.session_id,
+            correlation_id=task.run_id or task.task_id,
+        )
 
     async def _check_limits(self, task: TaskRequest) -> None:
         try:
-            usage, warnings = self.budget_manager.check_limits(self.definition)
+            await self.budget_service.check_limits(
+                task.agent_id,
+                run_id=task.run_id,
+                task_id=task.task_id,
+                session_id=task.session_id,
+                correlation_id=task.run_id or task.task_id,
+            )
         except AgentBudgetLimitExceeded as exc:
             if self.definition.execution_policy.save_checkpoint_on_limit or self.definition.execution_policy.pause_on_hard_limit:
-                self.budget_manager.save_checkpoint(
+                usage = await self.budget_service.get_run_budget(task.run_id) if task.run_id else self.budget_service.get_usage(task.agent_id)
+                await self.budget_service.save_agent_checkpoint(
                     task.agent_id,
                     {
                         "task_id": task.task_id,
                         "session_id": task.session_id,
-                        "usage": self.budget_manager.get_usage(task.agent_id).model_dump(mode="json"),
+                        "run_id": task.run_id,
+                        "usage": usage.model_dump(mode="json"),
                     },
                     reason=str(exc),
                 )
                 if self.definition.execution_policy.pause_on_hard_limit:
                     raise AgentBudgetLimitExceeded("Agent paused: hard budget limit reached.") from exc
             raise
-
-        if self.definition.execution_policy.stop_on_soft_limit and any("exceeded" in warning for warning in warnings):
-            raise AgentBudgetLimitExceeded("Agent terminated: soft budget limit exceeded.")
-
-        for warning in warnings:
-            await self._broadcast_budget_update(task, usage, warning=warning)
-
-    async def _broadcast_budget_update(
-        self,
-        task: TaskRequest,
-        usage: AgentBudgetUsage,
-        warning: str | None = None,
-    ) -> None:
-        payload: dict[str, object] = {"usage": usage.model_dump(mode="json")}
-        if warning is not None:
-            payload["warning"] = warning
-        await self.sockets.broadcast(
-            RuntimeEvent(
-                event_type=EventType.BUDGET_UPDATED,
-                run_id=task.run_id,
-                session_id=task.session_id,
-                agent_id=task.agent_id,
-                task_id=task.task_id,
-                source="agent_loop",
-                payload=payload,
-                severity=EventSeverity.WARNING if warning else EventSeverity.INFO,
-                correlation_id=task.task_id,
-            )
-        )
 
     @staticmethod
     def _page_text(page: StructuredPageModel) -> str:

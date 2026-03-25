@@ -60,6 +60,8 @@ class TaskRuntime:
     async def execute_task(self, request: TaskRequest) -> TaskResult:
         run = await self._ensure_run(request)
         request = request.model_copy(update={"run_id": run.run_id})
+        if hasattr(self.browser_service.budget_service, "ensure_run_budget"):
+            await self.browser_service.budget_service.ensure_run_budget(request.agent_id, run.run_id)
         await self._enforce_task_safety(request)
         self.checkpoint_service.remember_task_context(request)
         if request.session_id is None:
@@ -77,7 +79,7 @@ class TaskRuntime:
             sandbox=self.browser_service.sandbox,
             safety=self.safety,
             memory_service=self.memory_service,
-            budget_manager=self.browser_service.budget_service.budget_manager,
+            budget_service=self.browser_service.budget_service,
             llm=self.llm,
             compression_provider=self.compression_provider,
         )

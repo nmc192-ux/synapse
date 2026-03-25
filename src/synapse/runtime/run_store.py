@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from synapse.models.agent import AgentBudgetUsage
 from synapse.models.run import RunState, RunStatus
 from synapse.runtime.state_store import RuntimeStateStore
 
@@ -91,4 +92,19 @@ class RunStore:
             run.metadata.update(metadata)
         if status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}:
             run.completed_at = datetime.now(timezone.utc)
+        return await self.save(run)
+
+    async def update_budget(self, run_id: str, usage: AgentBudgetUsage) -> RunState:
+        return await self.update_metadata(run_id, {"budget": usage.model_dump(mode="json")})
+
+    async def get_budget(self, run_id: str) -> AgentBudgetUsage | None:
+        run = await self.get(run_id)
+        payload = run.metadata.get("budget")
+        if not isinstance(payload, dict):
+            return None
+        return AgentBudgetUsage.model_validate(payload)
+
+    async def update_metadata(self, run_id: str, metadata: dict[str, object]) -> RunState:
+        run = await self.get(run_id)
+        run.metadata.update(metadata)
         return await self.save(run)

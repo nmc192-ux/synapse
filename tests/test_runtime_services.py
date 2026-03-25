@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from synapse.models.agent import AgentDefinition, AgentKind
 from synapse.models.browser import CompactStructuredPageModel, OpenRequest
 from synapse.models.events import EventType, RuntimeEvent
-from synapse.models.memory import MemoryRecord, MemoryStoreRequest, MemoryType
+from synapse.models.memory import MemoryRecord, MemoryScope, MemoryStoreRequest, MemoryType
 from synapse.models.plugin import PluginReloadRequest
 from synapse.runtime.budget import AgentBudgetManager
 from synapse.runtime.budget_service import BudgetService
@@ -81,28 +81,48 @@ class _StubMemoryManager:
     def __init__(self) -> None:
         now = datetime.now(timezone.utc)
         self.records = [
-            MemoryRecord(memory_id="m1", agent_id="agent-1", memory_type=MemoryType.SHORT_TERM, content="Remember current page heading", embedding=[1.0, 0.0], timestamp=now),
-            MemoryRecord(memory_id="m2", agent_id="agent-1", memory_type=MemoryType.SHORT_TERM, content="Remember current page heading", embedding=[1.0, 0.0], timestamp=now),
-            MemoryRecord(memory_id="m3", agent_id="agent-1", memory_type=MemoryType.TASK, content="Task success: extracted paper list", embedding=[0.0, 1.0], timestamp=now),
-            MemoryRecord(memory_id="m4", agent_id="agent-1", memory_type=MemoryType.LONG_TERM, content="Important strategy: prefer navigation links before forms", embedding=[0.3, 0.7], timestamp=now),
+            MemoryRecord(memory_id="m1", agent_id="agent-1", run_id="run-1", task_id="task-1", memory_type=MemoryType.SHORT_TERM, memory_scope=MemoryScope.RUN, content="Remember current page heading", embedding=[1.0, 0.0], timestamp=now),
+            MemoryRecord(memory_id="m2", agent_id="agent-1", run_id="run-2", task_id="task-2", memory_type=MemoryType.SHORT_TERM, memory_scope=MemoryScope.RUN, content="Other run memory", embedding=[1.0, 0.0], timestamp=now),
+            MemoryRecord(memory_id="m3", agent_id="agent-1", run_id="run-1", task_id="task-1", memory_type=MemoryType.TASK, memory_scope=MemoryScope.TASK, content="Task success: extracted paper list", embedding=[0.0, 1.0], timestamp=now),
+            MemoryRecord(memory_id="m4", agent_id="agent-1", memory_type=MemoryType.LONG_TERM, memory_scope=MemoryScope.LONG_TERM, content="Important strategy: prefer navigation links before forms", embedding=[0.3, 0.7], timestamp=now),
         ]
 
     async def store(self, request):
-        return request
+        record = MemoryRecord.model_validate(request.model_dump(mode="json"))
+        self.records.insert(0, record)
+        return record
 
     async def search(self, request):
         return []
 
-    async def get_recent(self, agent_id: str, limit: int = 10):
-        return self.records[:limit]
+    async def get_recent(self, agent_id: str, limit: int = 10, *, run_id=None, task_id=None, memory_scope=None):
+        records = [record for record in self.records if record.agent_id == agent_id]
+        if run_id is not None:
+            records = [record for record in records if record.run_id == run_id]
+        if task_id is not None:
+            records = [record for record in records if record.task_id == task_id]
+        if memory_scope is not None:
+            records = [record for record in records if record.memory_scope == memory_scope]
+        return records[:limit]
 
-    async def get_recent_by_type(self, agent_id: str, limit_per_type: int = 4):
+    async def get_recent_by_type(self, agent_id: str, limit_per_type: int = 4, *, run_id=None, task_id=None, scopes=None):
         grouped: dict[MemoryType, list[MemoryRecord]] = {}
         for record in self.records:
+            if record.agent_id != agent_id:
+                continue
+            if run_id is not None and record.run_id != run_id:
+                continue
+            if task_id is not None and record.task_id != task_id:
+                continue
+            if scopes is not None and record.memory_scope not in scopes:
+                continue
             grouped.setdefault(record.memory_type, [])
             if len(grouped[record.memory_type]) < limit_per_type:
                 grouped[record.memory_type].append(record)
         return grouped
+
+    async def get_run_memory(self, run_id: str, limit: int = 100):
+        return [record for record in self.records if record.run_id == run_id][:limit]
 
 
 class _StubCompressionProvider(CompressionProvider):
@@ -174,11 +194,12 @@ def test_memory_service_applies_budget_tracking() -> None:
 
         async with bus.subscribe("subscriber") as queue:
             record = await service.store(
-                MemoryStoreRequest(agent_id="agent-1", memory_type=MemoryType.SHORT_TERM, content="hello", embedding=[0.1])
+                MemoryStoreRequest(agent_id="agent-1", run_id="run-1", task_id="task-1", memory_type=MemoryType.SHORT_TERM, content="hello", embedding=[0.1])
             )
             event = await queue.get()
             assert event.event_type == EventType.BUDGET_UPDATED
             assert record.content == "hello"
+            assert record.memory_scope == MemoryScope.RUN
 
     asyncio.run(scenario())
 
@@ -198,16 +219,52 @@ def test_memory_service_compresses_planner_context() -> None:
         )
 
         async with bus.subscribe("subscriber") as queue:
-            payload = await service.get_planner_memory_context("agent-1", task_id="task-1", limit_per_type=4)
+            payload = await service.get_planner_memory_context("agent-1", run_id="run-1", task_id="task-1", limit_per_type=4)
             event = await queue.get()
             assert event.event_type == EventType.MEMORY_COMPRESSED
-            assert payload["retrieved_memory_count"] == 4
+            assert payload["retrieved_memory_count"] == 3
             assert payload["compressed_memory_count"] == 3
-            assert payload["memory_compression_ratio"] == 0.75
+            assert payload["memory_compression_ratio"] == 1.0
             assert "short_term" in payload["memory_summary"]
             assert "task" in payload["memory_summary"]
             assert "long_term" in payload["memory_summary"]
             assert len(payload["memories"]) == 3
+
+    asyncio.run(scenario())
+
+
+def test_budget_service_isolates_concurrent_runs_for_same_agent() -> None:
+    async def scenario() -> None:
+        registry = AgentRegistry()
+        registry.register(AgentDefinition(agent_id="agent-1", kind=AgentKind.CUSTOM, name="Agent 1"))
+        bus = EventBus(WebSocketManager(state_store=InMemoryRuntimeStateStore()))
+        budget = BudgetService(AgentBudgetManager(), registry, bus)
+
+        await budget.ensure_run_budget("agent-1", "run-1")
+        await budget.ensure_run_budget("agent-1", "run-2")
+        await budget.increment_step("agent-1", run_id="run-1")
+        await budget.increment_step("agent-1", run_id="run-1")
+        await budget.increment_step("agent-1", run_id="run-2")
+
+        run_one = await budget.get_run_budget("run-1")
+        run_two = await budget.get_run_budget("run-2")
+
+        assert run_one.steps_used == 2
+        assert run_two.steps_used == 1
+
+    asyncio.run(scenario())
+
+
+def test_memory_service_get_run_memory_isolates_same_agent_runs() -> None:
+    async def scenario() -> None:
+        service = MemoryService(_StubMemoryManager())
+        run_one = await service.get_run_memory("run-1")
+        run_two = await service.get_run_memory("run-2")
+
+        assert all(record.run_id == "run-1" for record in run_one)
+        assert all(record.run_id == "run-2" for record in run_two)
+        assert {record.memory_id for record in run_one} == {"m1", "m3"}
+        assert {record.memory_id for record in run_two} == {"m2"}
 
     asyncio.run(scenario())
 

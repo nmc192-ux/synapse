@@ -92,7 +92,7 @@ class RuntimeController:
 
         self.event_bus = EventBus(sockets, compression_provider=compression_provider)
         self.run_store = RunStore(state_store)
-        self.budget_service = BudgetService(budget_manager, agents, self.event_bus)
+        self.budget_service = BudgetService(budget_manager, agents, self.event_bus, self.run_store)
         self.browser_service = BrowserService(browser, sandbox, safety, self.event_bus, self.budget_service, state_store)
         self.memory_service = MemoryService(
             memory_manager,
@@ -235,6 +235,15 @@ class RuntimeController:
 
     async def get_agent_budget(self, agent_id: str) -> AgentBudgetUsage:
         return self.budget_service.get_usage(agent_id)
+
+    async def get_run_budget(self, run_id: str) -> AgentBudgetUsage:
+        return await self.budget_service.get_run_budget(run_id)
+
+    async def get_run_memory(self, run_id: str, limit: int = 100) -> list[MemoryRecord]:
+        return await self.memory_service.get_run_memory(run_id, limit=limit)
+
+    async def summarize_run_context(self, run_id: str, limit: int = 25) -> dict[str, object]:
+        return await self.memory_service.summarize_run_context(run_id, limit=limit)
 
     async def save_agent_checkpoint(self, agent_id: str, state: dict[str, object], reason: str | None = None) -> AgentCheckpoint:
         return await self.budget_service.save_agent_checkpoint(agent_id, state, reason)

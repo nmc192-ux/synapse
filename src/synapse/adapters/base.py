@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 from synapse.models.agent import AgentDefinition
 from synapse.models.task import TaskRequest, TaskResult
 from synapse.runtime.agent_loop import EventDrivenAgentLoop
-from synapse.runtime.budget import AgentBudgetManager
+from synapse.runtime.budget_service import BudgetService
 from synapse.runtime.compression.base import CompressionProvider
 from synapse.runtime.llm import LLMProvider
 from synapse.runtime.memory_service import MemoryService
@@ -25,7 +25,7 @@ class AgentAdapter(ABC):
         sandbox: AgentSecuritySandbox,
         safety: AgentSafetyLayer,
         memory_service: MemoryService,
-        budget_manager: AgentBudgetManager,
+        budget_service: BudgetService,
         llm: LLMProvider | None = None,
         compression_provider: CompressionProvider | None = None,
     ) -> None:
@@ -37,7 +37,7 @@ class AgentAdapter(ABC):
             sandbox=sandbox,
             safety=safety,
             memory_service=memory_service,
-            budget_manager=budget_manager,
+            budget_service=budget_service,
             llm=llm,
             compression_provider=compression_provider,
         )

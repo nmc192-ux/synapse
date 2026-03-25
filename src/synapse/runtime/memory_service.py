@@ -4,7 +4,7 @@ import math
 from collections import defaultdict
 from typing import TYPE_CHECKING
 
-from synapse.models.memory import MemoryRecord, MemorySearchRequest, MemorySearchResult, MemoryStoreRequest, MemoryType
+from synapse.models.memory import MemoryRecord, MemoryScope, MemorySearchRequest, MemorySearchResult, MemoryStoreRequest, MemoryType
 from synapse.models.runtime_event import EventType
 from synapse.runtime.compression.base import CompressionProvider
 from synapse.runtime.compression.noop import NoOpCompressionProvider
@@ -36,10 +36,11 @@ class MemoryService:
         self.state_store = state_store
 
     async def store(self, request: MemoryStoreRequest) -> MemoryRecord:
-        record = await self.memory_manager.store(request)
+        scoped_request = self._with_default_scope(request)
+        record = await self.memory_manager.store(scoped_request)
         if self.budget_service is not None:
             try:
-                await self.budget_service.increment_memory_write(request.agent_id)
+                await self.budget_service.increment_memory_write(scoped_request.agent_id, run_id=scoped_request.run_id)
             except KeyError:
                 pass
         return record
@@ -47,8 +48,22 @@ class MemoryService:
     async def search(self, request: MemorySearchRequest) -> list[MemorySearchResult]:
         return await self.memory_manager.search(request)
 
-    async def get_recent(self, agent_id: str, limit: int = 10) -> list[MemoryRecord]:
-        return await self.memory_manager.get_recent(agent_id, limit)
+    async def get_recent(
+        self,
+        agent_id: str,
+        limit: int = 10,
+        *,
+        run_id: str | None = None,
+        task_id: str | None = None,
+        memory_scope: MemoryScope | None = None,
+    ) -> list[MemoryRecord]:
+        return await self.memory_manager.get_recent(
+            agent_id,
+            limit,
+            run_id=run_id,
+            task_id=task_id,
+            memory_scope=memory_scope,
+        )
 
     async def summarize_recent(self, agent_id: str, limit: int = 5) -> str:
         recent = await self.get_recent(agent_id, limit=limit)
@@ -68,7 +83,12 @@ class MemoryService:
         task_id: str | None = None,
         limit_per_type: int = 4,
     ) -> dict[str, object]:
-        grouped = await self.memory_manager.get_recent_by_type(agent_id, limit_per_type=limit_per_type)
+        grouped = await self._get_scoped_planner_memories(
+            agent_id,
+            run_id=run_id,
+            task_id=task_id,
+            limit_per_type=limit_per_type,
+        )
         ordered_types = [MemoryType.SHORT_TERM, MemoryType.TASK, MemoryType.LONG_TERM]
         retrieved_records = [
             record
@@ -76,7 +96,7 @@ class MemoryService:
             for record in grouped.get(memory_type, [])
         ]
         deduplicated = self._deduplicate_memories(retrieved_records)
-        grouped_deduplicated = self._group_memories(deduplicated)
+        grouped_deduplicated = self._group_memories(deduplicated, group_by="type")
 
         compressed_clusters: list[dict[str, object]] = []
         summary_lines: list[str] = []
@@ -148,6 +168,97 @@ class MemoryService:
             return []
         return await self.state_store.get_runtime_events(run_id=run_id, agent_id=agent_id, task_id=task_id, limit=limit)
 
+    async def get_run_memory(self, run_id: str, limit: int = 100) -> list[MemoryRecord]:
+        return await self.memory_manager.get_run_memory(run_id, limit=limit)
+
+    async def summarize_run_context(self, run_id: str, limit: int = 25) -> dict[str, object]:
+        records = await self.get_run_memory(run_id, limit=limit)
+        if not records:
+            return {
+                "run_id": run_id,
+                "summary": "No run memory available.",
+                "memories": [],
+                "retrieved_memory_count": 0,
+                "compressed_memory_count": 0,
+                "memory_compression_ratio": 1.0,
+            }
+
+        deduplicated = self._deduplicate_memories(records)
+        grouped = self._group_memories(deduplicated, group_by="scope")
+        summaries: list[dict[str, object]] = []
+        summary_lines: list[str] = []
+
+        for scope in (MemoryScope.RUN, MemoryScope.TASK, MemoryScope.AGENT, MemoryScope.LONG_TERM):
+            cluster = grouped.get(scope.value, [])
+            if not cluster:
+                continue
+            summary = await self.compression_provider.summarize_memory(
+                cluster,
+                context={"run_id": run_id, "memory_scope": scope.value, "channel": "run_summary"},
+            )
+            summaries.append({"memory_scope": scope.value, "summary": summary, "entries": cluster})
+            summary_text = self._summary_text(summary)
+            if summary_text:
+                summary_lines.append(f"{scope.value}: {summary_text}")
+
+        return {
+            "run_id": run_id,
+            "summary": "\n".join(summary_lines) if summary_lines else "No run memory available.",
+            "memories": summaries,
+            "retrieved_memory_count": len(records),
+            "compressed_memory_count": len(deduplicated),
+            "memory_compression_ratio": round(len(deduplicated) / len(records), 4) if records else 1.0,
+        }
+
+    async def _get_scoped_planner_memories(
+        self,
+        agent_id: str,
+        *,
+        run_id: str | None,
+        task_id: str | None,
+        limit_per_type: int,
+    ) -> dict[MemoryType, list[MemoryRecord]]:
+        merged: dict[MemoryType, list[MemoryRecord]] = defaultdict(list)
+
+        async def add_records(records_by_type: dict[MemoryType, list[MemoryRecord]]) -> None:
+            for memory_type, records in records_by_type.items():
+                bucket = merged[memory_type]
+                seen_ids = {record.memory_id for record in bucket}
+                for record in records:
+                    if record.memory_id in seen_ids:
+                        continue
+                    bucket.append(record)
+                    seen_ids.add(record.memory_id)
+                    if len(bucket) >= limit_per_type:
+                        break
+
+        if run_id is not None:
+            await add_records(
+                await self.memory_manager.get_recent_by_type(
+                    agent_id,
+                    limit_per_type=limit_per_type,
+                    run_id=run_id,
+                    scopes=[MemoryScope.RUN],
+                )
+            )
+        if task_id is not None:
+            await add_records(
+                await self.memory_manager.get_recent_by_type(
+                    agent_id,
+                    limit_per_type=limit_per_type,
+                    task_id=task_id,
+                    scopes=[MemoryScope.TASK],
+                )
+            )
+        await add_records(
+            await self.memory_manager.get_recent_by_type(
+                agent_id,
+                limit_per_type=limit_per_type,
+                scopes=[MemoryScope.AGENT, MemoryScope.LONG_TERM],
+            )
+        )
+        return dict(merged)
+
     def _deduplicate_memories(self, records: list[MemoryRecord]) -> list[MemoryRecord]:
         clusters: list[list[MemoryRecord]] = []
         for record in records:
@@ -167,13 +278,20 @@ class MemoryService:
         deduplicated.sort(key=self._salience_score, reverse=True)
         return deduplicated
 
-    def _group_memories(self, records: list[MemoryRecord]) -> dict[str, list[dict[str, object]]]:
+    def _group_memories(self, records: list[MemoryRecord], *, group_by: str) -> dict[str, list[dict[str, object]]]:
         grouped: dict[str, list[dict[str, object]]] = defaultdict(list)
         for record in records:
-            grouped[record.memory_type.value].append(
+            if group_by == "scope":
+                grouping_key = record.memory_scope.value if record.memory_scope else record.memory_type.value
+            else:
+                grouping_key = record.memory_type.value
+            grouped[grouping_key].append(
                 {
                     "memory_id": record.memory_id,
                     "memory_type": record.memory_type.value,
+                    "memory_scope": record.memory_scope.value if record.memory_scope else None,
+                    "run_id": record.run_id,
+                    "task_id": record.task_id,
                     "content": record.content,
                     "timestamp": record.timestamp.isoformat(),
                     "salience": round(self._salience_score(record), 4),
@@ -195,6 +313,10 @@ class MemoryService:
 
     def _is_similar_memory(self, left: MemoryRecord, right: MemoryRecord) -> bool:
         if left.memory_type != right.memory_type:
+            return False
+        if left.memory_scope != right.memory_scope:
+            return False
+        if left.run_id != right.run_id and MemoryScope.RUN in {left.memory_scope, right.memory_scope}:
             return False
         left_text = self._normalize_content(left.content)
         right_text = self._normalize_content(right.content)
@@ -229,3 +351,15 @@ class MemoryService:
             if isinstance(summary.get("count"), int):
                 return f"{summary['count']} summarized memories"
         return ""
+
+    @staticmethod
+    def _with_default_scope(request: MemoryStoreRequest) -> MemoryStoreRequest:
+        if request.memory_scope is not None:
+            return request
+        if request.memory_type == MemoryType.LONG_TERM:
+            return request.model_copy(update={"memory_scope": MemoryScope.LONG_TERM})
+        if request.task_id is not None and request.memory_type == MemoryType.TASK:
+            return request.model_copy(update={"memory_scope": MemoryScope.TASK})
+        if request.run_id is not None:
+            return request.model_copy(update={"memory_scope": MemoryScope.RUN})
+        return request.model_copy(update={"memory_scope": MemoryScope.AGENT})

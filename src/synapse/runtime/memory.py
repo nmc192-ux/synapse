@@ -4,7 +4,7 @@ import asyncpg
 from collections import defaultdict
 
 from synapse.config import settings
-from synapse.models.memory import MemoryRecord, MemorySearchRequest, MemorySearchResult, MemoryStoreRequest, MemoryType
+from synapse.models.memory import MemoryRecord, MemoryScope, MemorySearchRequest, MemorySearchResult, MemoryStoreRequest, MemoryType
 
 
 class AgentMemoryManager:
@@ -28,14 +28,35 @@ class AgentMemoryManager:
         pool = self._require_pool()
         row = await pool.fetchrow(
             """
-            INSERT INTO synapse_memory (memory_id, agent_id, run_id, memory_type, content, embedding, timestamp)
-            VALUES ($1, $2, $3, $4, $5, $6::vector, $7)
-            RETURNING memory_id, agent_id, run_id, memory_type, content, embedding::text AS embedding, timestamp
+            INSERT INTO synapse_memory (
+                memory_id,
+                agent_id,
+                run_id,
+                task_id,
+                memory_type,
+                memory_scope,
+                content,
+                embedding,
+                timestamp
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector, $9)
+            RETURNING
+                memory_id,
+                agent_id,
+                run_id,
+                task_id,
+                memory_type,
+                memory_scope,
+                content,
+                embedding::text AS embedding,
+                timestamp
             """,
             request.memory_id,
             request.agent_id,
             request.run_id,
+            request.task_id,
             request.memory_type.value,
+            request.memory_scope.value if request.memory_scope else None,
             request.content,
             self._vector_literal(request.embedding),
             request.timestamp,
@@ -48,78 +69,121 @@ class AgentMemoryManager:
         if request.embedding:
             rows = await pool.fetch(
                 """
-                SELECT memory_id, agent_id, run_id, memory_type, content, embedding::text AS embedding, timestamp,
+                SELECT memory_id, agent_id, run_id, task_id, memory_type, memory_scope, content, embedding::text AS embedding, timestamp,
                        1 - (embedding <=> $2::vector) AS score
                 FROM synapse_memory
                 WHERE agent_id = $1
-                  AND ($3::text IS NULL OR memory_type = $3)
+                  AND ($3::text IS NULL OR run_id = $3)
+                  AND ($4::text IS NULL OR task_id = $4)
+                  AND ($5::text IS NULL OR memory_type = $5)
+                  AND ($6::text IS NULL OR memory_scope = $6)
                 ORDER BY embedding <=> $2::vector
-                LIMIT $4
+                LIMIT $7
                 """,
                 request.agent_id,
                 self._vector_literal(request.embedding),
+                request.run_id,
+                request.task_id,
                 request.memory_type.value if request.memory_type else None,
+                request.memory_scope.value if request.memory_scope else None,
                 request.limit,
             )
         else:
             rows = await pool.fetch(
                 """
-                SELECT memory_id, agent_id, run_id, memory_type, content, embedding::text AS embedding, timestamp,
+                SELECT memory_id, agent_id, run_id, task_id, memory_type, memory_scope, content, embedding::text AS embedding, timestamp,
                        CASE
-                         WHEN $2::text IS NULL OR $2 = '' THEN 0.0
-                         ELSE similarity(content, $2)
+                        WHEN $2::text IS NULL OR $2 = '' THEN 0.0
+                        ELSE similarity(content, $2)
                        END AS score
                 FROM synapse_memory
                 WHERE agent_id = $1
-                  AND ($3::text IS NULL OR memory_type = $3)
+                  AND ($3::text IS NULL OR run_id = $3)
+                  AND ($4::text IS NULL OR task_id = $4)
+                  AND ($5::text IS NULL OR memory_type = $5)
+                  AND ($6::text IS NULL OR memory_scope = $6)
                 ORDER BY score DESC, timestamp DESC
-                LIMIT $4
+                LIMIT $7
                 """,
                 request.agent_id,
                 request.query,
+                request.run_id,
+                request.task_id,
                 request.memory_type.value if request.memory_type else None,
+                request.memory_scope.value if request.memory_scope else None,
                 request.limit,
             )
 
         return [MemorySearchResult(memory=self._to_record(row), score=float(row["score"])) for row in rows]
 
-    async def get_recent(self, agent_id: str, limit: int = 10) -> list[MemoryRecord]:
+    async def get_recent(
+        self,
+        agent_id: str,
+        limit: int = 10,
+        *,
+        run_id: str | None = None,
+        task_id: str | None = None,
+        memory_scope: MemoryScope | None = None,
+    ) -> list[MemoryRecord]:
         pool = self._require_pool()
         rows = await pool.fetch(
             """
-            SELECT memory_id, agent_id, run_id, memory_type, content, embedding::text AS embedding, timestamp
+            SELECT memory_id, agent_id, run_id, task_id, memory_type, memory_scope, content, embedding::text AS embedding, timestamp
             FROM synapse_memory
             WHERE agent_id = $1
+              AND ($2::text IS NULL OR run_id = $2)
+              AND ($3::text IS NULL OR task_id = $3)
+              AND ($4::text IS NULL OR memory_scope = $4)
             ORDER BY timestamp DESC
-            LIMIT $2
+            LIMIT $5
             """,
             agent_id,
+            run_id,
+            task_id,
+            memory_scope.value if memory_scope else None,
             limit,
         )
         return [self._to_record(row) for row in rows]
 
-    async def get_recent_by_type(self, agent_id: str, limit_per_type: int = 4) -> dict[MemoryType, list[MemoryRecord]]:
+    async def get_recent_by_type(
+        self,
+        agent_id: str,
+        limit_per_type: int = 4,
+        *,
+        run_id: str | None = None,
+        task_id: str | None = None,
+        scopes: list[MemoryScope] | None = None,
+    ) -> dict[MemoryType, list[MemoryRecord]]:
         pool = self._require_pool()
+        scope_values = [scope.value for scope in scopes] if scopes else None
         rows = await pool.fetch(
             """
-            SELECT memory_id, agent_id, run_id, memory_type, content, embedding::text AS embedding, timestamp
+            SELECT memory_id, agent_id, run_id, task_id, memory_type, memory_scope, content, embedding::text AS embedding, timestamp
             FROM (
                 SELECT
                     memory_id,
                     agent_id,
                     run_id,
+                    task_id,
                     memory_type,
+                    memory_scope,
                     content,
                     embedding,
                     timestamp,
                     ROW_NUMBER() OVER (PARTITION BY memory_type ORDER BY timestamp DESC) AS row_number
                 FROM synapse_memory
                 WHERE agent_id = $1
+                  AND ($2::text IS NULL OR run_id = $2)
+                  AND ($3::text IS NULL OR task_id = $3)
+                  AND ($4::text[] IS NULL OR memory_scope = ANY($4))
             ) AS ranked
-            WHERE row_number <= $2
+            WHERE row_number <= $5
             ORDER BY timestamp DESC
             """,
             agent_id,
+            run_id,
+            task_id,
+            scope_values,
             limit_per_type,
         )
         grouped: dict[MemoryType, list[MemoryRecord]] = defaultdict(list)
@@ -127,6 +191,21 @@ class AgentMemoryManager:
             record = self._to_record(row)
             grouped[record.memory_type].append(record)
         return dict(grouped)
+
+    async def get_run_memory(self, run_id: str, limit: int = 100) -> list[MemoryRecord]:
+        pool = self._require_pool()
+        rows = await pool.fetch(
+            """
+            SELECT memory_id, agent_id, run_id, task_id, memory_type, memory_scope, content, embedding::text AS embedding, timestamp
+            FROM synapse_memory
+            WHERE run_id = $1
+            ORDER BY timestamp DESC
+            LIMIT $2
+            """,
+            run_id,
+            limit,
+        )
+        return [self._to_record(row) for row in rows]
 
     async def _ensure_schema(self) -> None:
         pool = self._require_pool()
@@ -138,7 +217,9 @@ class AgentMemoryManager:
                 memory_id TEXT PRIMARY KEY,
                 agent_id TEXT NOT NULL,
                 run_id TEXT,
+                task_id TEXT,
                 memory_type TEXT NOT NULL,
+                memory_scope TEXT,
                 content TEXT NOT NULL,
                 embedding VECTOR NOT NULL,
                 timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -146,10 +227,18 @@ class AgentMemoryManager:
             """
         )
         await pool.execute("ALTER TABLE synapse_memory ADD COLUMN IF NOT EXISTS run_id TEXT")
+        await pool.execute("ALTER TABLE synapse_memory ADD COLUMN IF NOT EXISTS task_id TEXT")
+        await pool.execute("ALTER TABLE synapse_memory ADD COLUMN IF NOT EXISTS memory_scope TEXT")
         await pool.execute(
             """
             CREATE INDEX IF NOT EXISTS synapse_memory_agent_timestamp_idx
             ON synapse_memory (agent_id, timestamp DESC)
+            """
+        )
+        await pool.execute(
+            """
+            CREATE INDEX IF NOT EXISTS synapse_memory_run_timestamp_idx
+            ON synapse_memory (run_id, timestamp DESC)
             """
         )
 
@@ -163,7 +252,9 @@ class AgentMemoryManager:
             memory_id=row["memory_id"],
             agent_id=row["agent_id"],
             run_id=row["run_id"],
+            task_id=row["task_id"],
             memory_type=row["memory_type"],
+            memory_scope=row["memory_scope"],
             content=row["content"],
             embedding=self._parse_vector(row["embedding"]),
             timestamp=row["timestamp"],

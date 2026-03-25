@@ -9,6 +9,7 @@ class EventType(str, Enum):
     PAGE_NAVIGATED = "page.navigated"
     DATA_EXTRACTED = "data.extracted"
     SCREENSHOT_CAPTURED = "screenshot.captured"
+    SECURITY_ALERT = "security.alert"
     LOOP_OBSERVED = "loop.observed"
     LOOP_PLANNED = "loop.planned"
     LOOP_ACTED = "loop.acted"

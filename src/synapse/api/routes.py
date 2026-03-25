@@ -40,6 +40,7 @@ from synapse.models.task import (
 )
 from synapse.runtime.orchestrator import RuntimeOrchestrator
 from synapse.runtime.security import SandboxPermissionError, SandboxRateLimitError
+from synapse.runtime.safety import SecurityAlertError
 from synapse.runtime.session import BrowserSession
 
 
@@ -69,6 +70,8 @@ async def navigate(
 ) -> BrowserSession:
     try:
         return await orchestrator.navigate(request)
+    except SecurityAlertError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxPermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxRateLimitError as exc:
@@ -82,6 +85,8 @@ async def open_page(
 ) -> BrowserState:
     try:
         return await orchestrator.open(request)
+    except SecurityAlertError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxPermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxRateLimitError as exc:
@@ -95,6 +100,8 @@ async def click(
 ) -> BrowserState:
     try:
         return await orchestrator.click(request)
+    except SecurityAlertError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxPermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxRateLimitError as exc:
@@ -108,6 +115,8 @@ async def type_text(
 ) -> BrowserState:
     try:
         return await orchestrator.type(request)
+    except SecurityAlertError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxPermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxRateLimitError as exc:
@@ -121,6 +130,8 @@ async def extract(
 ) -> ExtractionResult:
     try:
         return await orchestrator.extract(request)
+    except SecurityAlertError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxPermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxRateLimitError as exc:
@@ -134,6 +145,8 @@ async def structured_extract(
 ) -> ExtractionResult:
     try:
         return await orchestrator.structured_extract(request)
+    except SecurityAlertError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxPermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxRateLimitError as exc:
@@ -147,6 +160,8 @@ async def screenshot(
 ) -> ScreenshotResult:
     try:
         return await orchestrator.screenshot(request)
+    except SecurityAlertError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxPermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxRateLimitError as exc:
@@ -160,6 +175,8 @@ async def get_layout(
 ) -> StructuredPageModel:
     try:
         return await orchestrator.get_layout(request)
+    except SecurityAlertError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxPermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxRateLimitError as exc:
@@ -173,6 +190,8 @@ async def find_element(
 ) -> list[PageElementMatch]:
     try:
         return await orchestrator.find_element(request)
+    except SecurityAlertError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxPermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxRateLimitError as exc:
@@ -186,6 +205,8 @@ async def inspect(
 ) -> PageInspection:
     try:
         return await orchestrator.inspect(request)
+    except SecurityAlertError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxPermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxRateLimitError as exc:
@@ -309,6 +330,8 @@ async def call_tool(
 ) -> dict[str, object]:
     try:
         return await orchestrator.call_tool(request.tool_name, request.arguments, agent_id=request.agent_id)
+    except SecurityAlertError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxPermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SandboxRateLimitError as exc:
@@ -333,7 +356,10 @@ async def execute_task(
     request: TaskRequest,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ):
-    return await orchestrator.execute_task(request)
+    try:
+        return await orchestrator.execute_task(request)
+    except SecurityAlertError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
 @router.post("/tasks/create", response_model=TaskRecord)

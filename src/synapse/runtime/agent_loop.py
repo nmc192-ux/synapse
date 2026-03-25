@@ -1,12 +1,13 @@
 import asyncio
 import uuid
 
-from synapse.models.browser import ClickRequest, ExtractRequest, OpenRequest, ScreenshotRequest, TypeRequest
+from synapse.models.browser import ClickRequest, ExtractRequest, OpenRequest, ScreenshotRequest, StructuredPageModel, TypeRequest
 from synapse.models.events import EventType, RuntimeEvent
 from synapse.models.loop import AgentAction, AgentActionType, LoopObservation, LoopPlan, LoopReflection
 from synapse.models.task import TaskRequest, TaskResult, TaskStatus
 from synapse.runtime.browser import BrowserRuntime
 from synapse.runtime.security import AgentSecuritySandbox
+from synapse.runtime.safety import AgentSafetyLayer, SecurityAlertError
 from synapse.transports.websocket_manager import WebSocketManager
 
 
@@ -16,10 +17,12 @@ class EventDrivenAgentLoop:
         browser: BrowserRuntime,
         sockets: WebSocketManager,
         sandbox: AgentSecuritySandbox,
+        safety: AgentSafetyLayer,
     ) -> None:
         self.browser = browser
         self.sockets = sockets
         self.sandbox = sandbox
+        self.safety = safety
 
     async def run(self, task: TaskRequest) -> TaskResult:
         if task.session_id is None:
@@ -114,6 +117,7 @@ class EventDrivenAgentLoop:
             self.sandbox.authorize_domain(task.agent_id, action.url)
             self.sandbox.consume_browser_action(task.agent_id)
             result = await self.browser.open(task.session_id, action.url)
+            await self._ensure_page_safe(task, result.page, "browser.open")
             return result.model_dump(mode="json")
 
         if action.type == AgentActionType.CLICK:
@@ -121,7 +125,9 @@ class EventDrivenAgentLoop:
                 raise ValueError("click action requires selector")
             self.sandbox.authorize_domain(task.agent_id, self.browser.current_url(task.session_id))
             self.sandbox.consume_browser_action(task.agent_id)
+            await self._ensure_current_page_safe(task, "browser.click")
             result = await self.browser.click(task.session_id, action.selector)
+            await self._ensure_page_safe(task, result.page, "browser.click")
             return result.model_dump(mode="json")
 
         if action.type == AgentActionType.TYPE:
@@ -129,7 +135,9 @@ class EventDrivenAgentLoop:
                 raise ValueError("type action requires selector")
             self.sandbox.authorize_domain(task.agent_id, self.browser.current_url(task.session_id))
             self.sandbox.consume_browser_action(task.agent_id)
+            await self._ensure_current_page_safe(task, "browser.type")
             result = await self.browser.type(task.session_id, action.selector, action.text or "")
+            await self._ensure_page_safe(task, result.page, "browser.type")
             return result.model_dump(mode="json")
 
         if action.type == AgentActionType.EXTRACT:
@@ -137,13 +145,17 @@ class EventDrivenAgentLoop:
                 raise ValueError("extract action requires selector")
             self.sandbox.authorize_domain(task.agent_id, self.browser.current_url(task.session_id))
             self.sandbox.consume_browser_action(task.agent_id)
+            await self._ensure_current_page_safe(task, "browser.extract")
             result = await self.browser.extract(task.session_id, action.selector, action.attribute)
+            await self._ensure_page_safe(task, result.page, "browser.extract")
             return result.model_dump(mode="json")
 
         if action.type == AgentActionType.SCREENSHOT:
             self.sandbox.authorize_domain(task.agent_id, self.browser.current_url(task.session_id))
             self.sandbox.consume_browser_action(task.agent_id)
+            await self._ensure_current_page_safe(task, "browser.screenshot")
             result = await self.browser.screenshot(task.session_id)
+            await self._ensure_page_safe(task, result.page, "browser.screenshot")
             return result.model_dump(mode="json")
 
         raise ValueError(f"Unsupported action type: {action.type}")
@@ -187,3 +199,20 @@ class EventDrivenAgentLoop:
             )
 
         return actions
+
+    async def _ensure_current_page_safe(self, task: TaskRequest, action: str) -> None:
+        page = await self.browser.get_layout(task.session_id)
+        await self._ensure_page_safe(task, page, action)
+
+    async def _ensure_page_safe(self, task: TaskRequest, page: StructuredPageModel, action: str) -> None:
+        finding = self.safety.inspect_page(page, action)
+        if finding is not None:
+            await self.sockets.broadcast(
+                RuntimeEvent(
+                    event_type=EventType.SECURITY_ALERT,
+                    session_id=task.session_id,
+                    agent_id=task.agent_id,
+                    payload=finding.model_dump(mode="json"),
+                )
+            )
+            raise SecurityAlertError(finding)

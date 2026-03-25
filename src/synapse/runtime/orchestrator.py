@@ -30,6 +30,7 @@ from synapse.runtime.a2a import A2AHub
 from synapse.runtime.memory import AgentMemoryManager
 from synapse.runtime.registry import AgentRegistry
 from synapse.runtime.security import AgentSecuritySandbox
+from synapse.runtime.safety import AgentSafetyLayer, SecurityAlertError, SecurityFinding
 from synapse.runtime.session import BrowserSession
 from synapse.runtime.task_manager import TaskExecutionManager
 from synapse.runtime.tools import ToolRegistry
@@ -48,6 +49,7 @@ class RuntimeOrchestrator:
         task_manager: TaskExecutionManager,
         sockets: WebSocketManager,
         sandbox: AgentSecuritySandbox,
+        safety: AgentSafetyLayer,
     ) -> None:
         self.browser = browser
         self.agents = agents
@@ -58,6 +60,7 @@ class RuntimeOrchestrator:
         self.task_manager = task_manager
         self.sockets = sockets
         self.sandbox = sandbox
+        self.safety = safety
 
     async def create_session(self, session_id: str | None = None) -> BrowserSession:
         resolved_session_id = session_id or str(uuid.uuid4())
@@ -75,6 +78,12 @@ class RuntimeOrchestrator:
         self.sandbox.authorize_domain(request.agent_id, str(request.url))
         self.sandbox.consume_browser_action(request.agent_id)
         session = await self.browser.navigate(request.session_id, str(request.url))
+        await self._enforce_page_safety(
+            agent_id=request.agent_id,
+            session_id=session.session_id,
+            action="browser.navigate",
+            page=session.page,
+        )
         await self.sockets.broadcast(
             RuntimeEvent(
                 event_type=EventType.PAGE_NAVIGATED,
@@ -88,6 +97,12 @@ class RuntimeOrchestrator:
         self.sandbox.authorize_domain(request.agent_id, str(request.url))
         self.sandbox.consume_browser_action(request.agent_id)
         state = await self.browser.open(request.session_id, str(request.url))
+        await self._enforce_page_safety(
+            agent_id=request.agent_id,
+            session_id=state.session_id,
+            action="browser.open",
+            page=state.page,
+        )
         await self.sockets.broadcast(
             RuntimeEvent(
                 event_type=EventType.PAGE_NAVIGATED,
@@ -98,9 +113,16 @@ class RuntimeOrchestrator:
         return state
 
     async def click(self, request: ClickRequest) -> BrowserState:
+        await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.click")
         self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
         self.sandbox.consume_browser_action(request.agent_id)
         state = await self.browser.click(request.session_id, request.selector)
+        await self._enforce_page_safety(
+            agent_id=request.agent_id,
+            session_id=state.session_id,
+            action="browser.click",
+            page=state.page,
+        )
         await self.sockets.broadcast(
             RuntimeEvent(
                 event_type=EventType.PAGE_NAVIGATED,
@@ -111,9 +133,16 @@ class RuntimeOrchestrator:
         return state
 
     async def type(self, request: TypeRequest) -> BrowserState:
+        await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.type")
         self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
         self.sandbox.consume_browser_action(request.agent_id)
         state = await self.browser.type(request.session_id, request.selector, request.text)
+        await self._enforce_page_safety(
+            agent_id=request.agent_id,
+            session_id=state.session_id,
+            action="browser.type",
+            page=state.page,
+        )
         await self.sockets.broadcast(
             RuntimeEvent(
                 event_type=EventType.PAGE_NAVIGATED,
@@ -124,9 +153,16 @@ class RuntimeOrchestrator:
         return state
 
     async def extract(self, request: ExtractionRequest) -> ExtractionResult:
+        await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.extract")
         self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
         self.sandbox.consume_browser_action(request.agent_id)
         payload = await self.browser.extract(request.session_id, request.selector, request.attribute)
+        await self._enforce_page_safety(
+            agent_id=request.agent_id,
+            session_id=request.session_id,
+            action="browser.extract",
+            page=payload.page,
+        )
         await self.sockets.broadcast(
             RuntimeEvent(
                 event_type=EventType.DATA_EXTRACTED,
@@ -137,9 +173,16 @@ class RuntimeOrchestrator:
         return payload
 
     async def structured_extract(self, request: ExtractRequest) -> ExtractionResult:
+        await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.extract")
         self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
         self.sandbox.consume_browser_action(request.agent_id)
         payload = await self.browser.extract(request.session_id, request.selector, request.attribute)
+        await self._enforce_page_safety(
+            agent_id=request.agent_id,
+            session_id=request.session_id,
+            action="browser.extract",
+            page=payload.page,
+        )
         await self.sockets.broadcast(
             RuntimeEvent(
                 event_type=EventType.DATA_EXTRACTED,
@@ -150,9 +193,16 @@ class RuntimeOrchestrator:
         return payload
 
     async def screenshot(self, request: ScreenshotRequest) -> ScreenshotResult:
+        await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.screenshot")
         self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
         self.sandbox.consume_browser_action(request.agent_id)
         result = await self.browser.screenshot(request.session_id)
+        await self._enforce_page_safety(
+            agent_id=request.agent_id,
+            session_id=request.session_id,
+            action="browser.screenshot",
+            page=result.page,
+        )
         await self.sockets.broadcast(
             RuntimeEvent(
                 event_type=EventType.SCREENSHOT_CAPTURED,
@@ -163,16 +213,19 @@ class RuntimeOrchestrator:
         return result
 
     async def get_layout(self, request: LayoutRequest) -> StructuredPageModel:
+        await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.get_layout")
         self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
         self.sandbox.consume_browser_action(request.agent_id)
         return await self.browser.get_layout(request.session_id)
 
     async def find_element(self, request: FindElementRequest) -> list[PageElementMatch]:
+        await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.find_element")
         self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
         self.sandbox.consume_browser_action(request.agent_id)
         return await self.browser.find_element(request.session_id, request.type, request.text)
 
     async def inspect(self, request: InspectRequest) -> PageInspection:
+        await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.inspect")
         self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
         self.sandbox.consume_browser_action(request.agent_id)
         return await self.browser.inspect(request.session_id, request.selector)
@@ -205,6 +258,7 @@ class RuntimeOrchestrator:
         arguments: dict[str, object],
         agent_id: str | None,
     ) -> dict[str, object]:
+        await self._enforce_tool_safety(agent_id, tool_name, arguments)
         self.sandbox.authorize_tool(agent_id, tool_name)
         self.sandbox.consume_tool_call(agent_id)
         result = await self.tools.call(tool_name, arguments)
@@ -292,6 +346,7 @@ class RuntimeOrchestrator:
         return await self.task_manager.list_active_tasks()
 
     async def execute_task(self, request: TaskRequest) -> TaskResult:
+        await self._enforce_task_safety(request)
         if request.session_id is None:
             session = await self.create_session()
             request = request.model_copy(update={"session_id": session.session_id})
@@ -304,6 +359,7 @@ class RuntimeOrchestrator:
             browser=self.browser,
             sockets=self.sockets,
             sandbox=self.sandbox,
+            safety=self.safety,
         )
         result = await adapter.execute_task(request)
         final_result = result.model_copy(
@@ -324,3 +380,51 @@ class RuntimeOrchestrator:
             )
         )
         return final_result
+
+    async def _ensure_current_page_safe(self, agent_id: str | None, session_id: str, action: str) -> None:
+        page = await self.browser.get_layout(session_id)
+        await self._enforce_page_safety(agent_id, session_id, action, page)
+
+    async def _enforce_page_safety(
+        self,
+        agent_id: str | None,
+        session_id: str | None,
+        action: str,
+        page: StructuredPageModel | None,
+    ) -> None:
+        if page is None:
+            return
+        finding = self.safety.inspect_page(page, action)
+        if finding is not None:
+            await self._raise_security_alert(agent_id, session_id, finding)
+
+    async def _enforce_task_safety(self, request: TaskRequest) -> None:
+        finding = self.safety.validate_task(request)
+        if finding is not None:
+            await self._raise_security_alert(request.agent_id, request.session_id, finding)
+
+    async def _enforce_tool_safety(
+        self,
+        agent_id: str | None,
+        tool_name: str,
+        arguments: dict[str, object],
+    ) -> None:
+        finding = self.safety.validate_tool_call(tool_name, arguments)
+        if finding is not None:
+            await self._raise_security_alert(agent_id, None, finding)
+
+    async def _raise_security_alert(
+        self,
+        agent_id: str | None,
+        session_id: str | None,
+        finding: SecurityFinding,
+    ) -> None:
+        await self.sockets.broadcast(
+            RuntimeEvent(
+                event_type=EventType.SECURITY_ALERT,
+                session_id=session_id,
+                agent_id=agent_id,
+                payload=finding.model_dump(mode="json"),
+            )
+        )
+        raise SecurityAlertError(finding)

@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import json
 import uuid
 
 from synapse.models.browser import StructuredPageModel
 from synapse.models.loop import AgentAction, AgentActionType, LoopEvaluation
 from synapse.models.task import TaskRequest
+from synapse.runtime.llm import LLMProvider
 
 
 class NavigationPlanner:
-    def plan(
+    def __init__(self, llm: LLMProvider | None = None) -> None:
+        self.llm = llm
+
+    async def plan(
         self,
         task: TaskRequest,
         completed_actions: list[AgentAction],
@@ -19,6 +24,94 @@ class NavigationPlanner:
             completed_ids = {action.action_id for action in completed_actions}
             return [action for action in explicit_actions if action.action_id not in completed_ids]
 
+        llm_actions = await self._plan_with_llm(task, completed_actions, current_page)
+        if llm_actions:
+            return llm_actions
+
+        return self._heuristic_plan(task, completed_actions, current_page)
+
+    async def _plan_with_llm(
+        self,
+        task: TaskRequest,
+        completed_actions: list[AgentAction],
+        current_page: StructuredPageModel | None,
+    ) -> list[AgentAction]:
+        if self.llm is None:
+            return []
+
+        completed = [
+            {
+                "type": action.type.value,
+                "selector": action.selector,
+                "text": action.text,
+                "url": action.url,
+                "status": action.status,
+            }
+            for action in completed_actions
+        ]
+        page_context = current_page.model_dump(mode="json") if current_page is not None else None
+        prompt = json.dumps(
+            {
+                "goal": task.goal,
+                "start_url": str(task.start_url) if task.start_url is not None else None,
+                "constraints": task.constraints,
+                "completed_actions": completed,
+                "current_page": page_context,
+                "instruction": (
+                    "Return a JSON array of next browser actions. "
+                    "Allowed action types: open, click, type, extract, screenshot. "
+                    "Each item may include type, selector, text, url, and attribute."
+                ),
+            }
+        )
+        system = (
+            "You generate minimal browser action plans for Synapse. "
+            "Respond with JSON only. Do not include markdown fences."
+        )
+
+        try:
+            raw = await self.llm.generate(prompt=prompt, system=system)
+        except Exception:
+            return []
+
+        try:
+            decoded = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+
+        if not isinstance(decoded, list):
+            return []
+
+        actions: list[AgentAction] = []
+        for spec in decoded:
+            if not isinstance(spec, dict):
+                continue
+            action_type = spec.get("type")
+            if action_type not in {item.value for item in AgentActionType}:
+                continue
+            try:
+                actions.append(
+                    AgentAction(
+                        action_id=str(spec.get("action_id", uuid.uuid4())),
+                        type=AgentActionType(action_type),
+                        selector=spec.get("selector"),
+                        text=spec.get("text"),
+                        url=spec.get("url"),
+                        attribute=spec.get("attribute"),
+                    )
+                )
+            except ValueError:
+                continue
+
+        completed_ids = {action.action_id for action in completed_actions}
+        return [action for action in actions if action.action_id not in completed_ids]
+
+    def _heuristic_plan(
+        self,
+        task: TaskRequest,
+        completed_actions: list[AgentAction],
+        current_page: StructuredPageModel | None = None,
+    ) -> list[AgentAction]:
         goal = task.goal.lower()
         plan: list[AgentAction] = []
         completed_types = {action.type for action in completed_actions}
@@ -112,7 +205,10 @@ class NavigationPlanner:
 
 
 class NavigationEvaluator:
-    def evaluate(
+    def __init__(self, llm: LLMProvider | None = None) -> None:
+        self.planner = NavigationPlanner(llm=llm)
+
+    async def evaluate(
         self,
         task: TaskRequest,
         action: AgentAction,
@@ -122,12 +218,11 @@ class NavigationEvaluator:
         current_page: StructuredPageModel | None = None,
     ) -> LoopEvaluation:
         success, notes = self._success_for_action(action, action_result)
-        next_actions = remaining_actions
+        next_actions = [candidate.model_copy() for candidate in remaining_actions]
 
         if success and not next_actions:
-            planner = NavigationPlanner()
-            next_actions = planner.plan(task, completed_actions=completed_actions, current_page=current_page)
-            next_actions = [candidate for candidate in next_actions if candidate.action_id != action.action_id]
+            planned = await self.planner.plan(task, completed_actions=completed_actions, current_page=current_page)
+            next_actions = [candidate for candidate in planned if candidate.action_id != action.action_id]
 
         return LoopEvaluation(
             task_id=task.task_id,

@@ -36,6 +36,17 @@ export SYNAPSE_POSTGRES_DSN=postgresql://postgres:postgres@localhost:5432/synaps
 uvicorn synapse.main:app --reload
 ```
 
+Optional LLM planner configuration:
+
+```bash
+export SYNAPSE_LLM_PROVIDER=openai
+export OPENAI_API_KEY=...
+export OPENAI_MODEL=gpt-4o-mini
+```
+
+Supported providers are `openai`, `anthropic`, and `local`. Local models can be
+configured with `SYNAPSE_LOCAL_MODEL_ENDPOINT` and `SYNAPSE_LOCAL_MODEL_NAME`.
+
 ## Project layout
 
 ```text
@@ -78,6 +89,8 @@ Example agents are available in `examples/` for OpenClaw, Codex, and Claude Code
 
 Agent actions are sandboxed by default. Register each agent with explicit
 `allowed_domains`, `allowed_tools`, and rate limits before issuing browser or tool calls.
+If `SYNAPSE_LLM_PROVIDER` is configured, the navigation planner will use the selected
+LLM provider before falling back to the built-in heuristic planner.
 
 ## JavaScript SDK
 

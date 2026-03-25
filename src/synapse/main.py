@@ -7,6 +7,7 @@ from synapse.config import settings
 from synapse.runtime.a2a import A2AHub
 from synapse.runtime.budget import AgentBudgetManager
 from synapse.runtime.browser import BrowserRuntime
+from synapse.runtime.llm import create_llm_provider
 from synapse.runtime.memory import AgentMemoryManager
 from synapse.runtime.messaging import AgentMessageBus
 from synapse.runtime.orchestrator import RuntimeOrchestrator
@@ -29,6 +30,7 @@ task_manager = TaskExecutionManager()
 sandbox = AgentSecuritySandbox(agent_registry)
 safety = AgentSafetyLayer()
 budget_manager = AgentBudgetManager()
+llm_provider = create_llm_provider(settings)
 orchestrator = RuntimeOrchestrator(
     browser=browser_runtime,
     agents=agent_registry,
@@ -41,6 +43,7 @@ orchestrator = RuntimeOrchestrator(
     sandbox=sandbox,
     safety=safety,
     budget_manager=budget_manager,
+    llm=llm_provider,
 )
 a2a_hub.set_task_executor(orchestrator.execute_task)
 

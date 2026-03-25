@@ -1,3 +1,5 @@
+import asyncio
+
 from synapse.connectors.codex import CodexConnector
 from fastapi.testclient import TestClient
 
@@ -329,7 +331,7 @@ def test_navigation_planner_generates_actions_from_goal_and_start_url() -> None:
         start_url="https://example.com",
     )
 
-    actions = planner.plan(task, completed_actions=[])
+    actions = asyncio.run(planner.plan(task, completed_actions=[]))
 
     assert [action.type for action in actions] == [
         AgentActionType.OPEN,
@@ -346,15 +348,17 @@ def test_navigation_evaluator_marks_extract_success() -> None:
         goal="Extract the main heading",
     )
     action = AgentAction(action_id="extract-1", type=AgentActionType.EXTRACT, selector="h1")
-    evaluation = evaluator.evaluate(
-        task,
-        action,
-        action_result={
-            "matches": [{"selector": "h1", "text": "Example Domain"}],
-            "page": {"title": "Example", "url": "https://example.com"},
-        },
-        completed_actions=[action],
-        remaining_actions=[],
+    evaluation = asyncio.run(
+        evaluator.evaluate(
+            task,
+            action,
+            action_result={
+                "matches": [{"selector": "h1", "text": "Example Domain"}],
+                "page": {"title": "Example", "url": "https://example.com"},
+            },
+            completed_actions=[action],
+            remaining_actions=[],
+        )
     )
 
     assert evaluation.success is True

@@ -28,6 +28,7 @@ from synapse.runtime.browser import BrowserRuntime
 from synapse.runtime.messaging import AgentMessageBus
 from synapse.runtime.a2a import A2AHub
 from synapse.runtime.budget import AgentBudgetLimitExceeded, AgentBudgetManager
+from synapse.runtime.llm import LLMProvider
 from synapse.runtime.memory import AgentMemoryManager
 from synapse.runtime.registry import AgentRegistry
 from synapse.runtime.security import AgentSecuritySandbox
@@ -52,6 +53,7 @@ class RuntimeOrchestrator:
         sandbox: AgentSecuritySandbox,
         safety: AgentSafetyLayer,
         budget_manager: AgentBudgetManager,
+        llm: LLMProvider | None = None,
     ) -> None:
         self.browser = browser
         self.agents = agents
@@ -64,6 +66,7 @@ class RuntimeOrchestrator:
         self.sandbox = sandbox
         self.safety = safety
         self.budget_manager = budget_manager
+        self.llm = llm
 
     async def create_session(self, session_id: str | None = None) -> BrowserSession:
         resolved_session_id = session_id or str(uuid.uuid4())
@@ -411,6 +414,7 @@ class RuntimeOrchestrator:
             safety=self.safety,
             memory_manager=self.memory_manager,
             budget_manager=self.budget_manager,
+            llm=self.llm,
         )
         result = await adapter.execute_task(request)
         final_result = result.model_copy(

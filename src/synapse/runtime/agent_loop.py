@@ -8,6 +8,7 @@ from synapse.models.memory import MemoryStoreRequest, MemoryType
 from synapse.models.task import TaskRequest, TaskResult, TaskStatus
 from synapse.runtime.budget import AgentBudgetLimitExceeded, AgentBudgetManager
 from synapse.runtime.browser import BrowserRuntime
+from synapse.runtime.llm import LLMProvider
 from synapse.runtime.memory import AgentMemoryManager
 from synapse.runtime.planning import NavigationEvaluator, NavigationPlanner
 from synapse.runtime.security import AgentSecuritySandbox
@@ -25,6 +26,7 @@ class EventDrivenAgentLoop:
         safety: AgentSafetyLayer,
         memory_manager: AgentMemoryManager,
         budget_manager: AgentBudgetManager,
+        llm: LLMProvider | None = None,
     ) -> None:
         self.definition = definition
         self.browser = browser
@@ -33,8 +35,8 @@ class EventDrivenAgentLoop:
         self.safety = safety
         self.memory_manager = memory_manager
         self.budget_manager = budget_manager
-        self.planner = NavigationPlanner()
-        self.evaluator = NavigationEvaluator()
+        self.planner = NavigationPlanner(llm=llm)
+        self.evaluator = NavigationEvaluator(llm=llm)
 
     async def run(self, task: TaskRequest) -> TaskResult:
         if task.session_id is None:
@@ -61,7 +63,7 @@ class EventDrivenAgentLoop:
             if current_page is not None:
                 await self._increment_tokens(task, self._page_text(current_page))
             await self._store_observation_memory(task, observed, current_page)
-            remaining_actions = self.planner.plan(task, completed_actions=completed_actions, current_page=current_page)
+            remaining_actions = await self.planner.plan(task, completed_actions=completed_actions, current_page=current_page)
             await self._broadcast_plan(task, remaining_actions)
 
             while remaining_actions:
@@ -87,7 +89,7 @@ class EventDrivenAgentLoop:
                     if before_url is None or current_page.url != before_url:
                         await self._increment_page(task)
                     await self._increment_tokens(task, self._page_text(current_page))
-                evaluation = self.evaluator.evaluate(
+                evaluation = await self.evaluator.evaluate(
                     task,
                     action,
                     result,

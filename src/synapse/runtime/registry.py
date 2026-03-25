@@ -9,6 +9,7 @@ from synapse.adapters.openclaw import OpenClawAdapter
 from synapse.models.agent import AgentDefinition, AgentDiscoveryEntry, AgentKind
 from synapse.runtime.budget import AgentBudgetManager
 from synapse.runtime.browser import BrowserRuntime
+from synapse.runtime.llm import LLMProvider
 from synapse.runtime.memory import AgentMemoryManager
 from synapse.runtime.security import AgentSecuritySandbox
 from synapse.runtime.safety import AgentSafetyLayer
@@ -75,6 +76,7 @@ class AgentRegistry:
         safety: AgentSafetyLayer,
         memory_manager: AgentMemoryManager,
         budget_manager: AgentBudgetManager,
+        llm: LLMProvider | None = None,
     ) -> AgentAdapter:
         definition = self.get(agent_id)
         adapter_map: dict[AgentKind, type[AgentAdapter]] = {
@@ -93,4 +95,5 @@ class AgentRegistry:
             safety=safety,
             memory_manager=memory_manager,
             budget_manager=budget_manager,
+            llm=llm,
         )

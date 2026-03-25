@@ -5,6 +5,7 @@ from synapse.models.task import TaskRequest, TaskResult
 from synapse.runtime.agent_loop import EventDrivenAgentLoop
 from synapse.runtime.budget import AgentBudgetManager
 from synapse.runtime.browser import BrowserRuntime
+from synapse.runtime.llm import LLMProvider
 from synapse.runtime.memory import AgentMemoryManager
 from synapse.runtime.security import AgentSecuritySandbox
 from synapse.runtime.safety import AgentSafetyLayer
@@ -21,6 +22,7 @@ class AgentAdapter(ABC):
         safety: AgentSafetyLayer,
         memory_manager: AgentMemoryManager,
         budget_manager: AgentBudgetManager,
+        llm: LLMProvider | None = None,
     ) -> None:
         self.definition = definition
         self.loop = EventDrivenAgentLoop(
@@ -31,6 +33,7 @@ class AgentAdapter(ABC):
             safety=safety,
             memory_manager=memory_manager,
             budget_manager=budget_manager,
+            llm=llm,
         )
 
     @abstractmethod

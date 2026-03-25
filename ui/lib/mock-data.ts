@@ -94,12 +94,34 @@ export const initialState: DashboardState = {
       from: "openclaw-example",
       to: "codex-example",
       content: "I found candidate repos. Compare them against the current site copy.",
+      kind: "agent",
     },
     {
       id: "message-2",
-      from: "codex-example",
-      to: "claude-code-example",
-      content: "Page snapshot is stable. Draft reflection after extraction completes.",
+      from: "research-agent",
+      to: "analysis-agent",
+      content: "REQUEST_TASK accepted. Delegating page synthesis after extraction completes.",
+      kind: "a2a",
+    },
+  ],
+  tasks: [
+    {
+      id: "task-301",
+      goal: "Inspect current page and capture a screenshot",
+      status: "running",
+      assignedAgent: "codex-example",
+    },
+    {
+      id: "task-302",
+      goal: "Search GitHub for similar browser runtimes",
+      status: "claimed",
+      assignedAgent: "openclaw-example",
+    },
+    {
+      id: "task-303",
+      goal: "Summarize current findings into memory",
+      status: "pending",
+      assignedAgent: "claude-code-example",
     },
   ],
   page: {
@@ -117,6 +139,16 @@ export const initialState: DashboardState = {
       { tag: "p", text: "Illustrative example content", selectorHint: "p" },
       { tag: "a", text: "More information", selectorHint: "a[href]" },
       { tag: "button", text: "Inspect runtime", selectorHint: "button" },
+    ],
+    sections: [
+      {
+        heading: "Primary Content",
+        text: "This domain is for use in illustrative examples in documents.",
+      },
+      {
+        heading: "Operator Notes",
+        text: "Structured page data is flowing through the runtime feed.",
+      },
     ],
   },
 };

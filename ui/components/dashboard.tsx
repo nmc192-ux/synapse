@@ -35,6 +35,8 @@ export function Dashboard() {
     ...state.thoughts.map((item) => item.agent),
   ]).size;
   const lastSignal = state.activity[0]?.timestamp ?? "live";
+  const activeTasks = state.tasks.filter((task) => task.status !== "completed").length;
+  const a2aMessages = state.messages.filter((message) => message.kind === "a2a").length;
 
   return (
     <main className="shell">
@@ -62,6 +64,10 @@ export function Dashboard() {
               <span className="stat-label">Last Signal</span>
               <span className="stat-value">{lastSignal}</span>
             </div>
+            <div className="stat">
+              <span className="stat-label">Active Tasks</span>
+              <span className="stat-value">{activeTasks}</span>
+            </div>
           </div>
         </header>
 
@@ -76,10 +82,22 @@ export function Dashboard() {
               </div>
 
               <div className="page-content">
-                <div className="excerpt-card">
-                  <span className="muted">Structured Snapshot</span>
-                  <h3>{state.page.title}</h3>
-                  <p>{state.page.excerpt}</p>
+                <div className="page-stage">
+                  <div className="excerpt-card">
+                    <span className="muted">Current Page View</span>
+                    <h3>{state.page.title}</h3>
+                    <p>{state.page.excerpt}</p>
+                  </div>
+
+                  <div className="section-stack">
+                    {state.page.sections.map((section, index) => (
+                      <article className="section-card" key={`${section.heading}-${index}`}>
+                        <span>Section</span>
+                        <strong>{section.heading}</strong>
+                        <p>{section.text}</p>
+                      </article>
+                    ))}
+                  </div>
                 </div>
 
                 <div className="mini-grid">
@@ -161,12 +179,29 @@ export function Dashboard() {
                 ))}
               </div>
             </Panel>
+
+            <Panel title="Task Status" badge={`${state.tasks.length} tasks`}>
+              <div className="task-list">
+                {state.tasks.map((task) => (
+                  <article className={`task-card task-${task.status}`.trim()} key={task.id}>
+                    <span>{task.status}</span>
+                    <strong>{task.goal}</strong>
+                    <p className="mono">
+                      {task.id} · {task.assignedAgent}
+                    </p>
+                  </article>
+                ))}
+              </div>
+            </Panel>
           </div>
 
-          <Panel title="Agent Communication" badge={`${state.messages.length} exchanges`}>
+          <Panel title="A2A Messages" badge={`${a2aMessages} routed`}>
             <div className="messages">
               {state.messages.map((message) => (
-                <article className="message-card" key={message.id}>
+                <article
+                  className={`message-card ${message.kind === "a2a" ? "a2a" : "agent"}`.trim()}
+                  key={message.id}
+                >
                   <div className="message-route">
                     <span>{message.from}</span>
                     <strong>{message.to}</strong>

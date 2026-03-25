@@ -39,6 +39,7 @@ export type MessageItem = {
   from: string;
   to: string;
   content: string;
+  kind: "agent" | "a2a";
 };
 
 export type PageElementView = {
@@ -47,12 +48,25 @@ export type PageElementView = {
   selectorHint: string;
 };
 
+export type PageSectionView = {
+  heading: string;
+  text: string;
+};
+
 export type PageState = {
   url: string;
   title: string;
   excerpt: string;
   links: string[];
   elements: PageElementView[];
+  sections: PageSectionView[];
+};
+
+export type TaskItem = {
+  id: string;
+  goal: string;
+  status: string;
+  assignedAgent: string;
 };
 
 export type DashboardState = {
@@ -62,5 +76,6 @@ export type DashboardState = {
   actions: ActionItem[];
   memory: MemoryItem[];
   messages: MessageItem[];
+  tasks: TaskItem[];
   page: PageState;
 };

@@ -9,6 +9,7 @@ import {
   MemoryItem,
   MessageItem,
   SynapseEvent,
+  TaskItem,
   ThoughtItem,
 } from "@/lib/types";
 
@@ -45,6 +46,7 @@ function applyEvent(current: DashboardState, event: SynapseEvent): DashboardStat
   const action = buildAction(event, payload);
   const message = buildMessage(event, payload);
   const memory = buildMemory(event, payload);
+  const task = buildTask(event, payload);
 
   return {
     ...current,
@@ -54,6 +56,7 @@ function applyEvent(current: DashboardState, event: SynapseEvent): DashboardStat
     actions: action ? [action, ...current.actions].slice(0, 10) : current.actions,
     memory: memory ? [memory, ...current.memory].slice(0, 6) : current.memory,
     messages: message ? [message, ...current.messages].slice(0, 8) : current.messages,
+    tasks: task ? mergeTask(current.tasks, task).slice(0, 8) : current.tasks,
     page: derivePage(current.page, event, payload),
   };
 }
@@ -138,6 +141,7 @@ function buildMessage(
     from,
     to,
     content,
+    kind: event.event_type === "a2a.message" ? "a2a" : "agent",
   };
 }
 
@@ -153,6 +157,22 @@ function buildMemory(
     id: `${event.event_type}-memory-${event.timestamp ?? crypto.randomUUID()}`,
     key: event.event_type,
     value: summarizeEvent(event.event_type, payload),
+  };
+}
+
+function buildTask(
+  event: SynapseEvent,
+  payload: Record<string, unknown>,
+): TaskItem | null {
+  if (event.event_type !== "task.updated") {
+    return null;
+  }
+
+  return {
+    id: stringify(payload.task_id) ?? stringify(payload.id) ?? crypto.randomUUID(),
+    goal: stringify(payload.goal) ?? "Runtime task",
+    status: stringify(payload.status) ?? "running",
+    assignedAgent: stringify(payload.assigned_agent) ?? event.agent_id ?? "unassigned",
   };
 }
 
@@ -229,6 +249,13 @@ function derivePage(
           .slice(0, 6)
       : current.links,
     elements: elements.length > 0 ? elements : current.elements,
+    sections:
+      sections.length > 0
+        ? sections.slice(0, 4).map((section) => ({
+            heading: stringify(section.heading) ?? "Untitled section",
+            text: stringify(section.text) ?? "",
+          }))
+        : current.sections,
   };
 }
 
@@ -241,7 +268,7 @@ function summarizeEvent(eventType: string, payload: Record<string, unknown>): st
     case "tool.called":
       return `Tool call finished: ${stringify(payload.tool_name) ?? "unknown tool"}.`;
     case "task.updated":
-      return `Task status updated with latest runtime artifacts.`;
+      return `Task ${stringify(payload.status) ?? "running"} for ${stringify(payload.goal) ?? "runtime work"}.`;
     case "loop.observed":
       return `Observed ${stringify(payload.event_count) ?? "0"} fresh events before planning.`;
     case "loop.planned":
@@ -284,4 +311,9 @@ function toRecordArray(value: unknown): Record<string, unknown>[] {
     return [];
   }
   return value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object");
+}
+
+function mergeTask(current: TaskItem[], next: TaskItem): TaskItem[] {
+  const remaining = current.filter((task) => task.id !== next.id);
+  return [next, ...remaining];
 }

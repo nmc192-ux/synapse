@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import httpx
 
+from synapse.models.a2a import A2AMessageType, AgentWireMessage
 from synapse.models.agent import AgentBudgetUsage, AgentDefinition, AgentExecutionLimits, AgentKind
 from synapse.models.browser import (
     BrowserState,
@@ -30,6 +31,7 @@ from synapse.models.message import AgentMessage
 from synapse.models.memory import MemoryRecord, MemorySearchRequest, MemorySearchResult, MemoryStoreRequest, MemoryType
 from synapse.models.plugin import ToolDescriptor
 from synapse.runtime.session import BrowserSession
+from synapse.security.signing import MessageSigner
 
 
 class SynapseClient:
@@ -42,6 +44,7 @@ class SynapseClient:
         self.base_url = base_url.rstrip("/")
         self._http = httpx.Client(base_url=self.base_url, timeout=timeout)
         self.agent_id = agent_id
+        self._message_signer = MessageSigner()
 
     @property
     def browser(self) -> SynapseBrowser:
@@ -99,6 +102,37 @@ class SynapseClient:
         response = self._http.post("/api/messages", json=message.model_dump(mode="json"))
         response.raise_for_status()
         return AgentMessage.model_validate(response.json())
+
+    def sign_a2a_message(
+        self,
+        *,
+        agent_id: str,
+        target_agent: str | None,
+        message_type: A2AMessageType | str,
+        payload: dict[str, object] | None = None,
+        signing_key: str,
+        key_id: str = "default",
+        nonce: str | None = None,
+    ) -> AgentWireMessage:
+        message = AgentWireMessage(
+            type=message_type,
+            agent=agent_id,
+            sender_id=agent_id,
+            target_agent=target_agent,
+            recipient_id=target_agent,
+            payload=payload or {},
+        )
+        return self._message_signer.sign_wire_message(
+            message,
+            signing_key=signing_key,
+            key_id=key_id,
+            nonce=nonce,
+        )
+
+    def send_signed_a2a_message(self, message: AgentWireMessage) -> AgentWireMessage:
+        response = self._http.post("/api/agents/message", json=message.model_dump(mode="json"))
+        response.raise_for_status()
+        return AgentWireMessage.model_validate(response.json())
 
     def get_budget(self, agent_id: str | None = None) -> AgentBudgetUsage:
         resolved_agent_id = agent_id or self.agent_id
@@ -289,6 +323,31 @@ class SynapseBrowser:
             content=content,
             metadata=metadata,
         )
+
+    def sign_a2a_message(
+        self,
+        *,
+        message_type: A2AMessageType | str,
+        payload: dict[str, object] | None = None,
+        signing_key: str,
+        target_agent: str | None = None,
+        key_id: str = "default",
+        nonce: str | None = None,
+    ) -> AgentWireMessage:
+        if self._agent_id is None:
+            raise ValueError("agent_id is required to sign an A2A message.")
+        return self._client.sign_a2a_message(
+            agent_id=self._agent_id,
+            target_agent=target_agent,
+            message_type=message_type,
+            payload=payload,
+            signing_key=signing_key,
+            key_id=key_id,
+            nonce=nonce,
+        )
+
+    def send_signed_a2a_message(self, message: AgentWireMessage) -> AgentWireMessage:
+        return self._client.send_signed_a2a_message(message)
 
     def fork(self, session_id: str | None = None) -> SynapseBrowser:
         return SynapseBrowser(

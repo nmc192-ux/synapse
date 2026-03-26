@@ -5,7 +5,7 @@ from typing import Any
 
 from fastapi import WebSocket
 
-from synapse.models.a2a import A2AEnvelope, A2AMessageType, AgentPresence, AgentRegistrationRequest, AgentWireMessage
+from synapse.models.a2a import A2AEnvelope, A2AMessageType, AgentIdentityRecord, AgentPresence, AgentRegistrationRequest, AgentWireMessage
 from synapse.models.agent import AgentDefinition, AgentDiscoveryEntry, AgentKind
 from synapse.models.runtime_event import EventType, RuntimeEvent
 from synapse.runtime.compression.base import CompressionProvider
@@ -14,6 +14,8 @@ from synapse.models.runtime_state import AgentRuntimeStatus, ConnectionState
 from synapse.models.task import TaskRequest, TaskResult
 from synapse.runtime.registry import AgentRegistry
 from synapse.runtime.state_store import RuntimeStateStore
+from synapse.security.identity import AgentIdentityManager
+from synapse.security.signing import MessageExpiredError, MessageReplayError, MessageSigner, SignatureValidationError
 from synapse.transports.websocket_manager import WebSocketManager
 
 
@@ -35,6 +37,9 @@ class A2AHub:
         self._state_store = state_store
         self._sockets = sockets
         self._compression_provider = compression_provider or NoOpCompressionProvider()
+        self._signer = MessageSigner()
+        self._identity_manager = AgentIdentityManager("synapse-agent-identity")
+        self._seen_nonces: dict[str, set[str]] = {}
 
     def set_state_store(self, state_store: RuntimeStateStore) -> None:
         self._state_store = state_store
@@ -63,7 +68,17 @@ class A2AHub:
             execution_policy=request.execution_policy,
             metadata=request.metadata,
         )
-        return self.agents.register(definition)
+        agent = self.agents.register(definition)
+        identity = self._identity_manager.issue_identity(
+            agent_id=request.agent_id,
+            verification_key=request.verification_key or f"{request.agent_id}-verification-key",
+            key_id=request.key_id,
+            reputation=request.reputation,
+            capabilities=request.capabilities,
+            issued_at=request.issued_at,
+        )
+        self.agents.set_identity(identity)
+        return agent
 
     async def connect(self, agent_id: str, websocket: WebSocket) -> None:
         await websocket.accept()
@@ -100,6 +115,7 @@ class A2AHub:
         envelope = A2AEnvelope.model_validate(
             {**payload, "sender_agent_id": sender_agent_id}
         )
+        self._verify_envelope(envelope)
 
         if envelope.type in {A2AMessageType.DISCOVER, A2AMessageType.DISCOVER_AGENTS}:
             response = A2AEnvelope(
@@ -161,7 +177,6 @@ class A2AHub:
         websocket = self._connections.get(envelope.recipient_agent_id)
         if websocket is None:
             raise KeyError(f"Agent is not connected: {envelope.recipient_agent_id}")
-
         await websocket.send_json(self.to_wire_message(envelope).model_dump(mode="json"))
         await self.heartbeat(envelope.recipient_agent_id)
         await self._emit_compact_message(envelope)
@@ -184,16 +199,25 @@ class A2AHub:
         payload = {**envelope.payload, "message_id": envelope.message_id}
         if envelope.correlation_id:
             payload["correlation_id"] = envelope.correlation_id
-        return AgentWireMessage(
+        identity = self.agents.get_identity(envelope.sender_agent_id)
+        wire_message = AgentWireMessage(
+            message_id=envelope.message_id,
             type=message_type,
             agent=envelope.sender_agent_id,
+            sender_id=envelope.sender_agent_id,
             target_agent=target_agent,
+            recipient_id=target_agent,
+            key_id=identity.key_id,
+            nonce=envelope.nonce or str(uuid.uuid4()),
+            timestamp=envelope.timestamp,
             payload=payload,
         )
+        return self._signer.sign_wire_message(wire_message, signing_key=identity.verification_key, key_id=identity.key_id)
 
     def from_wire_message(self, message: AgentWireMessage) -> A2AEnvelope:
+        self._verify_wire_message(message)
         payload = dict(message.payload)
-        message_id = str(payload.pop("message_id", uuid.uuid4()))
+        message_id = str(payload.pop("message_id", message.message_id))
         correlation_id = payload.pop("correlation_id", None)
         if message.type == A2AMessageType.SEND_MESSAGE:
             envelope_type = A2AMessageType.REQUEST
@@ -210,7 +234,20 @@ class A2AHub:
             sender_agent_id=message.agent,
             recipient_agent_id=message.target_agent,
             correlation_id=correlation_id,
+            key_id=message.key_id,
+            nonce=message.nonce,
+            timestamp=message.timestamp,
+            signature=message.signature,
             payload=payload,
+        )
+
+    def sign_wire_message(self, message: AgentWireMessage) -> AgentWireMessage:
+        identity = self.agents.get_identity(message.agent)
+        return self._signer.sign_wire_message(
+            message,
+            signing_key=identity.verification_key,
+            key_id=identity.key_id,
+            nonce=message.nonce or str(uuid.uuid4()),
         )
 
     def _build_error(
@@ -256,6 +293,8 @@ class A2AHub:
                     "type": envelope.type.value,
                     "sender_agent_id": envelope.sender_agent_id,
                     "recipient_agent_id": envelope.recipient_agent_id,
+                    "key_id": envelope.key_id,
+                    "nonce": envelope.nonce,
                     "compact_payload": compact_payload,
                     "correlation_id": envelope.correlation_id,
                 },
@@ -332,6 +371,31 @@ class A2AHub:
             return str(run_id) if run_id is not None else None
         run_id = payload.get("run_id")
         return str(run_id) if run_id is not None else None
+
+    def _verify_wire_message(self, message: AgentWireMessage) -> None:
+        identity = self.agents.get_identity(message.agent)
+        seen = self._seen_nonces.setdefault(message.agent, set())
+        self._signer.verify_wire_message(
+            message,
+            verification_key=identity.verification_key,
+            max_age_seconds=300,
+            seen_nonces=seen,
+        )
+
+    def _verify_envelope(self, envelope: A2AEnvelope) -> None:
+        if envelope.signature is None:
+            return
+        identity = self.agents.get_identity(envelope.sender_agent_id)
+        seen = self._seen_nonces.setdefault(envelope.sender_agent_id, set())
+        self._signer._verify_signature(
+            envelope.signature,
+            self._signer._envelope_payload(envelope),
+            identity.verification_key,
+            timestamp=envelope.timestamp,
+            nonce=envelope.nonce,
+            max_age_seconds=300,
+            seen_nonces=seen,
+        )
 
     async def register_connection(self, agent_id: str, metadata: dict[str, object]) -> ConnectionState:
         if agent_id not in {agent.agent_id for agent in self.agents.list()}:

@@ -362,11 +362,13 @@ class RuntimeController:
         return self.a2a.to_wire_message(response)
 
     async def delegate_agent_task(self, request: AgentDelegateRequest) -> AgentWireMessage:
-        message = AgentWireMessage(
+        message = self.a2a.sign_wire_message(
+            AgentWireMessage(
             type=A2AMessageType.REQUEST_TASK,
             agent=request.agent,
             target_agent=request.target_agent,
             payload=request.payload,
+            )
         )
         return await self.send_agent_wire_message(message)
 

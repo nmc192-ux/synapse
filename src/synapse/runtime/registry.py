@@ -4,12 +4,14 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from synapse.models.agent import AgentDefinition, AgentDiscoveryEntry, AgentKind
+from synapse.models.a2a import AgentIdentityRecord
 from synapse.models.runtime_state import AgentRuntimeRecord, AgentRuntimeStatus
 from synapse.runtime.compression.base import CompressionProvider
 from synapse.runtime.llm import LLMProvider
 from synapse.runtime.security import AgentSecuritySandbox
 from synapse.runtime.safety import AgentSafetyLayer
 from synapse.runtime.state_store import RuntimeStateStore
+from synapse.security.identity import AgentIdentityManager
 from synapse.transports.websocket_manager import WebSocketManager
 
 if TYPE_CHECKING:
@@ -22,9 +24,11 @@ if TYPE_CHECKING:
 class AgentRegistry:
     def __init__(self, state_store: RuntimeStateStore | None = None) -> None:
         self._definitions: dict[str, AgentDefinition] = {}
+        self._identities: dict[str, AgentIdentityRecord] = {}
         self._status: dict[str, AgentRuntimeStatus] = {}
         self._last_seen_at: dict[str, datetime] = {}
         self._state_store = state_store
+        self._identity_manager = AgentIdentityManager("synapse-agent-identity")
 
     def set_state_store(self, state_store: RuntimeStateStore) -> None:
         self._state_store = state_store
@@ -33,6 +37,17 @@ class AgentRegistry:
         self._definitions[definition.agent_id] = definition
         self._status.setdefault(definition.agent_id, AgentRuntimeStatus.IDLE)
         self._last_seen_at[definition.agent_id] = datetime.now(timezone.utc)
+        self._identities.setdefault(
+            definition.agent_id,
+            self._identity_manager.issue_identity(
+                agent_id=definition.agent_id,
+                verification_key=f"{definition.agent_id}-verification-key",
+                key_id="default",
+                reputation=definition.reputation,
+                capabilities=definition.capability_tags,
+                issued_at=datetime.now(timezone.utc),
+            ),
+        )
         return definition
 
     async def load_from_store(self) -> None:
@@ -45,6 +60,9 @@ class AgentRegistry:
                 continue
             definition = AgentDefinition.model_validate(agent_payload)
             self._definitions[definition.agent_id] = definition
+            identity_payload = record.get("identity")
+            if isinstance(identity_payload, dict):
+                self._identities[definition.agent_id] = AgentIdentityRecord.model_validate(identity_payload)
             status_value = record.get("status", AgentRuntimeStatus.IDLE.value)
             self._status[definition.agent_id] = AgentRuntimeStatus(status_value)
             last_seen = record.get("last_seen_at")
@@ -79,6 +97,7 @@ class AgentRegistry:
                 "status": status.value,
                 "last_seen_at": last_seen.isoformat(),
                 "runtime": record.model_dump(mode="json"),
+                "identity": self._identities[agent.agent_id].model_dump(mode="json"),
             }
         )
 
@@ -141,6 +160,17 @@ class AgentRegistry:
 
     def list(self) -> list[AgentDefinition]:
         return list(self._definitions.values())
+
+    def set_identity(self, identity: AgentIdentityRecord) -> AgentIdentityRecord:
+        self._identity_manager.verify_identity(identity)
+        self._identities[identity.agent_id] = identity
+        return identity
+
+    def get_identity(self, agent_id: str) -> AgentIdentityRecord:
+        try:
+            return self._identities[agent_id]
+        except KeyError as exc:
+            raise KeyError(f"Agent identity not found: {agent_id}") from exc
 
     def find(
         self,

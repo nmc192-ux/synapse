@@ -399,7 +399,10 @@ async def send_agent_message_wire(
     _principal: A2ASendPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> AgentWireMessage:
-    return await orchestrator.send_agent_wire_message(request)
+    try:
+        return await orchestrator.send_agent_wire_message(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
 @router.post("/agents/delegate", response_model=AgentWireMessage)
@@ -408,7 +411,10 @@ async def delegate_agent_task(
     _principal: A2ASendPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> AgentWireMessage:
-    return await orchestrator.delegate_agent_task(request)
+    try:
+        return await orchestrator.delegate_agent_task(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
 @router.get("/agents/{agent_id}", response_model=AgentDefinition)
@@ -449,7 +455,10 @@ async def send_a2a_message(
     _principal: A2ASendPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> A2AEnvelope:
-    return await orchestrator.send_a2a(request)
+    try:
+        return await orchestrator.send_a2a(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
 @router.post("/messages", response_model=AgentMessage)

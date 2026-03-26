@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime, timezone
 from enum import Enum
 
 from pydantic import BaseModel, Field
@@ -29,6 +30,10 @@ class A2AEnvelope(BaseModel):
     sender_agent_id: str
     recipient_agent_id: str | None = None
     correlation_id: str | None = None
+    key_id: str | None = None
+    nonce: str | None = None
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    signature: str | None = None
     payload: dict[str, object] = Field(default_factory=dict)
 
 
@@ -61,13 +66,33 @@ class AgentRegistrationRequest(BaseModel):
     limits: AgentExecutionLimits | None = None
     execution_policy: AgentExecutionPolicy = Field(default_factory=AgentExecutionPolicy)
     metadata: dict[str, str] = Field(default_factory=dict)
+    verification_key: str | None = None
+    key_id: str = "default"
+    issued_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class AgentWireMessage(BaseModel):
+    message_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     type: A2AMessageType
     agent: str
     target_agent: str | None = None
+    sender_id: str | None = None
+    recipient_id: str | None = None
+    key_id: str | None = None
+    nonce: str | None = None
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    signature: str | None = None
     payload: dict[str, object] = Field(default_factory=dict)
+
+
+class AgentIdentityRecord(BaseModel):
+    agent_id: str
+    verification_key: str
+    key_id: str
+    reputation: float = 0.5
+    capabilities: list[str] = Field(default_factory=list)
+    issued_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    signature: str | None = None
 
 
 class AgentDelegateRequest(BaseModel):

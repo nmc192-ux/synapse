@@ -3,7 +3,8 @@ import asyncio
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from synapse.api.routes import get_orchestrator, router
+from synapse.api.routes import get_authenticator, get_orchestrator, router
+from synapse.config import Settings
 from synapse.models.agent import AgentDefinition, AgentKind
 from synapse.models.runtime_state import RuntimeCheckpoint
 from synapse.models.task import TaskResult, TaskStatus
@@ -12,6 +13,7 @@ from synapse.runtime.orchestrator import RuntimeOrchestrator
 from synapse.runtime.registry import AgentRegistry
 from synapse.runtime.state_store import InMemoryRuntimeStateStore
 from synapse.runtime.tools import ToolRegistry
+from synapse.security.auth import Authenticator
 from synapse.transports.websocket_manager import WebSocketManager
 
 
@@ -174,6 +176,7 @@ def test_checkpoint_api_endpoints() -> None:
     app = FastAPI()
     app.include_router(router, prefix="/api")
     app.dependency_overrides[get_orchestrator] = lambda: orchestrator
+    app.dependency_overrides[get_authenticator] = lambda: Authenticator(Settings(auth_required=False))
     client = TestClient(app)
     list_response = client.get("/api/checkpoints")
     assert list_response.status_code == 200

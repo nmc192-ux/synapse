@@ -18,10 +18,12 @@ from synapse.runtime.safety import AgentSafetyLayer
 from synapse.runtime.state_store import InMemoryRuntimeStateStore, create_runtime_state_store
 from synapse.runtime.task_manager import TaskExecutionManager
 from synapse.runtime.tools import ToolRegistry
+from synapse.security.auth import Authenticator
 from synapse.transports.websocket_manager import WebSocketManager
 
 
 runtime_state_store = InMemoryRuntimeStateStore()
+authenticator = Authenticator(settings)
 compression_provider = create_compression_provider(settings)
 browser_runtime = BrowserRuntime(state_store=runtime_state_store)
 agent_registry = AgentRegistry(state_store=runtime_state_store)

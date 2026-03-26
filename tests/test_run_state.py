@@ -4,7 +4,8 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from synapse.api.routes import get_orchestrator, router
+from synapse.api.routes import get_authenticator, get_orchestrator, router
+from synapse.config import Settings
 from synapse.models.agent import AgentDefinition, AgentKind
 from synapse.models.run import RunStatus
 from synapse.models.runtime_event import EventType
@@ -18,6 +19,7 @@ from synapse.runtime.registry import AgentRegistry
 from synapse.runtime.run_store import RunStore
 from synapse.runtime.state_store import InMemoryRuntimeStateStore
 from synapse.runtime.task_runtime import TaskRuntime
+from synapse.security.auth import Authenticator
 from synapse.transports.websocket_manager import WebSocketManager
 
 
@@ -174,6 +176,7 @@ def test_run_api_endpoints() -> None:
     app = FastAPI()
     app.include_router(router, prefix="/api")
     app.dependency_overrides[get_orchestrator] = lambda: orchestrator
+    app.dependency_overrides[get_authenticator] = lambda: Authenticator(Settings(auth_required=False))
     client = TestClient(app)
 
     list_response = client.get("/api/runs")

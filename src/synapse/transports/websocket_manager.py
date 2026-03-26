@@ -2,6 +2,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 import logging
+from typing import TYPE_CHECKING
 
 from fastapi import WebSocket
 
@@ -13,6 +14,9 @@ from synapse.runtime.state_store import RuntimeStateStore
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from synapse.security.auth import AuthPrincipal
+
 
 class WebSocketManager:
     def __init__(
@@ -22,6 +26,7 @@ class WebSocketManager:
     ) -> None:
         self._connections: set[WebSocket] = set()
         self._subscribers: dict[str, asyncio.Queue[RuntimeEvent]] = {}
+        self._principals: dict[WebSocket, "AuthPrincipal"] = {}
         self._state_store = state_store
         self._compression_provider = compression_provider or NoOpCompressionProvider()
 
@@ -31,12 +36,18 @@ class WebSocketManager:
     def set_compression_provider(self, compression_provider: CompressionProvider | None) -> None:
         self._compression_provider = compression_provider or NoOpCompressionProvider()
 
-    async def connect(self, websocket: WebSocket) -> None:
+    async def connect(self, websocket: WebSocket, principal: "AuthPrincipal | None" = None) -> None:
         await websocket.accept()
         self._connections.add(websocket)
+        if principal is not None:
+            self._principals[websocket] = principal
 
     def disconnect(self, websocket: WebSocket) -> None:
         self._connections.discard(websocket)
+        self._principals.pop(websocket, None)
+
+    def get_principal(self, websocket: WebSocket) -> "AuthPrincipal | None":
+        return self._principals.get(websocket)
 
     @asynccontextmanager
     async def subscribe(self, subscriber_id: str) -> AsyncIterator[asyncio.Queue[RuntimeEvent]]:

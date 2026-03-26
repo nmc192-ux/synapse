@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     redis_required: bool = False
     runtime_state_fallback_memory: bool = True
+    auth_required: bool = True
+    jwt_secret: str = "synapse-dev-secret"
+    jwt_issuer: str = "synapse"
+    jwt_audience: str = "synapse-api"
+    jwt_expiration_seconds: int = 3600
 
     model_config = SettingsConfigDict(env_prefix="SYNAPSE_", env_file=".env", extra="ignore")
 

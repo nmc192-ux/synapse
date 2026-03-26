@@ -94,7 +94,9 @@ def test_dashboard_budget_endpoint() -> None:
     sys.modules.setdefault("playwright", playwright)
     sys.modules.setdefault("playwright.async_api", async_api)
 
-    from synapse.api.routes import get_orchestrator, router
+    from synapse.api.routes import get_authenticator, get_orchestrator, router
+    from synapse.config import Settings
+    from synapse.security.auth import Authenticator
 
     class StubOrchestrator:
         async def get_agent_budget(self, agent_id: str) -> AgentBudgetUsage:
@@ -111,6 +113,7 @@ def test_dashboard_budget_endpoint() -> None:
     app = FastAPI()
     app.include_router(router, prefix="/api")
     app.dependency_overrides[get_orchestrator] = lambda: StubOrchestrator()
+    app.dependency_overrides[get_authenticator] = lambda: Authenticator(Settings(auth_required=False))
     client = TestClient(app)
 
     response = client.get("/api/agents/budget-agent/budget")

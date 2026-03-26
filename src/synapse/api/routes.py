@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
 
 from synapse.models.a2a import (
     A2AEnvelope,
@@ -52,9 +54,20 @@ from synapse.runtime.budget import AgentBudgetLimitExceeded
 from synapse.runtime.security import SandboxPermissionError, SandboxRateLimitError
 from synapse.runtime.safety import SecurityAlertError
 from synapse.runtime.session import BrowserSession
+from synapse.security.auth import AuthPrincipal, authenticate_websocket, get_authenticator, require_scopes
+from synapse.security.policies import Scope
 
 
 router = APIRouter()
+
+BrowserControlPrincipal = Annotated[AuthPrincipal, Depends(require_scopes(Scope.BROWSER_CONTROL.value))]
+TasksReadPrincipal = Annotated[AuthPrincipal, Depends(require_scopes(Scope.TASKS_READ.value))]
+TasksWritePrincipal = Annotated[AuthPrincipal, Depends(require_scopes(Scope.TASKS_WRITE.value))]
+MemoryReadPrincipal = Annotated[AuthPrincipal, Depends(require_scopes(Scope.MEMORY_READ.value))]
+MemoryWritePrincipal = Annotated[AuthPrincipal, Depends(require_scopes(Scope.MEMORY_WRITE.value))]
+A2ASendPrincipal = Annotated[AuthPrincipal, Depends(require_scopes(Scope.A2A_SEND.value))]
+A2AReceivePrincipal = Annotated[AuthPrincipal, Depends(require_scopes(Scope.A2A_RECEIVE.value))]
+AdminPrincipal = Annotated[AuthPrincipal, Depends(require_scopes(Scope.ADMIN.value))]
 
 
 def get_orchestrator() -> RuntimeOrchestrator:
@@ -69,13 +82,14 @@ async def healthcheck() -> dict[str, str]:
 
 
 @router.post("/sessions", response_model=BrowserSession)
-async def create_session(orchestrator: RuntimeOrchestrator = Depends(get_orchestrator)) -> BrowserSession:
+async def create_session(_principal: BrowserControlPrincipal, orchestrator: RuntimeOrchestrator = Depends(get_orchestrator)) -> BrowserSession:
     return await orchestrator.create_session()
 
 
 @router.post("/navigate", response_model=BrowserSession)
 async def navigate(
     request: NavigationRequest,
+    _principal: BrowserControlPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> BrowserSession:
     try:
@@ -93,6 +107,7 @@ async def navigate(
 @router.post("/browser/open", response_model=BrowserState)
 async def open_page(
     request: OpenRequest,
+    _principal: BrowserControlPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> BrowserState:
     try:
@@ -110,6 +125,7 @@ async def open_page(
 @router.post("/browser/click", response_model=BrowserState)
 async def click(
     request: ClickRequest,
+    _principal: BrowserControlPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> BrowserState:
     try:
@@ -127,6 +143,7 @@ async def click(
 @router.post("/browser/type", response_model=BrowserState)
 async def type_text(
     request: TypeRequest,
+    _principal: BrowserControlPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> BrowserState:
     try:
@@ -144,6 +161,7 @@ async def type_text(
 @router.post("/extract", response_model=ExtractionResult)
 async def extract(
     request: ExtractionRequest,
+    _principal: BrowserControlPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> ExtractionResult:
     try:
@@ -161,6 +179,7 @@ async def extract(
 @router.post("/browser/extract", response_model=ExtractionResult)
 async def structured_extract(
     request: ExtractRequest,
+    _principal: BrowserControlPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> ExtractionResult:
     try:
@@ -178,6 +197,7 @@ async def structured_extract(
 @router.post("/browser/screenshot", response_model=ScreenshotResult)
 async def screenshot(
     request: ScreenshotRequest,
+    _principal: BrowserControlPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> ScreenshotResult:
     try:
@@ -195,6 +215,7 @@ async def screenshot(
 @router.post("/browser/layout", response_model=StructuredPageModel)
 async def get_layout(
     request: LayoutRequest,
+    _principal: BrowserControlPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> StructuredPageModel:
     try:
@@ -212,6 +233,7 @@ async def get_layout(
 @router.post("/browser/find", response_model=list[PageElementMatch])
 async def find_element(
     request: FindElementRequest,
+    _principal: BrowserControlPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[PageElementMatch]:
     try:
@@ -229,6 +251,7 @@ async def find_element(
 @router.post("/browser/inspect", response_model=PageInspection)
 async def inspect(
     request: InspectRequest,
+    _principal: BrowserControlPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> PageInspection:
     try:
@@ -244,6 +267,7 @@ async def inspect(
 @router.post("/browser/dismiss", response_model=BrowserState)
 async def dismiss_popups(
     request: DismissRequest,
+    _principal: BrowserControlPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> BrowserState:
     try:
@@ -259,6 +283,7 @@ async def dismiss_popups(
 @router.post("/browser/upload", response_model=UploadResult)
 async def upload(
     request: UploadRequest,
+    _principal: BrowserControlPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> UploadResult:
     try:
@@ -274,6 +299,7 @@ async def upload(
 @router.post("/browser/download", response_model=DownloadResult)
 async def download(
     request: DownloadRequest,
+    _principal: BrowserControlPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> DownloadResult:
     try:
@@ -289,6 +315,7 @@ async def download(
 @router.post("/browser/scroll_extract", response_model=ScrollExtractResult)
 async def scroll_extract(
     request: ScrollExtractRequest,
+    _principal: BrowserControlPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> ScrollExtractResult:
     try:
@@ -304,19 +331,21 @@ async def scroll_extract(
 @router.post("/agents", response_model=AgentDefinition)
 async def register_agent(
     request: AgentDefinition,
+    _principal: AdminPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> AgentDefinition:
     return await orchestrator.register_agent(request)
 
 
 @router.get("/agents", response_model=list[AgentDefinition])
-async def list_agents(orchestrator: RuntimeOrchestrator = Depends(get_orchestrator)) -> list[AgentDefinition]:
+async def list_agents(_principal: TasksReadPrincipal, orchestrator: RuntimeOrchestrator = Depends(get_orchestrator)) -> list[AgentDefinition]:
     return await orchestrator.get_persisted_agents()
 
 
 @router.get("/agents/{agent_id}/budget", response_model=AgentBudgetUsage)
 async def get_agent_budget(
     agent_id: str,
+    _principal: TasksReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> AgentBudgetUsage:
     try:
@@ -329,6 +358,7 @@ async def get_agent_budget(
 async def save_agent_checkpoint(
     agent_id: str,
     state: dict[str, object],
+    _principal: AdminPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> AgentCheckpoint:
     try:
@@ -340,6 +370,7 @@ async def save_agent_checkpoint(
 @router.post("/agents/register", response_model=AgentDefinition)
 async def register_a2a_agent(
     request: AgentRegistrationRequest,
+    _principal: AdminPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> AgentDefinition:
     return await orchestrator.register_a2a_agent(request)
@@ -347,6 +378,7 @@ async def register_a2a_agent(
 
 @router.get("/agents/discover", response_model=list[AgentPresence])
 async def discover_a2a_agents(
+    _principal: A2AReceivePrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[AgentPresence]:
     return await orchestrator.discover_agents()
@@ -355,6 +387,7 @@ async def discover_a2a_agents(
 @router.get("/agents/find", response_model=list[AgentDiscoveryEntry])
 async def find_agents(
     capability: str,
+    _principal: A2AReceivePrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[AgentDiscoveryEntry]:
     return await orchestrator.find_agents(capability)
@@ -363,6 +396,7 @@ async def find_agents(
 @router.post("/agents/message", response_model=AgentWireMessage)
 async def send_agent_message_wire(
     request: AgentWireMessage,
+    _principal: A2ASendPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> AgentWireMessage:
     return await orchestrator.send_agent_wire_message(request)
@@ -371,6 +405,7 @@ async def send_agent_message_wire(
 @router.post("/agents/delegate", response_model=AgentWireMessage)
 async def delegate_agent_task(
     request: AgentDelegateRequest,
+    _principal: A2ASendPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> AgentWireMessage:
     return await orchestrator.delegate_agent_task(request)
@@ -379,6 +414,7 @@ async def delegate_agent_task(
 @router.get("/agents/{agent_id}", response_model=AgentDefinition)
 async def get_agent(
     agent_id: str,
+    _principal: TasksReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> AgentDefinition:
     try:
@@ -390,6 +426,7 @@ async def get_agent(
 @router.get("/agents/{agent_id}/status")
 async def get_agent_status(
     agent_id: str,
+    _principal: TasksReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> dict[str, object]:
     try:
@@ -400,6 +437,7 @@ async def get_agent_status(
 
 @router.get("/a2a/agents", response_model=list[AgentPresence])
 async def discover_agents(
+    _principal: A2AReceivePrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[AgentPresence]:
     return await orchestrator.discover_agents()
@@ -408,6 +446,7 @@ async def discover_agents(
 @router.post("/a2a/messages", response_model=A2AEnvelope)
 async def send_a2a_message(
     request: A2AEnvelope,
+    _principal: A2ASendPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> A2AEnvelope:
     return await orchestrator.send_a2a(request)
@@ -416,19 +455,21 @@ async def send_a2a_message(
 @router.post("/messages", response_model=AgentMessage)
 async def send_message(
     request: AgentMessage,
+    _principal: A2ASendPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> AgentMessage:
     return await orchestrator.send_message(request)
 
 
 @router.get("/messages", response_model=list[AgentMessage])
-async def list_messages(orchestrator: RuntimeOrchestrator = Depends(get_orchestrator)) -> list[AgentMessage]:
+async def list_messages(_principal: A2AReceivePrincipal, orchestrator: RuntimeOrchestrator = Depends(get_orchestrator)) -> list[AgentMessage]:
     return orchestrator.messages.list_messages()
 
 
 @router.post("/memory/store", response_model=MemoryRecord)
 async def store_memory(
     request: MemoryStoreRequest,
+    _principal: MemoryWritePrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> MemoryRecord:
     try:
@@ -440,6 +481,7 @@ async def store_memory(
 @router.post("/memory/search", response_model=list[MemorySearchResult])
 async def search_memory(
     request: MemorySearchRequest,
+    _principal: MemoryReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[MemorySearchResult]:
     return await orchestrator.search_memory(request)
@@ -448,6 +490,7 @@ async def search_memory(
 @router.get("/memory/{agent_id}/recent", response_model=list[MemoryRecord])
 async def get_recent_memory(
     agent_id: str,
+    _principal: MemoryReadPrincipal,
     limit: int = 10,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[MemoryRecord]:
@@ -462,6 +505,7 @@ async def list_tools(orchestrator: RuntimeOrchestrator = Depends(get_orchestrato
 @router.post("/tools/call")
 async def call_tool(
     request: ToolCallRequest,
+    _principal: BrowserControlPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> dict[str, object]:
     try:
@@ -492,6 +536,7 @@ async def reload_plugins(
 @router.post("/tasks")
 async def execute_task(
     request: TaskRequest,
+    _principal: TasksWritePrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ):
     try:
@@ -505,6 +550,7 @@ async def execute_task(
 @router.post("/tasks/create", response_model=TaskRecord)
 async def create_task(
     request: TaskCreateRequest,
+    _principal: TasksWritePrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> TaskRecord:
     return await orchestrator.create_task_record(request)
@@ -514,6 +560,7 @@ async def create_task(
 async def claim_task(
     task_id: str,
     request: TaskClaimRequest,
+    _principal: TasksWritePrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> TaskRecord:
     try:
@@ -528,6 +575,7 @@ async def claim_task(
 async def update_task(
     task_id: str,
     request: TaskUpdateRequest,
+    _principal: TasksWritePrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> TaskRecord:
     try:
@@ -538,6 +586,7 @@ async def update_task(
 
 @router.get("/tasks/active", response_model=list[TaskRecord])
 async def list_active_tasks(
+    _principal: TasksReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[TaskRecord]:
     return await orchestrator.list_active_tasks()
@@ -545,6 +594,7 @@ async def list_active_tasks(
 
 @router.get("/sessions", response_model=list[BrowserSessionState])
 async def list_sessions(
+    _principal: BrowserControlPrincipal,
     agent_id: str | None = None,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[BrowserSessionState]:
@@ -554,6 +604,7 @@ async def list_sessions(
 @router.get("/sessions/{session_id}", response_model=BrowserSessionState)
 async def get_session(
     session_id: str,
+    _principal: BrowserControlPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> BrowserSessionState:
     try:
@@ -564,6 +615,7 @@ async def get_session(
 
 @router.get("/connections", response_model=list[ConnectionState])
 async def list_connections(
+    _principal: TasksReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[ConnectionState]:
     return await orchestrator.list_connections()
@@ -572,6 +624,7 @@ async def list_connections(
 @router.get("/connections/{agent_id}", response_model=ConnectionState)
 async def get_connection(
     agent_id: str,
+    _principal: TasksReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> ConnectionState:
     try:
@@ -582,6 +635,7 @@ async def get_connection(
 
 @router.get("/checkpoints", response_model=list[RuntimeCheckpoint])
 async def list_checkpoints(
+    _principal: TasksReadPrincipal,
     agent_id: str | None = None,
     task_id: str | None = None,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
@@ -592,6 +646,7 @@ async def list_checkpoints(
 @router.get("/checkpoints/{checkpoint_id}", response_model=RuntimeCheckpoint)
 async def get_checkpoint(
     checkpoint_id: str,
+    _principal: TasksReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> RuntimeCheckpoint:
     try:
@@ -602,6 +657,7 @@ async def get_checkpoint(
 
 @router.get("/runs", response_model=list[RunState])
 async def list_runs(
+    _principal: TasksReadPrincipal,
     agent_id: str | None = None,
     task_id: str | None = None,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
@@ -612,6 +668,7 @@ async def list_runs(
 @router.get("/runs/{run_id}", response_model=RunState)
 async def get_run(
     run_id: str,
+    _principal: TasksReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> RunState:
     try:
@@ -623,6 +680,7 @@ async def get_run(
 @router.get("/runs/{run_id}/events")
 async def get_run_events(
     run_id: str,
+    _principal: TasksReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[dict[str, object]]:
     return await orchestrator.get_run_events(run_id)
@@ -631,6 +689,7 @@ async def get_run_events(
 @router.get("/runs/{run_id}/timeline", response_model=RunTimeline)
 async def get_run_timeline(
     run_id: str,
+    _principal: TasksReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> RunTimeline:
     try:
@@ -642,6 +701,7 @@ async def get_run_timeline(
 @router.get("/runs/{run_id}/replay", response_model=RunReplayView)
 async def get_run_replay(
     run_id: str,
+    _principal: TasksReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> RunReplayView:
     try:
@@ -653,6 +713,7 @@ async def get_run_replay(
 @router.get("/runs/{run_id}/checkpoints", response_model=list[RuntimeCheckpoint])
 async def get_run_checkpoints(
     run_id: str,
+    _principal: TasksReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[RuntimeCheckpoint]:
     return await orchestrator.get_run_checkpoints(run_id)
@@ -661,6 +722,7 @@ async def get_run_checkpoints(
 @router.post("/runs/{run_id}/pause", response_model=RunState)
 async def pause_run(
     run_id: str,
+    _principal: TasksWritePrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> RunState:
     try:
@@ -672,6 +734,7 @@ async def pause_run(
 @router.post("/runs/{run_id}/resume")
 async def resume_run(
     run_id: str,
+    _principal: TasksWritePrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ):
     try:
@@ -683,6 +746,7 @@ async def resume_run(
 @router.post("/runs/{run_id}/cancel", response_model=RunState)
 async def cancel_run(
     run_id: str,
+    _principal: TasksWritePrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> RunState:
     try:
@@ -695,6 +759,7 @@ async def cancel_run(
 async def save_task_checkpoint(
     task_id: str,
     state: dict[str, object],
+    _principal: TasksWritePrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> RuntimeCheckpoint:
     try:
@@ -706,6 +771,7 @@ async def save_task_checkpoint(
 @router.post("/tasks/resume/{checkpoint_id}")
 async def resume_task(
     checkpoint_id: str,
+    _principal: TasksWritePrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ):
     try:
@@ -715,29 +781,55 @@ async def resume_task(
 
 
 @router.websocket("/ws")
-async def websocket_events(websocket: WebSocket) -> None:
-    runtime = get_orchestrator()
-    await runtime.sockets.connect(websocket)
+async def websocket_events(
+    websocket: WebSocket,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+    authenticator = Depends(get_authenticator),
+) -> None:
+    try:
+        principal = authenticate_websocket(
+            websocket,
+            authenticator,
+            required_scopes=(Scope.TASKS_READ.value,),
+        )
+    except HTTPException:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+    await orchestrator.sockets.connect(websocket, principal=principal)
     try:
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
-        runtime.sockets.disconnect(websocket)
+        orchestrator.sockets.disconnect(websocket)
 
 
 @router.websocket("/a2a/ws/{agent_id}")
-async def websocket_a2a(websocket: WebSocket, agent_id: str) -> None:
-    runtime = get_orchestrator()
-    await runtime.a2a.connect(agent_id, websocket)
+async def websocket_a2a(
+    websocket: WebSocket,
+    agent_id: str,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+    authenticator = Depends(get_authenticator),
+) -> None:
+    try:
+        authenticate_websocket(
+            websocket,
+            authenticator,
+            required_scopes=(Scope.A2A_RECEIVE.value,),
+            agent_id=agent_id,
+        )
+    except HTTPException:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+    await orchestrator.a2a.connect(agent_id, websocket)
     try:
         while True:
             payload = await websocket.receive_json()
-            await runtime.a2a.heartbeat(agent_id)
+            await orchestrator.a2a.heartbeat(agent_id)
             wire_message = AgentWireMessage.model_validate({**payload, "agent": agent_id})
-            response = await runtime.send_agent_wire_message(wire_message)
-            await runtime.a2a.cleanup_stale_connections()
+            response = await orchestrator.send_agent_wire_message(wire_message)
+            await orchestrator.a2a.cleanup_stale_connections()
             if response is not None:
-                await runtime.sockets.broadcast(
+                await orchestrator.sockets.broadcast(
                     RuntimeEvent(
                         event_type=EventType.A2A_MESSAGE,
                         agent_id=agent_id,
@@ -748,4 +840,4 @@ async def websocket_a2a(websocket: WebSocket, agent_id: str) -> None:
                     )
                 )
     except WebSocketDisconnect:
-        await runtime.a2a.disconnect(agent_id)
+        await orchestrator.a2a.disconnect(agent_id)

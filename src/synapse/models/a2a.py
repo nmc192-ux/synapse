@@ -30,6 +30,8 @@ class A2AMessageType(str, Enum):
 class A2AEnvelope(BaseModel):
     message_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     type: A2AMessageType
+    organization_id: str | None = None
+    project_id: str | None = None
     sender_agent_id: str
     recipient_agent_id: str | None = None
     correlation_id: str | None = None
@@ -84,6 +86,8 @@ class AgentWireMessage(BaseModel):
     target_agent: str | None = None
     sender_id: str | None = None
     recipient_id: str | None = None
+    organization_id: str | None = None
+    project_id: str | None = None
     key_id: str | None = None
     nonce: str | None = None
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -93,6 +97,8 @@ class AgentWireMessage(BaseModel):
 
 class AgentIdentityRecord(BaseModel):
     agent_id: str
+    organization_id: str | None = None
+    project_id: str | None = None
     verification_key: str
     key_id: str
     reputation: float = 0.5

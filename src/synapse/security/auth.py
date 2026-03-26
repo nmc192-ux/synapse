@@ -108,6 +108,27 @@ class Authenticator:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Token is not authorized for this project.")
         return principal
 
+    def authorize_agent_binding(
+        self,
+        principal: AuthPrincipal,
+        *,
+        agent_id: str,
+        organization_id: str | None,
+        project_id: str | None,
+        allow_service: bool = False,
+    ) -> AuthPrincipal:
+        if not organization_id or not project_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Target agent is missing tenant scope.")
+        if principal.organization_id != organization_id or principal.project_id != project_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Token is not authorized for this agent project.")
+        if principal.principal_type == PrincipalType.AGENT:
+            if principal.agent_id != agent_id:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Agent token cannot bind to another agent.")
+            return principal
+        if principal.principal_type == PrincipalType.SERVICE and allow_service:
+            return principal
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Principal is not allowed to act on behalf of this agent.")
+
 
 BearerHeader = Annotated[str | None, Header(alias="Authorization")]
 

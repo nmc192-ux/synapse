@@ -790,9 +790,17 @@ async def send_agent_message_wire(
     request: AgentWireMessage,
     principal: A2ASendPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+    authenticator = Depends(get_authenticator),
 ) -> AgentWireMessage:
     try:
-        await _require_agent_project(principal, orchestrator, request.agent)
+        agent = await _require_agent_project(principal, orchestrator, request.agent)
+        authenticator.authorize_agent_binding(
+            principal,
+            agent_id=request.agent,
+            organization_id=agent.organization_id,
+            project_id=agent.project_id,
+            allow_service=True,
+        )
         if request.target_agent is not None:
             await _require_agent_project(principal, orchestrator, request.target_agent)
         return await orchestrator.send_agent_wire_message(request)
@@ -805,9 +813,17 @@ async def delegate_agent_task(
     request: AgentDelegateRequest,
     principal: A2ASendPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+    authenticator = Depends(get_authenticator),
 ) -> AgentWireMessage:
     try:
-        await _require_agent_project(principal, orchestrator, request.agent)
+        agent = await _require_agent_project(principal, orchestrator, request.agent)
+        authenticator.authorize_agent_binding(
+            principal,
+            agent_id=request.agent,
+            organization_id=agent.organization_id,
+            project_id=agent.project_id,
+            allow_service=True,
+        )
         if request.target_agent is not None:
             await _require_agent_project(principal, orchestrator, request.target_agent)
         return await orchestrator.delegate_agent_task(request)
@@ -1428,7 +1444,14 @@ async def websocket_a2a(
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
     try:
-        await _require_agent_project(principal, orchestrator, agent_id)
+        agent = await _require_agent_project(principal, orchestrator, agent_id)
+        authenticator.authorize_agent_binding(
+            principal,
+            agent_id=agent_id,
+            organization_id=agent.organization_id,
+            project_id=agent.project_id,
+            allow_service=True,
+        )
     except (HTTPException, KeyError):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return

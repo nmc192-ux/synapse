@@ -119,6 +119,8 @@ class SynapseClient:
         message_type: A2AMessageType | str,
         payload: dict[str, object] | None = None,
         signing_key: str,
+        organization_id: str | None = None,
+        project_id: str | None = None,
         key_id: str = "default",
         nonce: str | None = None,
     ) -> AgentWireMessage:
@@ -128,6 +130,8 @@ class SynapseClient:
             sender_id=agent_id,
             target_agent=target_agent,
             recipient_id=target_agent,
+            organization_id=organization_id,
+            project_id=project_id or self.project_id,
             payload=payload or {},
         )
         return self._message_signer.sign_wire_message(

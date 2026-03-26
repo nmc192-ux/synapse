@@ -80,6 +80,8 @@ class A2AHub:
         agent = self.agents.register(definition)
         identity = self._identity_manager.issue_identity(
             agent_id=request.agent_id,
+            organization_id=request.organization_id,
+            project_id=request.project_id,
             verification_key=request.verification_key or f"{request.agent_id}-verification-key",
             key_id=request.key_id,
             reputation=request.reputation,
@@ -92,14 +94,7 @@ class A2AHub:
     async def connect(self, agent_id: str, websocket: WebSocket) -> None:
         await websocket.accept()
         self._connections[agent_id] = websocket
-        if agent_id not in {agent.agent_id for agent in self.agents.list()}:
-            self.register_agent(
-                AgentRegistrationRequest(
-                    agent_id=agent_id,
-                    name=agent_id,
-                    description="Auto-registered A2A agent connection.",
-                )
-            )
+        self.agents.get(agent_id)
         await self.agents.save_to_store(self.agents.get(agent_id))
         await self.register_connection(agent_id, {"transport": "websocket"})
         await self.heartbeat(agent_id)
@@ -130,6 +125,7 @@ class A2AHub:
     ) -> TaskResult:
         if self._task_executor is None:
             raise RuntimeError("Task executor is not configured.")
+        self._ensure_same_tenant(sender_agent_id, recipient_agent_id)
         try:
             await self._authorize_delegation(sender_agent_id, recipient_agent_id, task.run_id)
         except Exception as exc:
@@ -258,6 +254,7 @@ class A2AHub:
     async def send(self, envelope: A2AEnvelope) -> None:
         if envelope.recipient_agent_id is None:
             return
+        self._ensure_same_tenant(envelope.sender_agent_id, envelope.recipient_agent_id)
 
         websocket = self._connections.get(envelope.recipient_agent_id)
         if websocket is None:
@@ -292,6 +289,8 @@ class A2AHub:
             sender_id=envelope.sender_agent_id,
             target_agent=target_agent,
             recipient_id=target_agent,
+            organization_id=envelope.organization_id or identity.organization_id,
+            project_id=envelope.project_id or identity.project_id,
             key_id=identity.key_id,
             nonce=envelope.nonce or str(uuid.uuid4()),
             timestamp=envelope.timestamp,
@@ -316,6 +315,8 @@ class A2AHub:
         return A2AEnvelope(
             message_id=message_id,
             type=envelope_type,
+            organization_id=message.organization_id,
+            project_id=message.project_id,
             sender_agent_id=message.agent,
             recipient_agent_id=message.target_agent,
             correlation_id=correlation_id,
@@ -328,11 +329,19 @@ class A2AHub:
 
     def sign_wire_message(self, message: AgentWireMessage) -> AgentWireMessage:
         identity = self.agents.get_identity(message.agent)
+        enriched = message.model_copy(
+            update={
+                "sender_id": message.sender_id or message.agent,
+                "recipient_id": message.recipient_id or message.target_agent,
+                "organization_id": message.organization_id or identity.organization_id,
+                "project_id": message.project_id or identity.project_id,
+            }
+        )
         return self._signer.sign_wire_message(
-            message,
+            enriched,
             signing_key=identity.verification_key,
             key_id=identity.key_id,
-            nonce=message.nonce or str(uuid.uuid4()),
+            nonce=enriched.nonce or str(uuid.uuid4()),
         )
 
     def _build_error(
@@ -526,7 +535,17 @@ class A2AHub:
         return str(run_id) if run_id is not None else None
 
     def _verify_wire_message(self, message: AgentWireMessage) -> None:
+        if message.sender_id not in {None, message.agent}:
+            raise ValueError("Sender identity does not match the authenticated agent.")
         identity = self.agents.get_identity(message.agent)
+        if not message.organization_id or not message.project_id:
+            raise ValueError("A2A messages must include organization_id and project_id.")
+        if identity.organization_id != message.organization_id or identity.project_id != message.project_id:
+            raise ValueError("A2A message tenant context does not match sender identity.")
+        if message.target_agent is not None:
+            recipient = self.agents.get(message.target_agent)
+            if recipient.organization_id != message.organization_id or recipient.project_id != message.project_id:
+                raise ValueError("Cross-project A2A routing is not allowed.")
         seen = self._seen_nonces.setdefault(message.agent, set())
         self._signer.verify_wire_message(
             message,
@@ -539,6 +558,14 @@ class A2AHub:
         if envelope.signature is None:
             return
         identity = self.agents.get_identity(envelope.sender_agent_id)
+        if not envelope.organization_id or not envelope.project_id:
+            raise ValueError("Signed A2A envelopes must include organization_id and project_id.")
+        if identity.organization_id != envelope.organization_id or identity.project_id != envelope.project_id:
+            raise ValueError("A2A envelope tenant context does not match sender identity.")
+        if envelope.recipient_agent_id is not None:
+            recipient = self.agents.get(envelope.recipient_agent_id)
+            if recipient.organization_id != envelope.organization_id or recipient.project_id != envelope.project_id:
+                raise ValueError("Cross-project A2A routing is not allowed.")
         seen = self._seen_nonces.setdefault(envelope.sender_agent_id, set())
         self._signer._verify_signature(
             envelope.signature,
@@ -568,16 +595,16 @@ class A2AHub:
                         self._sandbox.set_run_policy(run_id, override)
         self._sandbox.authorize_delegation(sender_agent_id, recipient_agent_id, run_id=run_id)
 
+    def _ensure_same_tenant(self, sender_agent_id: str, recipient_agent_id: str | None) -> None:
+        if recipient_agent_id is None:
+            return
+        sender = self.agents.get(sender_agent_id)
+        recipient = self.agents.get(recipient_agent_id)
+        if sender.organization_id != recipient.organization_id or sender.project_id != recipient.project_id:
+            raise ValueError("Cross-project A2A routing is not allowed.")
+
     async def register_connection(self, agent_id: str, metadata: dict[str, object]) -> ConnectionState:
-        if agent_id not in {agent.agent_id for agent in self.agents.list()}:
-            self.register_agent(
-                AgentRegistrationRequest(
-                    agent_id=agent_id,
-                    name=agent_id,
-                    description="Auto-registered A2A agent connection.",
-                )
-            )
-            await self.agents.save_to_store(self.agents.get(agent_id))
+        self.agents.get(agent_id)
 
         now = datetime.now(timezone.utc)
         connection = ConnectionState(
@@ -598,6 +625,7 @@ class A2AHub:
         now = datetime.now(timezone.utc)
         connection = self._connection_state.get(agent_id)
         if connection is None:
+            self.agents.get(agent_id)
             connection = await self.register_connection(agent_id, {"transport": "websocket"})
         else:
             connection.last_heartbeat = now

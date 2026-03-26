@@ -96,6 +96,8 @@ class MessageSigner:
             "sender_id": message.sender_id or message.agent,
             "recipient_id": message.recipient_id or message.target_agent,
             "target_agent": message.target_agent,
+            "organization_id": message.organization_id,
+            "project_id": message.project_id,
             "key_id": message.key_id,
             "nonce": message.nonce,
             "timestamp": message.timestamp.isoformat(),
@@ -107,6 +109,8 @@ class MessageSigner:
         return {
             "message_id": envelope.message_id,
             "type": envelope.type.value,
+            "organization_id": envelope.organization_id,
+            "project_id": envelope.project_id,
             "sender_agent_id": envelope.sender_agent_id,
             "recipient_agent_id": envelope.recipient_agent_id,
             "correlation_id": envelope.correlation_id,

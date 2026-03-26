@@ -41,6 +41,8 @@ class AgentRegistry:
             definition.agent_id,
             self._identity_manager.issue_identity(
                 agent_id=definition.agent_id,
+                organization_id=definition.organization_id,
+                project_id=definition.project_id,
                 verification_key=f"{definition.agent_id}-verification-key",
                 key_id="default",
                 reputation=definition.reputation,

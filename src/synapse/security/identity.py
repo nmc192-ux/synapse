@@ -13,6 +13,8 @@ class AgentIdentityManager:
         self,
         *,
         agent_id: str,
+        organization_id: str | None,
+        project_id: str | None,
         verification_key: str,
         key_id: str,
         reputation: float,
@@ -21,6 +23,8 @@ class AgentIdentityManager:
     ) -> AgentIdentityRecord:
         record = AgentIdentityRecord(
             agent_id=agent_id,
+            organization_id=organization_id,
+            project_id=project_id,
             verification_key=verification_key,
             key_id=key_id,
             reputation=reputation,
@@ -30,6 +34,8 @@ class AgentIdentityManager:
         signature = self.signer._sign_dict(
             {
                 "agent_id": record.agent_id,
+                "organization_id": record.organization_id,
+                "project_id": record.project_id,
                 "verification_key": record.verification_key,
                 "key_id": record.key_id,
                 "reputation": record.reputation,
@@ -44,6 +50,8 @@ class AgentIdentityManager:
         expected = self.signer._sign_dict(
             {
                 "agent_id": record.agent_id,
+                "organization_id": record.organization_id,
+                "project_id": record.project_id,
                 "verification_key": record.verification_key,
                 "key_id": record.key_id,
                 "reputation": record.reputation,

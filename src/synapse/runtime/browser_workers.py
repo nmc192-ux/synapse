@@ -11,6 +11,7 @@ from synapse.models.runtime_event import EventType, RuntimeEvent
 from synapse.models.runtime_state import BrowserSessionState, BrowserWorkerState
 from synapse.runtime.execution_plane import ExecutionPlaneRuntime, RuntimeEventPublisher
 from synapse.runtime.queues import BrowserTaskEnvelope, BrowserTaskQueue, BrowserTaskResult, create_browser_task_queue
+from synapse.runtime.run_store import RunStore
 from synapse.runtime.session import BrowserSession
 from synapse.runtime.state_store import RuntimeStateStore
 from synapse.workers.browser_worker import BrowserWorker
@@ -28,6 +29,8 @@ class BrowserWorkerPool:
         heartbeat_interval_seconds: float | None = None,
         runtime_factory: RuntimeFactory | None = None,
         queue_factory: Callable[[str], BrowserTaskQueue] | None = None,
+        run_store: RunStore | None = None,
+        lease_timeout_seconds: float | None = None,
     ) -> None:
         self.state_store = state_store
         self._event_publisher: RuntimeEventPublisher | None = None
@@ -37,6 +40,8 @@ class BrowserWorkerPool:
         )
         self._runtime_factory = runtime_factory or self._default_runtime_factory
         self._queue_factory = queue_factory or create_browser_task_queue
+        self._run_store = run_store
+        self._lease_timeout_seconds = lease_timeout_seconds or settings.scheduler_lease_timeout_seconds
         self._workers: dict[str, BrowserWorker] = {}
         self._session_workers: dict[str, str] = {}
         self._session_urls: dict[str, str | None] = {}
@@ -67,6 +72,7 @@ class BrowserWorkerPool:
                 result_handler=self._handle_result,
                 event_publisher=self._event_publisher,
                 heartbeat_interval_seconds=self.heartbeat_interval_seconds,
+                heartbeat_callback=self._on_worker_heartbeat,
             )
             self._workers[worker_id] = worker
             await worker.start()
@@ -282,6 +288,16 @@ class BrowserWorkerPool:
 
     def list_workers(self) -> list[BrowserWorkerState]:
         return [worker.state.model_copy(deep=True) for worker in self._workers.values()]
+
+    async def _on_worker_heartbeat(self, worker_id: str) -> None:
+        if self._run_store is None:
+            return
+        leases = await self._run_store.list_leases(worker_id=worker_id)
+        for lease in leases:
+            await self._run_store.renew_lease(
+                lease.run_id,
+                lease_timeout_seconds=self._lease_timeout_seconds,
+            )
 
     async def _dispatch_session(self, action: str, session_id: str, arguments: dict[str, Any]):
         worker_id = self._require_worker_id(session_id)

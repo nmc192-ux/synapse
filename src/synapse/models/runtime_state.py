@@ -72,6 +72,15 @@ class BrowserWorkerState(BaseModel):
     metadata: dict[str, object] = Field(default_factory=dict)
 
 
+class RunLeaseRecord(BaseModel):
+    run_id: str
+    worker_id: str
+    lease_acquired_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    lease_expiration: datetime
+    attempts: int = 1
+    next_retry_at: datetime | None = None
+
+
 class RuntimeCheckpoint(BaseModel):
     checkpoint_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     task_id: str

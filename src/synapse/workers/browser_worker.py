@@ -12,6 +12,7 @@ from synapse.runtime.queues import BrowserTaskEnvelope, BrowserTaskQueue, Browse
 
 ResultHandler = Callable[[BrowserTaskResult], Awaitable[None]]
 EventPublisher = Callable[[RuntimeEvent], Awaitable[None]]
+HeartbeatCallback = Callable[[str], Awaitable[None]]
 
 
 class BrowserWorker:
@@ -23,6 +24,7 @@ class BrowserWorker:
         result_handler: ResultHandler,
         event_publisher: EventPublisher | None = None,
         heartbeat_interval_seconds: float = 15.0,
+        heartbeat_callback: HeartbeatCallback | None = None,
     ) -> None:
         self.worker_id = worker_id
         self.queue = queue
@@ -30,6 +32,7 @@ class BrowserWorker:
         self.result_handler = result_handler
         self.event_publisher = event_publisher
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
+        self.heartbeat_callback = heartbeat_callback
         self.runtime: Any | None = None
         self.state = BrowserWorkerState(worker_id=worker_id, queue_name=queue.name)
         self._loop_task: asyncio.Task[None] | None = None
@@ -118,6 +121,8 @@ class BrowserWorker:
         while self._running:
             await asyncio.sleep(self.heartbeat_interval_seconds)
             self.state.last_heartbeat = datetime.now(timezone.utc)
+            if self.heartbeat_callback is not None:
+                await self.heartbeat_callback(self.worker_id)
             if self.event_publisher is not None:
                 await self.event_publisher(
                     RuntimeEvent(

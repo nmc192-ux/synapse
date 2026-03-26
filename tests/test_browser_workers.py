@@ -1,9 +1,11 @@
 import asyncio
+from datetime import datetime, timezone
 
 from synapse.models.browser import BrowserState, StructuredPageModel
 from synapse.models.runtime_event import EventType
-from synapse.models.runtime_state import BrowserSessionState, WorkerRuntimeStatus
+from synapse.models.runtime_state import BrowserSessionState, RunLeaseRecord, WorkerRuntimeStatus
 from synapse.runtime.browser_workers import BrowserWorkerPool
+from synapse.runtime.run_store import RunStore
 from synapse.runtime.session import BrowserSession
 from synapse.runtime.state_store import InMemoryRuntimeStateStore
 from synapse.transports.websocket_manager import WebSocketManager
@@ -131,6 +133,39 @@ def test_browser_worker_pool_lists_sessions_from_workers() -> None:
             assert len(sessions) == 1
             assert sessions[0].session_id == "s1"
             assert sessions[0].current_url == "https://example.com"
+        finally:
+            await pool.stop()
+
+    asyncio.run(scenario())
+
+
+def test_browser_worker_pool_renews_durable_leases_on_heartbeat() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            heartbeat_interval_seconds=0.01,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            lease_timeout_seconds=0.05,
+        )
+        run_id = "run-1"
+        await run_store.save_lease(
+            RunLeaseRecord(
+                run_id=run_id,
+                worker_id="browser-worker-1",
+                lease_acquired_at=datetime.now(timezone.utc),
+                lease_expiration=datetime.now(timezone.utc),
+            )
+        )
+        await pool.start()
+        try:
+            await asyncio.sleep(0.03)
+            lease = await run_store.get_lease(run_id)
+            assert lease is not None
+            assert lease.lease_expiration > datetime.now(timezone.utc)
         finally:
             await pool.stop()
 

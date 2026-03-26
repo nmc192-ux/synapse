@@ -7,7 +7,7 @@ import pytest
 from synapse.models.agent import AgentDefinition, AgentKind
 from synapse.models.run import RunStatus
 from synapse.models.runtime_event import EventType
-from synapse.models.runtime_state import BrowserWorkerState, WorkerRuntimeStatus
+from synapse.models.runtime_state import BrowserWorkerState, RunLeaseRecord, WorkerRuntimeStatus
 from synapse.models.task import TaskRequest, TaskResult, TaskStatus
 from synapse.runtime.budget import AgentBudgetManager
 from synapse.runtime.checkpoint_service import CheckpointService
@@ -134,6 +134,9 @@ def test_scheduler_assigns_run_to_available_worker() -> None:
 
         persisted = await run_store.get(run.run_id)
         assert persisted.metadata["assigned_worker_id"] == "worker-2"
+        lease = await run_store.get_lease(run.run_id)
+        assert lease is not None
+        assert lease.worker_id == "worker-2"
 
     asyncio.run(scenario())
 
@@ -169,21 +172,55 @@ def test_scheduler_requeues_expired_leases() -> None:
             _StubWorkerPool([BrowserWorkerState(worker_id="worker-1", queue_name="q1", status=WorkerRuntimeStatus.IDLE)]),
             bus,
             cleanup_interval_seconds=60,
+            retry_base_delay_seconds=0.0,
         )
         run = await run_store.create_run(task_id="task-1", agent_id="agent-1")
-        lease = RunLease(
-            run_id=run.run_id,
-            worker_id="worker-1",
-            expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        await run_store.save_lease(
+            RunLeaseRecord(
+                run_id=run.run_id,
+                worker_id="worker-1",
+                lease_acquired_at=datetime.now(timezone.utc) - timedelta(seconds=5),
+                lease_expiration=datetime.now(timezone.utc) - timedelta(seconds=1),
+                attempts=1,
+            )
         )
-        scheduler._leases[run.run_id] = lease
         await run_store.update_metadata(run.run_id, {"assigned_worker_id": "worker-1", "assignment_attempts": 1})
 
-        await scheduler.cleanup_expired_leases()
+        async with bus.subscribe("scheduler-recovery") as queue:
+            await scheduler.cleanup_expired_leases()
+            event_types = { (await queue.get()).event_type, (await queue.get()).event_type, (await queue.get()).event_type }
+            assert EventType.RUN_REQUEUED in event_types
+            assert EventType.RUN_RECOVERED in event_types
+            assert EventType.RUN_ASSIGNED in event_types
 
         persisted = await run_store.get(run.run_id)
         assert persisted.metadata["assigned_worker_id"] == "worker-1"
         assert persisted.metadata["assignment_attempts"] >= 2
+        lease = await run_store.get_lease(run.run_id)
+        assert lease is not None
+        assert lease.worker_id == "worker-1"
+
+    asyncio.run(scenario())
+
+
+def test_scheduler_uses_exponential_backoff_metadata() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        bus = EventBus(WebSocketManager(state_store=store))
+        scheduler = RunScheduler(
+            run_store,
+            _StubWorkerPool([BrowserWorkerState(worker_id="worker-1", queue_name="q1", status=WorkerRuntimeStatus.IDLE)]),
+            bus,
+            cleanup_interval_seconds=60,
+            retry_base_delay_seconds=0.01,
+        )
+        run = await run_store.create_run(task_id="task-1", agent_id="agent-1")
+        await run_store.update_metadata(run.run_id, {"assignment_attempts": 2})
+
+        await scheduler.requeue_run(run.run_id, reason="retry", attempts=3, reassign=False)
+        persisted = await run_store.get(run.run_id)
+        assert persisted.metadata["retry_backoff_seconds"] == 0.04
 
     asyncio.run(scenario())
 

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from synapse.models.agent import AgentBudgetUsage
 from synapse.models.run import RunGraph, RunGraphEdge, RunGraphNode, RunState, RunStatus
 from synapse.models.runtime_event import RunReplayView, RunTimeline, RunTimelineEntry, infer_event_phase
-from synapse.models.runtime_state import BrowserNetworkEntry, BrowserTraceEntry
+from synapse.models.runtime_state import BrowserNetworkEntry, BrowserTraceEntry, RunLeaseRecord
 from synapse.runtime.state_store import RuntimeStateStore
 
 
@@ -112,6 +112,61 @@ class RunStore:
         run = await self.get(run_id)
         run.metadata.update(metadata)
         return await self.save(run)
+
+    async def save_lease(self, lease: RunLeaseRecord) -> RunLeaseRecord:
+        if self.state_store is not None:
+            await self.state_store.store_run_lease(lease.run_id, lease.model_dump(mode="json"))
+        return lease
+
+    async def renew_lease(
+        self,
+        run_id: str,
+        *,
+        lease_timeout_seconds: float,
+        worker_id: str | None = None,
+        reset_acquired_at: bool = False,
+    ) -> RunLeaseRecord:
+        lease = await self.get_lease(run_id)
+        if lease is None:
+            raise KeyError(f"Run lease not found: {run_id}")
+        now = datetime.now(timezone.utc)
+        updates: dict[str, object] = {
+            "lease_expiration": now + timedelta(seconds=lease_timeout_seconds),
+        }
+        if worker_id is not None:
+            updates["worker_id"] = worker_id
+        if reset_acquired_at:
+            updates["lease_acquired_at"] = now
+        lease = lease.model_copy(update=updates)
+        return await self.save_lease(lease)
+
+    async def get_lease(self, run_id: str) -> RunLeaseRecord | None:
+        if self.state_store is None:
+            return None
+        payload = await self.state_store.get_run_lease(run_id)
+        if payload is None:
+            return None
+        return RunLeaseRecord.model_validate(payload)
+
+    async def list_leases(self, worker_id: str | None = None) -> list[RunLeaseRecord]:
+        if self.state_store is None:
+            return []
+        rows = await self.state_store.list_run_leases(worker_id=worker_id)
+        return [RunLeaseRecord.model_validate(row) for row in rows]
+
+    async def list_expired_leases(
+        self,
+        *,
+        now: datetime | None = None,
+        worker_id: str | None = None,
+    ) -> list[RunLeaseRecord]:
+        reference = now or datetime.now(timezone.utc)
+        leases = await self.list_leases(worker_id=worker_id)
+        return [lease for lease in leases if lease.lease_expiration <= reference]
+
+    async def delete_lease(self, run_id: str) -> None:
+        if self.state_store is not None:
+            await self.state_store.delete_run_lease(run_id)
 
     async def get_timeline(self, run_id: str, limit: int = 500) -> RunTimeline:
         run = await self.get(run_id)

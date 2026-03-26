@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     scheduler_lease_timeout_seconds: float = 60.0
     scheduler_cleanup_interval_seconds: float = 15.0
     scheduler_max_assignment_retries: int = 3
+    scheduler_retry_base_delay_seconds: float = 1.0
     auth_required: bool = True
     jwt_secret: str = "synapse-dev-secret"
     jwt_issuer: str = "synapse"

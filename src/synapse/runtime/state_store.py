@@ -116,6 +116,22 @@ class RuntimeStateStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def store_run_lease(self, run_id: str, lease_data: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_run_lease(self, run_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def list_run_leases(self, worker_id: str | None = None) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def delete_run_lease(self, run_id: str) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
     async def store_runtime_event(self, event_id: str, event_data: dict[str, Any]) -> None:
         raise NotImplementedError
 
@@ -188,6 +204,7 @@ class InMemoryRuntimeStateStore(RuntimeStateStore):
         self._runs: dict[str, dict[str, Any]] = {}
         self._events: dict[str, dict[str, Any]] = {}
         self._event_ids: list[str] = []
+        self._run_leases: dict[str, dict[str, Any]] = {}
         self._organizations: dict[str, dict[str, Any]] = {}
         self._projects: dict[str, dict[str, Any]] = {}
         self._users: dict[str, dict[str, Any]] = {}
@@ -287,6 +304,22 @@ class InMemoryRuntimeStateStore(RuntimeStateStore):
         if task_id is not None:
             rows = [row for row in rows if row.get("task_id") == task_id]
         return rows
+
+    async def store_run_lease(self, run_id: str, lease_data: dict[str, Any]) -> None:
+        self._run_leases[run_id] = dict(lease_data)
+
+    async def get_run_lease(self, run_id: str) -> dict[str, Any] | None:
+        record = self._run_leases.get(run_id)
+        return dict(record) if record is not None else None
+
+    async def list_run_leases(self, worker_id: str | None = None) -> list[dict[str, Any]]:
+        rows = [dict(value) for value in self._run_leases.values()]
+        if worker_id is not None:
+            rows = [row for row in rows if row.get("worker_id") == worker_id]
+        return rows
+
+    async def delete_run_lease(self, run_id: str) -> None:
+        self._run_leases.pop(run_id, None)
 
     async def store_runtime_event(self, event_id: str, event_data: dict[str, Any]) -> None:
         self._events[event_id] = dict(event_data)
@@ -554,6 +587,36 @@ class RedisRuntimeStateStore(RuntimeStateStore):
             records = [record for record in records if record.get("task_id") == task_id]
         return records
 
+    async def store_run_lease(self, run_id: str, lease_data: dict[str, Any]) -> None:
+        redis = self._require_redis()
+        await redis.set(self._run_lease_key(run_id), json.dumps(lease_data))
+        await redis.sadd("synapse:run-leases:index", run_id)
+        worker_id = lease_data.get("worker_id")
+        if isinstance(worker_id, str) and worker_id:
+            await redis.sadd(f"synapse:run-leases:worker:{worker_id}", run_id)
+
+    async def get_run_lease(self, run_id: str) -> dict[str, Any] | None:
+        redis = self._require_redis()
+        payload = await redis.get(self._run_lease_key(run_id))
+        return self._decode(payload)
+
+    async def list_run_leases(self, worker_id: str | None = None) -> list[dict[str, Any]]:
+        redis = self._require_redis()
+        if worker_id is None:
+            ids = await redis.smembers("synapse:run-leases:index")
+        else:
+            ids = await redis.smembers(f"synapse:run-leases:worker:{worker_id}")
+        keys = [self._run_lease_key(run_id) for run_id in ids]
+        return await self._mget_json(keys)
+
+    async def delete_run_lease(self, run_id: str) -> None:
+        redis = self._require_redis()
+        lease = await self.get_run_lease(run_id)
+        await redis.delete(self._run_lease_key(run_id))
+        await redis.srem("synapse:run-leases:index", run_id)
+        if lease is not None and isinstance(lease.get("worker_id"), str):
+            await redis.srem(f"synapse:run-leases:worker:{lease['worker_id']}", run_id)
+
     async def store_runtime_event(self, event_id: str, event_data: dict[str, Any]) -> None:
         redis = self._require_redis()
         await redis.set(self._event_key(event_id), json.dumps(event_data))
@@ -709,6 +772,10 @@ class RedisRuntimeStateStore(RuntimeStateStore):
     @staticmethod
     def _run_key(run_id: str) -> str:
         return f"synapse:runs:{run_id}"
+
+    @staticmethod
+    def _run_lease_key(run_id: str) -> str:
+        return f"synapse:run-leases:{run_id}"
 
     @staticmethod
     def _event_key(event_id: str) -> str:

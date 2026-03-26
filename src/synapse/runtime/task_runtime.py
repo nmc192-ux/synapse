@@ -12,6 +12,7 @@ from synapse.runtime.llm import LLMProvider
 from synapse.runtime.memory_service import MemoryService
 from synapse.runtime.registry import AgentRegistry
 from synapse.runtime.run_store import RunStore
+from synapse.runtime.scheduler import RunScheduler
 from synapse.runtime.safety import AgentSafetyLayer, SecurityAlertError, SecurityFinding
 from synapse.runtime.task_manager import TaskExecutionManager
 from synapse.runtime.tool_service import ToolService
@@ -32,6 +33,7 @@ class TaskRuntime:
         safety: AgentSafetyLayer,
         llm: LLMProvider | None = None,
         compression_provider: CompressionProvider | None = None,
+        scheduler: RunScheduler | None = None,
     ) -> None:
         self.agents = agents
         self.browser_service = browser_service
@@ -44,6 +46,7 @@ class TaskRuntime:
         self.safety = safety
         self.llm = llm
         self.compression_provider = compression_provider
+        self.scheduler = scheduler
 
     async def create_task(self, request: TaskCreateRequest) -> TaskRecord:
         return await self.task_manager.create_task(request)
@@ -60,6 +63,7 @@ class TaskRuntime:
     async def execute_task(self, request: TaskRequest) -> TaskResult:
         run = await self._ensure_run(request)
         request = request.model_copy(update={"run_id": run.run_id})
+        lease = await self.scheduler.assign_run(run.run_id) if self.scheduler is not None else None
         sandbox = getattr(self.browser_service, "sandbox", None)
         if hasattr(sandbox, "set_run_policy"):
             sandbox.set_run_policy(run.run_id, run.metadata.get("security_policy"))
@@ -68,7 +72,34 @@ class TaskRuntime:
         await self._enforce_task_safety(request)
         self.checkpoint_service.remember_task_context(request)
         if request.session_id is None:
-            session = await self.browser_service.create_session(str(uuid.uuid4()), agent_id=request.agent_id, run_id=run.run_id)
+            try:
+                create_session_kwargs = {
+                    "agent_id": request.agent_id,
+                    "run_id": run.run_id,
+                }
+                if lease is not None:
+                    create_session_kwargs["worker_id"] = lease.worker_id
+                try:
+                    session = await self.browser_service.create_session(
+                        str(uuid.uuid4()),
+                        **create_session_kwargs,
+                    )
+                except TypeError:
+                    create_session_kwargs.pop("worker_id", None)
+                    session = await self.browser_service.create_session(
+                        str(uuid.uuid4()),
+                        **create_session_kwargs,
+                    )
+            except Exception:
+                if self.scheduler is not None:
+                    try:
+                        await self.scheduler.mark_assignment_failed(
+                            run.run_id,
+                            reason="Browser session bootstrap failed.",
+                        )
+                    except RuntimeError:
+                        pass
+                raise
             request = request.model_copy(update={"session_id": session.session_id})
             self.checkpoint_service.remember_task_context(request)
 
@@ -132,6 +163,8 @@ class TaskRuntime:
                 task_id=request.task_id,
                 run_id=run.run_id,
             )
+        if self.scheduler is not None:
+            await self.scheduler.release_run(run.run_id)
         return final_result
 
     async def resume_task(self, checkpoint_id: str) -> TaskResult:

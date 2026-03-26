@@ -56,8 +56,17 @@ class BrowserService:
         if hasattr(self.browser, "set_state_store"):
             self.browser.set_state_store(state_store)
 
-    async def create_session(self, session_id: str, agent_id: str | None = None, run_id: str | None = None) -> BrowserSession:
-        session = await self.browser.create_session(session_id, agent_id=agent_id, run_id=run_id)
+    async def create_session(
+        self,
+        session_id: str,
+        agent_id: str | None = None,
+        run_id: str | None = None,
+        worker_id: str | None = None,
+    ) -> BrowserSession:
+        kwargs = {"agent_id": agent_id, "run_id": run_id}
+        if worker_id is not None:
+            kwargs["worker_id"] = worker_id
+        session = await self.browser.create_session(session_id, **kwargs)
         await self.events.emit(
             EventType.SESSION_CREATED,
             run_id=run_id,
@@ -308,8 +317,12 @@ class BrowserService:
         agent_id: str | None = None,
         checkpoint_id: str | None = None,
         run_id: str | None = None,
+        worker_id: str | None = None,
     ):
-        restored = await self.browser.restore_session_state(session_id)
+        if worker_id is None:
+            restored = await self.browser.restore_session_state(session_id)
+        else:
+            restored = await self.browser.restore_session_state(session_id, worker_id=worker_id)
         if restored is not None:
             await self.events.emit(
                 EventType.SESSION_RESTORED,

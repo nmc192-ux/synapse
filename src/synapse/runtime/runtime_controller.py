@@ -47,6 +47,7 @@ from synapse.runtime.memory_service import MemoryService
 from synapse.runtime.messaging import AgentMessageBus
 from synapse.runtime.registry import AgentRegistry
 from synapse.runtime.run_store import RunStore
+from synapse.runtime.scheduler import RunScheduler
 from synapse.runtime.security import AgentSecuritySandbox
 from synapse.runtime.safety import AgentSafetyLayer
 from synapse.runtime.state_store import RuntimeStateStore
@@ -92,6 +93,7 @@ class RuntimeController:
 
         self.event_bus = EventBus(sockets, compression_provider=compression_provider)
         self.run_store = RunStore(state_store)
+        self.scheduler = RunScheduler(self.run_store, browser, self.event_bus)
         self.budget_service = BudgetService(budget_manager, agents, self.event_bus, self.run_store)
         self.browser_service = BrowserService(browser, sandbox, safety, self.event_bus, self.budget_service, state_store)
         self.memory_service = MemoryService(
@@ -122,6 +124,7 @@ class RuntimeController:
             safety=safety,
             llm=llm,
             compression_provider=compression_provider,
+            scheduler=self.scheduler,
         )
 
     @property

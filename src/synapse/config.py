@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     browser_worker_count: int = 1
     browser_worker_heartbeat_interval_seconds: float = 15.0
     browser_worker_queue_prefix: str = "synapse:browser:worker"
+    scheduler_lease_timeout_seconds: float = 60.0
+    scheduler_cleanup_interval_seconds: float = 15.0
+    scheduler_max_assignment_retries: int = 3
     auth_required: bool = True
     jwt_secret: str = "synapse-dev-secret"
     jwt_issuer: str = "synapse"

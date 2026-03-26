@@ -95,11 +95,13 @@ async def lifespan(_: FastAPI):
     await agent_registry.load_from_store()
     await a2a_hub.cleanup_stale_connections()
     await browser_runtime.start()
+    await orchestrator.scheduler.start()
     await memory_manager.start()
     await task_manager.start()
     try:
         yield
     finally:
+        await orchestrator.scheduler.stop()
         await store.stop()
         await task_manager.stop()
         await memory_manager.stop()

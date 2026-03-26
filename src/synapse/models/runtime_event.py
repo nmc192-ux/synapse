@@ -47,6 +47,9 @@ class EventType(str, Enum):
     BROWSER_WORKER_HEARTBEAT = "browser.worker.heartbeat"
     BROWSER_TASK_DISPATCHED = "browser.task.dispatched"
     BROWSER_TASK_COMPLETED = "browser.task.completed"
+    RUN_ASSIGNED = "run.assigned"
+    RUN_REQUEUED = "run.requeued"
+    WORKER_UNAVAILABLE = "worker.unavailable"
 
 
 class EventSeverity(str, Enum):

@@ -81,8 +81,9 @@ class BrowserWorkerPool:
         session_id: str,
         agent_id: str | None = None,
         run_id: str | None = None,
+        worker_id: str | None = None,
     ) -> BrowserSession:
-        worker_id = self._choose_worker_id(session_id=session_id)
+        worker_id = worker_id or self._choose_worker_id(session_id=session_id)
         payload = await self._dispatch(
             worker_id,
             BrowserTaskEnvelope(
@@ -212,8 +213,8 @@ class BrowserWorkerPool:
             {"session_id": session_id, "run_id": run_id},
         )
 
-    async def restore_session_state(self, session_id: str):
-        worker_id = self._choose_worker_id(session_id=session_id)
+    async def restore_session_state(self, session_id: str, worker_id: str | None = None):
+        worker_id = worker_id or self._choose_worker_id(session_id=session_id)
         payload = await self._dispatch(
             worker_id,
             BrowserTaskEnvelope(

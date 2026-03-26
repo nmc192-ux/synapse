@@ -23,7 +23,10 @@ class StorageSnapshot(BaseModel):
 class SessionProfile(BaseModel):
     profile_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
+    organization_id: str | None = None
+    project_id: str | None = None
     agent_id: str | None = None
+    owner_user_id: str | None = None
     cookies: list[dict[str, object]] = Field(default_factory=list)
     storage_by_origin: dict[str, StorageSnapshot] = Field(default_factory=dict)
     auth_state_by_domain: dict[str, dict[str, object]] = Field(default_factory=dict)
@@ -36,7 +39,10 @@ class SessionProfile(BaseModel):
 
 class SessionProfileCreateRequest(BaseModel):
     name: str
+    organization_id: str | None = None
+    project_id: str | None = None
     agent_id: str | None = None
+    owner_user_id: str | None = None
     source_session_id: str | None = None
     cookies: list[dict[str, object]] = Field(default_factory=list)
     storage_by_origin: dict[str, StorageSnapshot] = Field(default_factory=dict)
@@ -76,7 +82,10 @@ class SessionProfileManager:
 
         profile = SessionProfile(
             name=request.name,
+            organization_id=request.organization_id,
+            project_id=request.project_id or self._project_id_from_session(session_payload),
             agent_id=request.agent_id or self._agent_id_from_session(session_payload),
+            owner_user_id=request.owner_user_id,
             cookies=request.cookies or self._cookies_from_session(session_payload),
             storage_by_origin=request.storage_by_origin or self._storage_from_session(session_payload),
             auth_state_by_domain=request.auth_state_by_domain or self._auth_state_from_session(session_payload),
@@ -211,6 +220,11 @@ class SessionProfileManager:
     def _agent_id_from_session(session_payload: dict[str, object] | None) -> str | None:
         agent_id = None if session_payload is None else session_payload.get("agent_id")
         return str(agent_id) if isinstance(agent_id, str) and agent_id else None
+
+    @staticmethod
+    def _project_id_from_session(session_payload: dict[str, object] | None) -> str | None:
+        project_id = None if session_payload is None else session_payload.get("project_id")
+        return str(project_id) if isinstance(project_id, str) and project_id else None
 
     @staticmethod
     def _cookies_from_session(session_payload: dict[str, object] | None) -> list[dict[str, object]]:

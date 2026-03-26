@@ -39,6 +39,7 @@ class CheckpointService:
             task_id=task_id,
             agent_id=agent_id,
             run_id=run_id,
+            project_id=await self._project_id_for_run(run_id),
             current_goal=str(state.get("current_goal") or (context.goal if context is not None else "")),
             planner_state=state.get("planner_state", {}) if isinstance(state.get("planner_state"), dict) else {},
             memory_snapshot_reference=str(state.get("memory_snapshot_reference")) if state.get("memory_snapshot_reference") is not None else None,
@@ -131,3 +132,12 @@ class CheckpointService:
             },
             correlation_id=checkpoint.checkpoint_id,
         )
+
+    async def _project_id_for_run(self, run_id: str | None) -> str | None:
+        if run_id is None or self.state_store is None:
+            return None
+        payload = await self.state_store.get_run(run_id)
+        if payload is None:
+            return None
+        project_id = payload.get("project_id")
+        return str(project_id) if isinstance(project_id, str) and project_id else None

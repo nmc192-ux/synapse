@@ -21,6 +21,9 @@ class WorkerRuntimeStatus(str, Enum):
 
 class AgentRuntimeRecord(BaseModel):
     agent_id: str
+    organization_id: str | None = None
+    project_id: str | None = None
+    owner_user_id: str | None = None
     kind: str
     name: str
     capabilities: list[str] = Field(default_factory=list)
@@ -38,6 +41,7 @@ class BrowserSessionState(BaseModel):
     session_id: str
     agent_id: str | None = None
     run_id: str | None = None
+    project_id: str | None = None
     current_url: str | None = None
     cookies: list[dict[str, object]] = Field(default_factory=list)
     local_storage: dict[str, str] = Field(default_factory=dict)
@@ -73,6 +77,7 @@ class RuntimeCheckpoint(BaseModel):
     task_id: str
     agent_id: str
     run_id: str | None = None
+    project_id: str | None = None
     current_goal: str
     planner_state: dict[str, object] = Field(default_factory=dict)
     memory_snapshot_reference: str | None = None

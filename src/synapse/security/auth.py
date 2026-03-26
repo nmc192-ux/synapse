@@ -15,6 +15,9 @@ class AuthPrincipal(BaseModel):
     principal_type: PrincipalType
     scopes: list[str] = Field(default_factory=list)
     agent_id: str | None = None
+    organization_id: str | None = None
+    project_id: str | None = None
+    api_key_id: str | None = None
 
 
 class Authenticator:
@@ -29,6 +32,9 @@ class Authenticator:
         principal_type: PrincipalType,
         scopes: list[str],
         agent_id: str | None = None,
+        organization_id: str | None = None,
+        project_id: str | None = None,
+        api_key_id: str | None = None,
         expires_in_seconds: int | None = None,
     ) -> str:
         return self.codec.encode(
@@ -37,6 +43,9 @@ class Authenticator:
                 "type": principal_type.value,
                 "scopes": scopes,
                 "agent_id": agent_id,
+                "organization_id": organization_id,
+                "project_id": project_id,
+                "api_key_id": api_key_id,
             },
             expires_in_seconds=expires_in_seconds or self.settings.jwt_expiration_seconds,
         )
@@ -62,6 +71,9 @@ class Authenticator:
             principal_type=PrincipalType(principal_type),
             scopes=list(scopes),
             agent_id=payload.get("agent_id") if isinstance(payload.get("agent_id"), str) else None,
+            organization_id=payload.get("organization_id") if isinstance(payload.get("organization_id"), str) else None,
+            project_id=payload.get("project_id") if isinstance(payload.get("project_id"), str) else None,
+            api_key_id=payload.get("api_key_id") if isinstance(payload.get("api_key_id"), str) else None,
         )
 
     def authorize(self, principal: AuthPrincipal, required_scopes: tuple[str, ...], *, agent_id: str | None = None) -> AuthPrincipal:

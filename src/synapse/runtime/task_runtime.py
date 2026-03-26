@@ -231,6 +231,7 @@ class TaskRuntime:
         return await self.run_store.create_run(
             task_id=request.task_id,
             agent_id=request.agent_id,
+            project_id=self.agents.get(request.agent_id).project_id,
             correlation_id=request.task_id,
             parent_run_id=request.parent_run_id,
             metadata={"goal": request.goal},
@@ -252,6 +253,7 @@ class TaskRuntime:
         child_run = await self.run_store.create_run(
             task_id=request.task_id,
             agent_id=target_agent_id,
+            project_id=self.agents.get(target_agent_id).project_id,
             correlation_id=run.correlation_id or request.task_id,
             parent_run_id=run.run_id,
             metadata={

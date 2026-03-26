@@ -105,6 +105,9 @@ class AgentCheckpoint(BaseModel):
 
 class AgentDefinition(BaseModel):
     agent_id: str = Field(..., description="Runtime identifier for the agent instance.")
+    organization_id: str | None = None
+    project_id: str | None = None
+    owner_user_id: str | None = None
     kind: AgentKind
     name: str
     description: str | None = None

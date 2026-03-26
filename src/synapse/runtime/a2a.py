@@ -62,6 +62,9 @@ class A2AHub:
     def register_agent(self, request: AgentRegistrationRequest) -> AgentDefinition:
         definition = AgentDefinition(
             agent_id=request.agent_id,
+            organization_id=request.organization_id,
+            project_id=request.project_id,
+            owner_user_id=request.owner_user_id,
             kind=AgentKind.A2A,
             name=request.name,
             description=request.description,

@@ -78,6 +78,9 @@ class AgentRegistry:
         last_seen = self._last_seen_at.get(agent.agent_id, datetime.now(timezone.utc))
         record = AgentRuntimeRecord(
             agent_id=agent.agent_id,
+            organization_id=agent.organization_id,
+            project_id=agent.project_id,
+            owner_user_id=agent.owner_user_id,
             kind=agent.kind.value,
             name=agent.name,
             capabilities=agent.capability_tags,

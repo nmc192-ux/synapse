@@ -59,6 +59,9 @@ class TaskResultPayload(BaseModel):
 
 class AgentRegistrationRequest(BaseModel):
     agent_id: str
+    organization_id: str | None = None
+    project_id: str | None = None
+    owner_user_id: str | None = None
     name: str
     description: str | None = None
     capabilities: list[str] = Field(default_factory=list)

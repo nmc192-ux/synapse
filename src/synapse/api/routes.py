@@ -38,6 +38,19 @@ from synapse.models.runtime_event import EventType, RunReplayView, RunTimeline, 
 from synapse.models.message import AgentMessage
 from synapse.models.memory import MemoryRecord, MemorySearchRequest, MemorySearchResult, MemoryStoreRequest
 from synapse.models.plugin import PluginDescriptor, PluginReloadRequest, ToolDescriptor
+from synapse.models.platform import (
+    APIKeyCreateRequest,
+    APIKeyIssueResponse,
+    APIKeyRecord,
+    AgentOwnership,
+    AgentOwnershipRequest,
+    Organization,
+    OrganizationCreateRequest,
+    PlatformUser,
+    Project,
+    ProjectCreateRequest,
+    UserCreateRequest,
+)
 from synapse.models.run import RunGraph, RunState
 from synapse.models.runtime_state import BrowserNetworkEntry, BrowserSessionState, BrowserTraceEntry, ConnectionState, RuntimeCheckpoint
 from synapse.models.task import (
@@ -81,6 +94,97 @@ def get_orchestrator() -> RuntimeOrchestrator:
 @router.get("/health")
 async def healthcheck() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.post("/platform/organizations", response_model=Organization)
+async def create_organization(
+    request: OrganizationCreateRequest,
+    _principal: AdminPrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> Organization:
+    return await orchestrator.create_organization(request)
+
+
+@router.get("/platform/organizations", response_model=list[Organization])
+async def list_organizations(
+    _principal: AdminPrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> list[Organization]:
+    return await orchestrator.list_organizations()
+
+
+@router.post("/platform/projects", response_model=Project)
+async def create_project(
+    request: ProjectCreateRequest,
+    _principal: AdminPrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> Project:
+    return await orchestrator.create_project(request)
+
+
+@router.get("/platform/projects", response_model=list[Project])
+async def list_projects(
+    organization_id: str | None = None,
+    _principal: AuthPrincipal = Depends(require_scopes(Scope.ADMIN.value)),
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> list[Project]:
+    return await orchestrator.list_projects(organization_id=organization_id)
+
+
+@router.post("/platform/users", response_model=PlatformUser)
+async def create_user(
+    request: UserCreateRequest,
+    _principal: AdminPrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> PlatformUser:
+    return await orchestrator.create_user(request)
+
+
+@router.get("/platform/users", response_model=list[PlatformUser])
+async def list_users(
+    organization_id: str | None = None,
+    project_id: str | None = None,
+    _principal: AuthPrincipal = Depends(require_scopes(Scope.ADMIN.value)),
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> list[PlatformUser]:
+    return await orchestrator.list_users(organization_id=organization_id, project_id=project_id)
+
+
+@router.post("/platform/api-keys", response_model=APIKeyIssueResponse)
+async def create_api_key(
+    request: APIKeyCreateRequest,
+    _principal: AdminPrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> APIKeyIssueResponse:
+    return await orchestrator.create_api_key(request)
+
+
+@router.get("/platform/api-keys", response_model=list[APIKeyRecord])
+async def list_api_keys(
+    project_id: str | None = None,
+    _principal: AuthPrincipal = Depends(require_scopes(Scope.ADMIN.value)),
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> list[APIKeyRecord]:
+    return await orchestrator.list_api_keys(project_id=project_id)
+
+
+@router.post("/platform/agents/{agent_id}/ownership", response_model=AgentOwnership)
+async def assign_agent_ownership(
+    agent_id: str,
+    request: AgentOwnershipRequest,
+    _principal: AdminPrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> AgentOwnership:
+    return await orchestrator.assign_agent_ownership(agent_id, request)
+
+
+@router.get("/platform/agents/{agent_id}/ownership", response_model=AgentOwnership | None)
+async def get_agent_ownership(
+    agent_id: str,
+    _principal: AdminPrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> AgentOwnership | None:
+    return await orchestrator.get_agent_ownership(agent_id)
 
 
 @router.post("/sessions", response_model=BrowserSession)

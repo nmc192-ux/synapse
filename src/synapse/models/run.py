@@ -19,6 +19,7 @@ class RunState(BaseModel):
     run_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     task_id: str
     agent_id: str
+    project_id: str | None = None
     status: RunStatus = RunStatus.PENDING
     started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -35,6 +36,7 @@ class RunGraphNode(BaseModel):
     run_id: str
     task_id: str
     agent_id: str
+    project_id: str | None = None
     status: RunStatus
     parent_run_id: str | None = None
     current_phase: str | None = None

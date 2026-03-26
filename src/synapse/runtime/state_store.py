@@ -129,6 +129,46 @@ class RuntimeStateStore(ABC):
     ) -> list[dict[str, Any]]:
         raise NotImplementedError
 
+    @abstractmethod
+    async def store_organization(self, organization_id: str, organization_data: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def list_organizations(self) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def store_project(self, project_id: str, project_data: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def list_projects(self) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def store_user(self, user_id: str, user_data: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def list_users(self) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def store_api_key(self, api_key_id: str, api_key_data: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def list_api_keys(self) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def store_agent_ownership(self, agent_id: str, ownership_data: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_agent_ownership(self, agent_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
 
 class InMemoryRuntimeStateStore(RuntimeStateStore):
     def __init__(self) -> None:
@@ -140,6 +180,11 @@ class InMemoryRuntimeStateStore(RuntimeStateStore):
         self._runs: dict[str, dict[str, Any]] = {}
         self._events: dict[str, dict[str, Any]] = {}
         self._event_ids: list[str] = []
+        self._organizations: dict[str, dict[str, Any]] = {}
+        self._projects: dict[str, dict[str, Any]] = {}
+        self._users: dict[str, dict[str, Any]] = {}
+        self._api_keys: dict[str, dict[str, Any]] = {}
+        self._agent_ownership: dict[str, dict[str, Any]] = {}
 
     async def register_agent(self, agent: dict[str, Any]) -> None:
         self._agents[agent["agent_id"]] = dict(agent)
@@ -260,6 +305,37 @@ class InMemoryRuntimeStateStore(RuntimeStateStore):
             if len(rows) >= limit:
                 break
         return rows
+
+    async def store_organization(self, organization_id: str, organization_data: dict[str, Any]) -> None:
+        self._organizations[organization_id] = dict(organization_data)
+
+    async def list_organizations(self) -> list[dict[str, Any]]:
+        return [dict(value) for value in self._organizations.values()]
+
+    async def store_project(self, project_id: str, project_data: dict[str, Any]) -> None:
+        self._projects[project_id] = dict(project_data)
+
+    async def list_projects(self) -> list[dict[str, Any]]:
+        return [dict(value) for value in self._projects.values()]
+
+    async def store_user(self, user_id: str, user_data: dict[str, Any]) -> None:
+        self._users[user_id] = dict(user_data)
+
+    async def list_users(self) -> list[dict[str, Any]]:
+        return [dict(value) for value in self._users.values()]
+
+    async def store_api_key(self, api_key_id: str, api_key_data: dict[str, Any]) -> None:
+        self._api_keys[api_key_id] = dict(api_key_data)
+
+    async def list_api_keys(self) -> list[dict[str, Any]]:
+        return [dict(value) for value in self._api_keys.values()]
+
+    async def store_agent_ownership(self, agent_id: str, ownership_data: dict[str, Any]) -> None:
+        self._agent_ownership[agent_id] = dict(ownership_data)
+
+    async def get_agent_ownership(self, agent_id: str) -> dict[str, Any] | None:
+        record = self._agent_ownership.get(agent_id)
+        return dict(record) if record is not None else None
 
 
 class RedisRuntimeStateStore(RuntimeStateStore):
@@ -487,6 +563,56 @@ class RedisRuntimeStateStore(RuntimeStateStore):
         keys = [self._event_key(event_id) for event_id in ids]
         return await self._mget_json(keys)
 
+    async def store_organization(self, organization_id: str, organization_data: dict[str, Any]) -> None:
+        redis = self._require_redis()
+        await redis.set(self._organization_key(organization_id), json.dumps(organization_data))
+        await redis.sadd("synapse:organizations:index", organization_id)
+
+    async def list_organizations(self) -> list[dict[str, Any]]:
+        redis = self._require_redis()
+        ids = await redis.smembers("synapse:organizations:index")
+        return await self._mget_json([self._organization_key(item_id) for item_id in ids])
+
+    async def store_project(self, project_id: str, project_data: dict[str, Any]) -> None:
+        redis = self._require_redis()
+        await redis.set(self._project_key(project_id), json.dumps(project_data))
+        await redis.sadd("synapse:projects:index", project_id)
+
+    async def list_projects(self) -> list[dict[str, Any]]:
+        redis = self._require_redis()
+        ids = await redis.smembers("synapse:projects:index")
+        return await self._mget_json([self._project_key(item_id) for item_id in ids])
+
+    async def store_user(self, user_id: str, user_data: dict[str, Any]) -> None:
+        redis = self._require_redis()
+        await redis.set(self._user_key(user_id), json.dumps(user_data))
+        await redis.sadd("synapse:users:index", user_id)
+
+    async def list_users(self) -> list[dict[str, Any]]:
+        redis = self._require_redis()
+        ids = await redis.smembers("synapse:users:index")
+        return await self._mget_json([self._user_key(item_id) for item_id in ids])
+
+    async def store_api_key(self, api_key_id: str, api_key_data: dict[str, Any]) -> None:
+        redis = self._require_redis()
+        await redis.set(self._api_key_key(api_key_id), json.dumps(api_key_data))
+        await redis.sadd("synapse:api-keys:index", api_key_id)
+
+    async def list_api_keys(self) -> list[dict[str, Any]]:
+        redis = self._require_redis()
+        ids = await redis.smembers("synapse:api-keys:index")
+        return await self._mget_json([self._api_key_key(item_id) for item_id in ids])
+
+    async def store_agent_ownership(self, agent_id: str, ownership_data: dict[str, Any]) -> None:
+        redis = self._require_redis()
+        await redis.set(self._agent_ownership_key(agent_id), json.dumps(ownership_data))
+        await redis.sadd("synapse:agent-ownership:index", agent_id)
+
+    async def get_agent_ownership(self, agent_id: str) -> dict[str, Any] | None:
+        redis = self._require_redis()
+        payload = await redis.get(self._agent_ownership_key(agent_id))
+        return self._decode(payload)
+
     def _require_redis(self) -> Redis:
         if self._redis is None:
             raise RuntimeError("Redis runtime store is not started.")
@@ -541,6 +667,26 @@ class RedisRuntimeStateStore(RuntimeStateStore):
     @staticmethod
     def _event_key(event_id: str) -> str:
         return f"synapse:events:{event_id}"
+
+    @staticmethod
+    def _organization_key(organization_id: str) -> str:
+        return f"synapse:organizations:{organization_id}"
+
+    @staticmethod
+    def _project_key(project_id: str) -> str:
+        return f"synapse:projects:{project_id}"
+
+    @staticmethod
+    def _user_key(user_id: str) -> str:
+        return f"synapse:users:{user_id}"
+
+    @staticmethod
+    def _api_key_key(api_key_id: str) -> str:
+        return f"synapse:api-keys:{api_key_id}"
+
+    @staticmethod
+    def _agent_ownership_key(agent_id: str) -> str:
+        return f"synapse:agent-ownership:{agent_id}"
 
 
 async def create_runtime_state_store() -> RuntimeStateStore:

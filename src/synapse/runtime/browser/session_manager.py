@@ -126,10 +126,12 @@ class SessionManager:
         storage = await self._snapshot_storage(page)
         snapshot = await extractor.snapshot_page(page)
         auth_state = self._auth_state_for_snapshot(snapshot, cookies)
+        effective_run_id = run_id or self._session_runs.get(session_id)
         state = BrowserSessionState(
             session_id=session_id,
             agent_id=self._session_agents.get(session_id),
-            run_id=run_id or self._session_runs.get(session_id),
+            run_id=effective_run_id,
+            project_id=await self._project_id_for_run(effective_run_id),
             current_url=page.url or None,
             cookies=[dict(cookie) for cookie in cookies],
             local_storage=storage["local_storage"],
@@ -232,6 +234,15 @@ class SessionManager:
 
     def get_last_url(self, session_id: str) -> str | None:
         return self._last_urls.get(session_id)
+
+    async def _project_id_for_run(self, run_id: str | None) -> str | None:
+        if run_id is None or self._state_store is None:
+            return None
+        payload = await self._state_store.get_run(run_id)
+        if payload is None:
+            return None
+        project_id = payload.get("project_id")
+        return str(project_id) if isinstance(project_id, str) and project_id else None
 
     def _attach_runtime_listeners(self, session_id: str, page: Page) -> None:
         if not hasattr(page, "on"):

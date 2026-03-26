@@ -12,6 +12,7 @@ from synapse.runtime.capabilities import CapabilityRegistry
 from synapse.runtime.checkpoint_service import CheckpointService
 from synapse.runtime.execution_plane import ExecutionPlaneRuntime
 from synapse.runtime.memory_service import MemoryService
+from synapse.runtime.platform_service import PlatformService
 from synapse.runtime.runtime_controller import RuntimeController
 from synapse.runtime.scheduler import RunScheduler
 from synapse.runtime.session_profiles import SessionProfileManager
@@ -39,6 +40,7 @@ __all__ = [
     "LocalModelProvider",
     "MemoryService",
     "OpenAIProvider",
+    "PlatformService",
     "BrowserWorkerPool",
     "InMemoryRuntimeStateStore",
     "RedisRuntimeStateStore",

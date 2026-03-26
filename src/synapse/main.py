@@ -69,6 +69,7 @@ orchestrator = ControlPlane(
     session_profiles=session_profile_manager,
     llm=llm_provider,
     compression_provider=compression_provider,
+    authenticator=authenticator,
 )
 a2a_hub.set_task_executor(orchestrator.execute_task)
 

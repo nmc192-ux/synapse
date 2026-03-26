@@ -32,6 +32,19 @@ from synapse.models.browser import (
 from synapse.models.runtime_event import EventType, RunReplayView, RunTimeline
 from synapse.models.message import AgentMessage
 from synapse.models.memory import MemoryRecord, MemorySearchRequest, MemorySearchResult, MemoryStoreRequest
+from synapse.models.platform import (
+    APIKeyCreateRequest,
+    APIKeyIssueResponse,
+    APIKeyRecord,
+    AgentOwnership,
+    AgentOwnershipRequest,
+    Organization,
+    OrganizationCreateRequest,
+    PlatformUser,
+    Project,
+    ProjectCreateRequest,
+    UserCreateRequest,
+)
 from synapse.models.plugin import PluginDescriptor, PluginReloadRequest, ToolDescriptor
 from synapse.models.run import RunGraph, RunState
 from synapse.models.runtime_state import BrowserNetworkEntry, BrowserSessionState, BrowserTraceEntry, ConnectionState, RuntimeCheckpoint
@@ -49,6 +62,7 @@ from synapse.runtime.llm import LLMProvider
 from synapse.runtime.memory import AgentMemoryManager
 from synapse.runtime.memory_service import MemoryService
 from synapse.runtime.messaging import AgentMessageBus
+from synapse.runtime.platform_service import PlatformService
 from synapse.runtime.registry import AgentRegistry
 from synapse.runtime.run_store import RunStore
 from synapse.runtime.scheduler import RunScheduler
@@ -60,6 +74,7 @@ from synapse.runtime.task_manager import TaskExecutionManager
 from synapse.runtime.task_runtime import TaskRuntime
 from synapse.runtime.tool_service import ToolService
 from synapse.runtime.tools import ToolRegistry
+from synapse.security.auth import Authenticator
 from synapse.transports.websocket_manager import WebSocketManager
 
 
@@ -81,6 +96,7 @@ class RuntimeController:
         session_profiles: SessionProfileManager | None = None,
         llm: LLMProvider | None = None,
         compression_provider: CompressionProvider | None = None,
+        authenticator: Authenticator | None = None,
     ) -> None:
         self.browser = browser
         self.agents = agents
@@ -97,6 +113,7 @@ class RuntimeController:
         self.session_profiles = session_profiles or SessionProfileManager(state_store=state_store)
         self.llm = llm
         self.compression_provider = compression_provider
+        self.authenticator = authenticator
 
         self.event_bus = EventBus(sockets, compression_provider=compression_provider)
         self.session_profiles.set_event_publisher(self.event_bus.publish)
@@ -104,6 +121,7 @@ class RuntimeController:
             browser.set_event_publisher(self.event_bus.publish)
         self.run_store = RunStore(state_store)
         self.capabilities = CapabilityRegistry(agents)
+        self.platform = PlatformService(state_store, authenticator, agents)
         self.benchmarks = BenchmarkSuite(self.run_store, state_store)
         self.scheduler = RunScheduler(self.run_store, browser, self.event_bus)
         self.budget_service = BudgetService(budget_manager, agents, self.event_bus, self.run_store)
@@ -152,6 +170,7 @@ class RuntimeController:
         if hasattr(self, "benchmarks"):
             self.benchmarks.state_store = state_store
         self.session_profiles.set_state_store(state_store) if hasattr(self, "session_profiles") else None
+        self.platform.set_state_store(state_store) if hasattr(self, "platform") else None
         self.browser_service.set_state_store(state_store) if hasattr(self, "browser_service") else None
         self.checkpoint_service.set_state_store(state_store) if hasattr(self, "checkpoint_service") else None
         self.memory_service.set_state_store(state_store) if hasattr(self, "memory_service") else None
@@ -298,6 +317,36 @@ class RuntimeController:
     async def get_persisted_agents(self) -> list[AgentDefinition]:
         rows = await self.agents.list_persisted_agents()
         return [AgentDefinition.model_validate(row["agent"]) for row in rows if isinstance(row.get("agent"), dict)]
+
+    async def create_organization(self, request: OrganizationCreateRequest) -> Organization:
+        return await self.platform.create_organization(request)
+
+    async def list_organizations(self) -> list[Organization]:
+        return await self.platform.list_organizations()
+
+    async def create_project(self, request: ProjectCreateRequest) -> Project:
+        return await self.platform.create_project(request)
+
+    async def list_projects(self, organization_id: str | None = None) -> list[Project]:
+        return await self.platform.list_projects(organization_id=organization_id)
+
+    async def create_user(self, request: UserCreateRequest) -> PlatformUser:
+        return await self.platform.create_user(request)
+
+    async def list_users(self, organization_id: str | None = None, project_id: str | None = None) -> list[PlatformUser]:
+        return await self.platform.list_users(organization_id=organization_id, project_id=project_id)
+
+    async def create_api_key(self, request: APIKeyCreateRequest) -> APIKeyIssueResponse:
+        return await self.platform.create_api_key(request)
+
+    async def list_api_keys(self, project_id: str | None = None) -> list[APIKeyRecord]:
+        return await self.platform.list_api_keys(project_id=project_id)
+
+    async def assign_agent_ownership(self, agent_id: str, request: AgentOwnershipRequest) -> AgentOwnership:
+        return await self.platform.assign_agent_ownership(agent_id, request)
+
+    async def get_agent_ownership(self, agent_id: str) -> AgentOwnership | None:
+        return await self.platform.get_agent_ownership(agent_id)
 
     async def get_persisted_agent(self, agent_id: str) -> AgentDefinition:
         row = await self.agents.get_persisted_agent(agent_id)

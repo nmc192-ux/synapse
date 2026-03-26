@@ -22,6 +22,7 @@ class RunStore:
         *,
         task_id: str,
         agent_id: str,
+        project_id: str | None = None,
         correlation_id: str | None = None,
         parent_run_id: str | None = None,
         metadata: dict[str, object] | None = None,
@@ -29,6 +30,7 @@ class RunStore:
         run = RunState(
             task_id=task_id,
             agent_id=agent_id,
+            project_id=project_id,
             status=RunStatus.RUNNING,
             correlation_id=correlation_id,
             parent_run_id=parent_run_id,
@@ -271,6 +273,7 @@ class RunStore:
             run_id=run.run_id,
             task_id=run.task_id,
             agent_id=run.agent_id,
+            project_id=run.project_id,
             status=run.status,
             parent_run_id=run.parent_run_id,
             current_phase=run.current_phase,

@@ -259,6 +259,25 @@ Synapse now persists runtime state to Redis with namespace keys:
 Connection heartbeats update agent liveness. If an A2A connection misses heartbeat
 TTL (default `60s`), it is marked stale/offline and emits `connection.stale`.
 
+## Multi-Tenant Platform
+
+Synapse now includes a multi-tenant platform model for organizations, projects, users,
+API keys, and agent ownership.
+
+- `POST /api/platform/organizations`
+- `GET /api/platform/organizations`
+- `POST /api/platform/projects`
+- `GET /api/platform/projects`
+- `POST /api/platform/users`
+- `GET /api/platform/users`
+- `POST /api/platform/api-keys`
+- `GET /api/platform/api-keys`
+- `POST /api/platform/agents/{agent_id}/ownership`
+- `GET /api/platform/agents/{agent_id}/ownership`
+
+Project-scoped API keys issue JWT access tokens that carry `organization_id`,
+`project_id`, and `api_key_id` claims for downstream policy enforcement.
+
 ## Capability Discovery
 
 Synapse can persist agent capability advertisements and ranked discovery metadata.

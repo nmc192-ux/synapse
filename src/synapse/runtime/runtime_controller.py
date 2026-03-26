@@ -125,6 +125,8 @@ class RuntimeController:
         self.run_store = RunStore(state_store)
         self.capabilities = CapabilityRegistry(agents)
         self.platform = PlatformService(state_store, authenticator, agents)
+        if self.authenticator is not None:
+            self.authenticator.set_api_key_validator(self.platform.authenticate_api_key_principal)
         self.benchmarks = BenchmarkSuite(self.run_store, state_store)
         self.scheduler = RunScheduler(self.run_store, browser, self.event_bus)
         self.budget_service = BudgetService(budget_manager, agents, self.event_bus, self.run_store)

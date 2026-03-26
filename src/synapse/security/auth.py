@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, Request, WebSocket, status
@@ -24,6 +25,13 @@ class Authenticator:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.codec = JWTCodec(settings.jwt_secret, settings.jwt_issuer, settings.jwt_audience)
+        self._api_key_validator: Callable[[str, str | None], Awaitable[AuthPrincipal]] | None = None
+
+    def set_api_key_validator(
+        self,
+        validator: Callable[[str, str | None], Awaitable[AuthPrincipal]],
+    ) -> None:
+        self._api_key_validator = validator
 
     def issue_token(
         self,
@@ -89,6 +97,59 @@ class Authenticator:
                 )
         return principal
 
+    async def authenticate_api_key(self, api_key: str | None, *, project_id: str | None = None) -> AuthPrincipal:
+        if not self.settings.auth_required:
+            return AuthPrincipal(
+                subject="development",
+                principal_type=PrincipalType.OPERATOR,
+                scopes=["admin"],
+                organization_id="development",
+                project_id="development",
+            )
+        if not api_key:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing API key.")
+        if self._api_key_validator is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="API key authentication is not configured.",
+            )
+        try:
+            principal = await self._api_key_validator(api_key, project_id)
+        except PermissionError as exc:
+            detail = str(exc) or "Invalid API key."
+            status_code = status.HTTP_403_FORBIDDEN if "project" in detail.lower() else status.HTTP_401_UNAUTHORIZED
+            raise HTTPException(status_code=status_code, detail=detail) from exc
+        if scopes_require_project_context(principal.scopes):
+            if not principal.organization_id or not principal.project_id:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Authenticated API keys must include organization_id and project_id.",
+                )
+        if project_id and principal.project_id != project_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="API key is not authorized for this project.",
+            )
+        return principal
+
+    async def authenticate_request(
+        self,
+        *,
+        authorization: str | None,
+        api_key: str | None,
+        project_id: str | None = None,
+    ) -> AuthPrincipal:
+        bearer_token = _extract_bearer_token(authorization)
+        if bearer_token is not None:
+            principal = self.authenticate_token(bearer_token)
+            if project_id and principal.project_id and principal.project_id != project_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Token is not authorized for this project.",
+                )
+            return principal
+        return await self.authenticate_api_key(api_key, project_id=project_id)
+
     def authorize(self, principal: AuthPrincipal, required_scopes: tuple[str, ...], *, agent_id: str | None = None) -> AuthPrincipal:
         missing = [scope for scope in required_scopes if scope not in principal.scopes]
         if missing:
@@ -131,6 +192,8 @@ class Authenticator:
 
 
 BearerHeader = Annotated[str | None, Header(alias="Authorization")]
+APIKeyHeader = Annotated[str | None, Header(alias="X-API-Key")]
+ProjectHeader = Annotated[str | None, Header(alias="X-Synapse-Project-Id")]
 
 
 def _extract_bearer_token(authorization: str | None) -> str | None:
@@ -150,9 +213,15 @@ def get_authenticator() -> Authenticator:
 
 async def get_current_principal(
     authorization: BearerHeader = None,
+    api_key: APIKeyHeader = None,
+    project_header: ProjectHeader = None,
     authenticator: Authenticator = Depends(get_authenticator),
 ) -> AuthPrincipal:
-    return authenticator.authenticate_token(_extract_bearer_token(authorization))
+    return await authenticator.authenticate_request(
+        authorization=authorization,
+        api_key=api_key,
+        project_id=project_header,
+    )
 
 
 def require_scopes(*required_scopes: str, agent_param: str | None = None):
@@ -182,7 +251,7 @@ def require_project_access(project_param: str = "project_id"):
     return dependency
 
 
-def authenticate_websocket(
+async def authenticate_websocket(
     websocket: WebSocket,
     authenticator: Authenticator,
     *,
@@ -190,6 +259,11 @@ def authenticate_websocket(
     agent_id: str | None = None,
 ) -> AuthPrincipal:
     authorization = websocket.headers.get("authorization")
-    token = _extract_bearer_token(authorization) or websocket.query_params.get("token")
-    principal = authenticator.authenticate_token(token)
+    api_key = websocket.headers.get("x-api-key") or websocket.query_params.get("api_key")
+    project_id = websocket.headers.get("x-synapse-project-id") or websocket.query_params.get("project_id")
+    principal = await authenticator.authenticate_request(
+        authorization=authorization or (f"Bearer {websocket.query_params.get('token')}" if websocket.query_params.get("token") else None),
+        api_key=api_key,
+        project_id=project_id,
+    )
     return authenticator.authorize(principal, required_scopes, agent_id=agent_id)

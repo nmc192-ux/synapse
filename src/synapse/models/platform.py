@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from enum import Enum
 import uuid
 from datetime import datetime, timezone
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 
 class Organization(BaseModel):
@@ -56,6 +57,11 @@ class UserCreateRequest(BaseModel):
     metadata: dict[str, object] = Field(default_factory=dict)
 
 
+class APIKeyStatus(str, Enum):
+    ACTIVE = "active"
+    REVOKED = "revoked"
+
+
 class APIKeyRecord(BaseModel):
     api_key_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     organization_id: str
@@ -64,11 +70,26 @@ class APIKeyRecord(BaseModel):
     name: str
     scopes: list[str] = Field(default_factory=list)
     prefix: str
-    secret_hash: str
+    hashed_secret: str = Field(validation_alias=AliasChoices("hashed_secret", "secret_hash"))
+    status: APIKeyStatus = APIKeyStatus.ACTIVE
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     expires_at: datetime | None = None
-    revoked: bool = False
+    last_used_at: datetime | None = None
     metadata: dict[str, object] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _upgrade_legacy_fields(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        payload = dict(value)
+        if "hashed_secret" not in payload and "secret_hash" in payload:
+            payload["hashed_secret"] = payload["secret_hash"]
+        if "status" not in payload and payload.get("revoked") is True:
+            payload["status"] = APIKeyStatus.REVOKED.value
+        payload.pop("secret_hash", None)
+        payload.pop("revoked", None)
+        return payload
 
 
 class APIKeyCreateRequest(BaseModel):

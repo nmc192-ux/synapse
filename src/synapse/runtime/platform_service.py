@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+from datetime import datetime, timezone
 
 from synapse.models.agent import AgentDefinition
 from synapse.models.platform import (
     APIKeyCreateRequest,
     APIKeyIssueResponse,
     APIKeyRecord,
+    APIKeyStatus,
     AuditLogRecord,
     AgentOwnership,
     AgentOwnershipRequest,
@@ -20,7 +22,7 @@ from synapse.models.platform import (
 )
 from synapse.runtime.registry import AgentRegistry
 from synapse.runtime.state_store import RuntimeStateStore
-from synapse.security.auth import Authenticator
+from synapse.security.auth import AuthPrincipal, Authenticator
 from synapse.security.policies import PrincipalType
 
 
@@ -127,7 +129,7 @@ class PlatformService:
             name=request.name,
             scopes=request.scopes,
             prefix=prefix,
-            secret_hash=self._hash_secret(raw_secret),
+            hashed_secret=self._hash_secret(raw_secret),
             expires_at=request.expires_at,
             metadata=request.metadata,
         )
@@ -149,6 +151,41 @@ class PlatformService:
         if project_id is not None:
             records = [record for record in records if record.project_id == project_id]
         return records
+
+    async def authenticate_api_key(
+        self,
+        raw_secret: str,
+        *,
+        project_id: str | None = None,
+    ) -> APIKeyRecord:
+        self._require_store()
+        hashed_secret = self._hash_secret(raw_secret)
+        records = await self.list_api_keys()
+        for record in records:
+            if record.hashed_secret != hashed_secret:
+                continue
+            if record.status != APIKeyStatus.ACTIVE:
+                raise PermissionError("API key has been revoked.")
+            if record.expires_at is not None and record.expires_at <= datetime.now(timezone.utc):
+                raise PermissionError("API key has expired.")
+            if project_id is not None and record.project_id != project_id:
+                raise PermissionError("API key is not authorized for this project.")
+            updated = record.model_copy(update={"last_used_at": datetime.now(timezone.utc)})
+            await self.state_store.store_api_key(updated.api_key_id, updated.model_dump(mode="json"))
+            return updated
+        raise PermissionError("Invalid API key.")
+
+    async def authenticate_api_key_principal(self, raw_secret: str, project_id: str | None = None) -> AuthPrincipal:
+        record = await self.authenticate_api_key(raw_secret, project_id=project_id)
+        principal_type = PrincipalType.OPERATOR if record.user_id else PrincipalType.SERVICE
+        return AuthPrincipal(
+            subject=record.user_id or record.api_key_id,
+            principal_type=principal_type,
+            scopes=list(record.scopes),
+            organization_id=record.organization_id,
+            project_id=record.project_id,
+            api_key_id=record.api_key_id,
+        )
 
     async def assign_agent_ownership(self, agent_id: str, request: AgentOwnershipRequest) -> AgentOwnership:
         self._require_store()

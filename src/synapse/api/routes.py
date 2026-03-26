@@ -227,7 +227,7 @@ async def list_users(
     return await orchestrator.list_users(organization_id=organization_id, project_id=project_id)
 
 
-@router.post("/platform/api-keys", response_model=APIKeyIssueResponse)
+@router.post("/platform/api-keys", response_model=APIKeyIssueResponse, response_model_exclude={"record": {"hashed_secret"}})
 async def create_api_key(
     request: APIKeyCreateRequest,
     _principal: AdminPrincipal,
@@ -236,7 +236,7 @@ async def create_api_key(
     return await orchestrator.create_api_key(request)
 
 
-@router.get("/platform/api-keys", response_model=list[APIKeyRecord])
+@router.get("/platform/api-keys", response_model=list[APIKeyRecord], response_model_exclude={"__all__": {"hashed_secret"}})
 async def list_api_keys(
     project_id: str | None = None,
     _principal: AuthPrincipal = Depends(require_scopes(Scope.ADMIN.value)),
@@ -371,7 +371,7 @@ async def find_project_agents(
     return [entry for entry in matches if entry.id in project_agents]
 
 
-@router.post("/cloud/projects/{project_id}/api-keys", response_model=APIKeyIssueResponse)
+@router.post("/cloud/projects/{project_id}/api-keys", response_model=APIKeyIssueResponse, response_model_exclude={"record": {"hashed_secret"}})
 async def create_project_api_key(
     project_id: str,
     request: APIKeyCreateRequest,
@@ -1394,7 +1394,7 @@ async def websocket_events(
     authenticator = Depends(get_authenticator),
 ) -> None:
     try:
-        principal = authenticate_websocket(
+        principal = await authenticate_websocket(
             websocket,
             authenticator,
             required_scopes=(Scope.TASKS_READ.value,),
@@ -1434,7 +1434,7 @@ async def websocket_a2a(
     authenticator = Depends(get_authenticator),
 ) -> None:
     try:
-        principal = authenticate_websocket(
+        principal = await authenticate_websocket(
             websocket,
             authenticator,
             required_scopes=(Scope.A2A_RECEIVE.value,),

@@ -107,6 +107,62 @@ def test_successful_http_and_websocket_auth() -> None:
     assert orchestrator.connected is True
 
 
+def test_successful_api_key_http_and_websocket_auth() -> None:
+    client, authenticator, orchestrator = _build_client()
+
+    async def validate_api_key(raw_secret: str, project_id: str | None):
+        assert raw_secret == "synp_valid"
+        assert project_id == "project-1"
+        return authenticator.authenticate_token(
+            authenticator.issue_token(
+                subject="svc-key-1",
+                principal_type=PrincipalType.SERVICE,
+                scopes=[Scope.TASKS_WRITE.value, Scope.TASKS_READ.value],
+                organization_id="org-1",
+                project_id="project-1",
+                api_key_id="key-1",
+            )
+        )
+
+    authenticator.set_api_key_validator(validate_api_key)
+
+    response = client.post(
+        "/api/tasks",
+        json={"task_id": "task-1", "agent_id": "agent-1", "goal": "Do work"},
+        headers={"X-API-Key": "synp_valid", "X-Synapse-Project-Id": "project-1"},
+    )
+    assert response.status_code == 200
+
+    with client.websocket_connect("/api/ws?api_key=synp_valid&project_id=project-1") as websocket:
+        websocket.close()
+    assert orchestrator.connected is True
+
+
+def test_expired_or_revoked_api_key_is_rejected() -> None:
+    client, authenticator, _ = _build_client()
+
+    async def validate_api_key(raw_secret: str, project_id: str | None):
+        if raw_secret == "synp_expired":
+            raise PermissionError("API key has expired.")
+        raise PermissionError("API key has been revoked.")
+
+    authenticator.set_api_key_validator(validate_api_key)
+
+    expired = client.post(
+        "/api/tasks",
+        json={"task_id": "task-1", "agent_id": "agent-1", "goal": "Do work"},
+        headers={"X-API-Key": "synp_expired", "X-Synapse-Project-Id": "project-1"},
+    )
+    revoked = client.post(
+        "/api/tasks",
+        json={"task_id": "task-1", "agent_id": "agent-1", "goal": "Do work"},
+        headers={"X-API-Key": "synp_revoked", "X-Synapse-Project-Id": "project-1"},
+    )
+
+    assert expired.status_code == 401
+    assert revoked.status_code == 401
+
+
 def test_websocket_missing_token_is_rejected() -> None:
     client, _, _ = _build_client()
     with pytest.raises(WebSocketDisconnect):

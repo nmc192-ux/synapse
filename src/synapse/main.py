@@ -75,6 +75,7 @@ orchestrator = ControlPlane(
     authenticator=authenticator,
 )
 a2a_hub.set_task_executor(orchestrator.execute_task)
+authenticator.set_api_key_validator(orchestrator.platform.authenticate_api_key_principal)
 
 
 async def echo_tool(arguments: dict[str, object]) -> dict[str, object]:

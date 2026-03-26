@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from urllib.parse import urlencode, urlparse, urlunparse
 
 import httpx
 
@@ -179,6 +180,18 @@ class SynapseClient:
         self.project_id = project_id
         self._apply_auth_headers()
 
+    def build_websocket_url(self, path: str = "/api/ws") -> str:
+        query: dict[str, str] = {}
+        if self.bearer_token:
+            query["token"] = self.bearer_token
+        elif self.api_key:
+            query["api_key"] = self.api_key
+        if self.project_id:
+            query["project_id"] = self.project_id
+        base = self.base_url.replace("http://", "ws://").replace("https://", "wss://")
+        parsed = urlparse(f"{base}{path}")
+        return urlunparse(parsed._replace(query=urlencode(query)))
+
     def _request(self, method: str, path: str, **kwargs: object) -> httpx.Response:
         self._apply_auth_headers()
         response = self._http.request(method, path, **kwargs)
@@ -195,12 +208,10 @@ class SynapseClient:
         headers: dict[str, str] = {}
         if self.project_id:
             headers["X-Synapse-Project-Id"] = self.project_id
-        if self.api_key:
-            headers["X-API-Key"] = self.api_key
         if self.bearer_token:
             headers["Authorization"] = f"Bearer {self.bearer_token}"
         elif self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+            headers["X-API-Key"] = self.api_key
         self._http.headers.update(headers)
         for key in ("Authorization", "X-API-Key", "X-Synapse-Project-Id"):
             if key not in headers and key in self._http.headers:
@@ -214,7 +225,7 @@ class SynapseClient:
             if response.status_code == 401:
                 raise PermissionError(
                     f"Authentication failed for {method.upper()} {path}: {detail}. "
-                    "Check api_key/bearer_token and refresh configuration."
+                    "Bearer tokens take precedence over API keys; check hosted credentials and refresh configuration."
                 ) from exc
             if response.status_code == 403:
                 project_suffix = f" in project '{self.project_id}'" if self.project_id else ""

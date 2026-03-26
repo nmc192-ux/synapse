@@ -38,33 +38,96 @@ async function requestJson(baseUrl, path, options = {}) {
 }
 
 export class SynapseClient {
-  constructor({ baseUrl = "http://127.0.0.1:8000", agentId = null } = {}) {
+  constructor({
+    baseUrl = "http://127.0.0.1:8000",
+    agentId = null,
+    apiKey = null,
+    bearerToken = null,
+    projectId = null,
+    tokenRefresh = null
+  } = {}) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
     this.agentId = agentId;
+    this.apiKey = apiKey;
+    this.bearerToken = bearerToken;
+    this.projectId = projectId;
+    this.tokenRefresh = tokenRefresh;
     this.browser = new SynapseBrowser(this, { agentId });
   }
 
+  buildHeaders(extraHeaders = {}) {
+    const headers = { ...extraHeaders };
+    if (this.projectId) {
+      headers["X-Synapse-Project-Id"] = this.projectId;
+    }
+    if (this.bearerToken) {
+      headers.Authorization = `Bearer ${this.bearerToken}`;
+    } else if (this.apiKey) {
+      headers["X-API-Key"] = this.apiKey;
+    }
+    return headers;
+  }
+
+  async request(path, options = {}) {
+    try {
+      return await requestJson(this.baseUrl, path, {
+        ...options,
+        headers: this.buildHeaders(options.headers || {})
+      });
+    } catch (error) {
+      if (
+        error instanceof SynapseHttpError &&
+        error.status === 401 &&
+        typeof this.tokenRefresh === "function"
+      ) {
+        const refreshed = await this.tokenRefresh();
+        if (refreshed) {
+          this.bearerToken = refreshed;
+          return requestJson(this.baseUrl, path, {
+            ...options,
+            headers: this.buildHeaders(options.headers || {})
+          });
+        }
+      }
+      throw error;
+    }
+  }
+
+  buildWebSocketUrl(path = "/api/ws") {
+    const base = this.baseUrl.replace(/^http/, "ws");
+    const url = new URL(`${base}${path}`);
+    if (this.bearerToken) {
+      url.searchParams.set("token", this.bearerToken);
+    } else if (this.apiKey) {
+      url.searchParams.set("api_key", this.apiKey);
+    }
+    if (this.projectId) {
+      url.searchParams.set("project_id", this.projectId);
+    }
+    return url.toString();
+  }
+
   async createSession() {
-    return requestJson(this.baseUrl, "/api/sessions", {
+    return this.request("/api/sessions", {
       method: "POST"
     });
   }
 
   async registerAgent(agent) {
-    return requestJson(this.baseUrl, "/api/agents", {
+    return this.request("/api/agents", {
       method: "POST",
       body: JSON.stringify(agent)
     });
   }
 
   async listTools() {
-    return requestJson(this.baseUrl, "/api/tools", {
+    return this.request("/api/tools", {
       method: "GET"
     });
   }
 
   async callTool(toolName, params = {}) {
-    return requestJson(this.baseUrl, "/api/tools/call", {
+    return this.request("/api/tools/call", {
       method: "POST",
       body: JSON.stringify({
         agent_id: this.agentId,
@@ -80,7 +143,7 @@ export class SynapseClient {
     content,
     metadata = {}
   }) {
-    return requestJson(this.baseUrl, "/api/messages", {
+    return this.request("/api/messages", {
       method: "POST",
       body: JSON.stringify({
         sender_agent_id: senderAgentId,
@@ -108,7 +171,7 @@ export class SynapseBrowser {
   }
 
   async open(url) {
-    return requestJson(this.client.baseUrl, "/api/browser/open", {
+    return this.client.request("/api/browser/open", {
       method: "POST",
       body: JSON.stringify({
         session_id: await this.getSessionId(),
@@ -119,7 +182,7 @@ export class SynapseBrowser {
   }
 
   async extract(selector, attribute = null) {
-    return requestJson(this.client.baseUrl, "/api/browser/extract", {
+    return this.client.request("/api/browser/extract", {
       method: "POST",
       body: JSON.stringify({
         session_id: await this.getSessionId(),
@@ -131,7 +194,7 @@ export class SynapseBrowser {
   }
 
   async click(selector) {
-    return requestJson(this.client.baseUrl, "/api/browser/click", {
+    return this.client.request("/api/browser/click", {
       method: "POST",
       body: JSON.stringify({
         session_id: await this.getSessionId(),
@@ -142,7 +205,7 @@ export class SynapseBrowser {
   }
 
   async type(selector, text) {
-    return requestJson(this.client.baseUrl, "/api/browser/type", {
+    return this.client.request("/api/browser/type", {
       method: "POST",
       body: JSON.stringify({
         session_id: await this.getSessionId(),
@@ -154,7 +217,7 @@ export class SynapseBrowser {
   }
 
   async screenshot() {
-    return requestJson(this.client.baseUrl, "/api/browser/screenshot", {
+    return this.client.request("/api/browser/screenshot", {
       method: "POST",
       body: JSON.stringify({
         session_id: await this.getSessionId(),

@@ -507,3 +507,95 @@ def test_cross_project_resource_access_is_rejected() -> None:
         headers=headers,
     )
     assert profile_response.status_code == 403
+
+
+def test_api_key_auth_works_end_to_end_and_enforces_project_scope() -> None:
+    store = InMemoryRuntimeStateStore()
+    settings = Settings(
+        auth_required=True,
+        jwt_secret="api-key-secret",
+        jwt_issuer="synapse-test",
+        jwt_audience="synapse-test-api",
+    )
+    authenticator = Authenticator(settings)
+    registry = AgentRegistry(state_store=store)
+    agent = registry.register(AgentDefinition(agent_id="agent-1", kind=AgentKind.CUSTOM, name="Agent One"))
+    registry.build_adapter = lambda *args, **kwargs: _StubAdapter()  # type: ignore[method-assign]
+    asyncio.run(registry.save_to_store(agent))
+
+    orchestrator = RuntimeOrchestrator(
+        browser=_StubBrowserService(),
+        agents=registry,
+        tools=SimpleNamespace(),
+        messages=SimpleNamespace(),
+        a2a=SimpleNamespace(),
+        memory_manager=_StubMemoryManager(),
+        task_manager=_StubTaskManager(),
+        sockets=WebSocketManager(state_store=store),
+        sandbox=SimpleNamespace(),
+        safety=_StubSafety(),
+        budget_manager=AgentBudgetManager(),
+        state_store=store,
+        authenticator=authenticator,
+    )
+    orchestrator.scheduler = None
+    orchestrator.task_runtime.scheduler = None
+
+    organization = asyncio.run(orchestrator.create_organization(OrganizationCreateRequest(name="Acme", slug="acme")))
+    project = asyncio.run(
+        orchestrator.create_project(ProjectCreateRequest(organization_id=organization.organization_id, name="Core", slug="core"))
+    )
+    owner = asyncio.run(
+        orchestrator.create_user(
+            UserCreateRequest(
+                organization_id=organization.organization_id,
+                project_ids=[project.project_id],
+                email="owner@example.com",
+                display_name="Owner",
+            )
+        )
+    )
+    asyncio.run(
+        orchestrator.assign_agent_ownership(
+            "agent-1",
+            AgentOwnershipRequest(
+                organization_id=organization.organization_id,
+                project_id=project.project_id,
+                owner_user_id=owner.user_id,
+            ),
+        )
+    )
+    issued = asyncio.run(
+        orchestrator.create_api_key(
+            APIKeyCreateRequest(
+                organization_id=organization.organization_id,
+                project_id=project.project_id,
+                user_id=owner.user_id,
+                name="Hosted SDK",
+                scopes=[Scope.TASKS_WRITE.value, Scope.TASKS_READ.value],
+            )
+        )
+    )
+
+    app = FastAPI()
+    app.include_router(router, prefix="/api")
+    app.dependency_overrides[get_orchestrator] = lambda: orchestrator
+    app.dependency_overrides[get_authenticator] = lambda: authenticator
+    client = TestClient(app)
+
+    ok = client.post(
+        f"/api/cloud/projects/{project.project_id}/runs",
+        json={"task_id": "task-1", "agent_id": "agent-1", "goal": "Do work"},
+        headers={"X-API-Key": issued.api_key, "X-Synapse-Project-Id": project.project_id},
+    )
+    assert ok.status_code == 200
+
+    wrong = client.post(
+        "/api/cloud/projects/project-other/runs",
+        json={"task_id": "task-2", "agent_id": "agent-1", "goal": "Do work"},
+        headers={"X-API-Key": issued.api_key, "X-Synapse-Project-Id": "project-other"},
+    )
+    assert wrong.status_code == 403
+
+    refreshed_keys = asyncio.run(orchestrator.list_api_keys(project_id=project.project_id))
+    assert refreshed_keys[0].last_used_at is not None

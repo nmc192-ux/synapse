@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from synapse.api.routes import get_authenticator, get_orchestrator, router
 from synapse.config import Settings
+from synapse.models.agent import AgentDefinition, AgentKind
 from synapse.security.auth import Authenticator
 from synapse.security.policies import PrincipalType, Scope
 
@@ -15,9 +16,21 @@ class _StubOrchestrator:
     def __init__(self) -> None:
         self.sockets = SimpleNamespace(connect=self._connect, disconnect=lambda websocket: None)
         self.connected = False
+        self._agent = AgentDefinition(
+            agent_id="agent-1",
+            kind=AgentKind.CUSTOM,
+            name="Agent 1",
+            organization_id="org-1",
+            project_id="project-1",
+        )
 
     async def execute_task(self, request):
         return {"task_id": request.task_id, "status": "completed"}
+
+    async def get_persisted_agent(self, agent_id: str):
+        if agent_id != self._agent.agent_id:
+            raise KeyError(agent_id)
+        return self._agent
 
     async def _connect(self, websocket, principal=None):
         self.connected = principal is not None
@@ -62,6 +75,8 @@ def test_insufficient_scope_returns_403() -> None:
         subject="operator-1",
         principal_type=PrincipalType.OPERATOR,
         scopes=[Scope.TASKS_READ.value],
+        organization_id="org-1",
+        project_id="project-1",
     )
     response = client.post(
         "/api/tasks",
@@ -77,6 +92,8 @@ def test_successful_http_and_websocket_auth() -> None:
         subject="operator-1",
         principal_type=PrincipalType.OPERATOR,
         scopes=[Scope.TASKS_WRITE.value, Scope.TASKS_READ.value],
+        organization_id="org-1",
+        project_id="project-1",
     )
     response = client.post(
         "/api/tasks",

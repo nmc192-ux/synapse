@@ -255,6 +255,8 @@ def test_platform_api_routes() -> None:
         subject="operator-1",
         principal_type=PrincipalType.OPERATOR,
         scopes=[Scope.ADMIN.value],
+        organization_id="bootstrap-org",
+        project_id="bootstrap-project",
     )
     headers = {"Authorization": f"Bearer {token}"}
 
@@ -419,3 +421,89 @@ def test_hosted_control_plane_project_scoped_routes_and_audit_logs() -> None:
     workers_response = client.get("/api/cloud/admin/workers", headers=headers)
     assert workers_response.status_code == 200
     assert workers_response.json()[0]["worker_id"] == "browser-worker-1"
+
+
+def test_cross_project_resource_access_is_rejected() -> None:
+    store = InMemoryRuntimeStateStore()
+    settings = Settings(
+        auth_required=True,
+        jwt_secret="scope-secret",
+        jwt_issuer="synapse-test",
+        jwt_audience="synapse-test-api",
+    )
+    authenticator = Authenticator(settings)
+    registry = AgentRegistry(state_store=store)
+    agent = registry.register(AgentDefinition(agent_id="agent-1", kind=AgentKind.CUSTOM, name="Agent One"))
+    registry.build_adapter = lambda *args, **kwargs: _StubAdapter()  # type: ignore[method-assign]
+    asyncio.run(registry.save_to_store(agent))
+
+    orchestrator = RuntimeOrchestrator(
+        browser=_StubBrowserService(),
+        agents=registry,
+        tools=SimpleNamespace(),
+        messages=SimpleNamespace(),
+        a2a=SimpleNamespace(),
+        memory_manager=_StubMemoryManager(),
+        task_manager=_StubTaskManager(),
+        sockets=WebSocketManager(state_store=store),
+        sandbox=SimpleNamespace(),
+        safety=_StubSafety(),
+        budget_manager=AgentBudgetManager(),
+        state_store=store,
+        authenticator=authenticator,
+    )
+    orchestrator.scheduler = None
+    orchestrator.task_runtime.scheduler = None
+
+    organization = asyncio.run(orchestrator.create_organization(OrganizationCreateRequest(name="Acme", slug="acme")))
+    project_a = asyncio.run(orchestrator.create_project(ProjectCreateRequest(organization_id=organization.organization_id, name="A", slug="a")))
+    project_b = asyncio.run(orchestrator.create_project(ProjectCreateRequest(organization_id=organization.organization_id, name="B", slug="b")))
+    owner = asyncio.run(
+        orchestrator.create_user(
+            UserCreateRequest(
+                organization_id=organization.organization_id,
+                project_ids=[project_a.project_id, project_b.project_id],
+                email="ops@example.com",
+                display_name="Ops",
+            )
+        )
+    )
+    asyncio.run(
+        orchestrator.assign_agent_ownership(
+            "agent-1",
+            AgentOwnershipRequest(
+                organization_id=organization.organization_id,
+                project_id=project_b.project_id,
+                owner_user_id=owner.user_id,
+            ),
+        )
+    )
+    result = asyncio.run(orchestrator.task_runtime.execute_task(TaskRequest(task_id="task-cross", agent_id="agent-1", goal="Do work")))
+
+    app = FastAPI()
+    app.include_router(router, prefix="/api")
+    app.dependency_overrides[get_orchestrator] = lambda: orchestrator
+    app.dependency_overrides[get_authenticator] = lambda: authenticator
+    client = TestClient(app)
+
+    token = authenticator.issue_token(
+        subject="svc-a",
+        principal_type=PrincipalType.SERVICE,
+        scopes=[Scope.TASKS_READ.value, Scope.TASKS_WRITE.value, Scope.BROWSER_CONTROL.value, Scope.ADMIN.value],
+        organization_id=organization.organization_id,
+        project_id=project_a.project_id,
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+
+    run_response = client.get(f"/api/runs/{result.run_id}", headers=headers)
+    assert run_response.status_code == 403
+
+    agent_response = client.get("/api/agents/agent-1", headers=headers)
+    assert agent_response.status_code == 403
+
+    profile_response = client.post(
+        "/api/profiles/create",
+        json={"name": "bad-profile", "agent_id": "agent-1"},
+        headers=headers,
+    )
+    assert profile_response.status_code == 403

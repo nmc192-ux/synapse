@@ -71,7 +71,7 @@ from synapse.runtime.budget import AgentBudgetLimitExceeded
 from synapse.runtime.security import SandboxPermissionError, SandboxRateLimitError
 from synapse.runtime.safety import SecurityAlertError
 from synapse.runtime.session import BrowserSession
-from synapse.security.auth import AuthPrincipal, authenticate_websocket, get_authenticator, require_scopes
+from synapse.security.auth import AuthPrincipal, authenticate_websocket, get_authenticator, require_project_access, require_scopes
 from synapse.security.policies import Scope
 
 
@@ -85,6 +85,7 @@ MemoryWritePrincipal = Annotated[AuthPrincipal, Depends(require_scopes(Scope.MEM
 A2ASendPrincipal = Annotated[AuthPrincipal, Depends(require_scopes(Scope.A2A_SEND.value))]
 A2AReceivePrincipal = Annotated[AuthPrincipal, Depends(require_scopes(Scope.A2A_RECEIVE.value))]
 AdminPrincipal = Annotated[AuthPrincipal, Depends(require_scopes(Scope.ADMIN.value))]
+ProjectPrincipal = Annotated[AuthPrincipal, Depends(require_project_access())]
 
 
 def get_orchestrator() -> RuntimeOrchestrator:
@@ -94,8 +95,77 @@ def get_orchestrator() -> RuntimeOrchestrator:
 
 
 def _ensure_project_access(principal: AuthPrincipal, project_id: str) -> None:
-    if principal.project_id is not None and principal.project_id != project_id and Scope.ADMIN.value not in principal.scopes:
+    if principal.project_id != project_id:
         raise HTTPException(status_code=403, detail="Token is not authorized for this project.")
+
+
+def _ensure_resource_project(principal: AuthPrincipal, project_id: str | None, resource_type: str) -> None:
+    if not project_id:
+        raise HTTPException(status_code=403, detail=f"{resource_type} is missing project scope.")
+    if principal.project_id != project_id:
+        raise HTTPException(status_code=403, detail=f"{resource_type} is outside the caller project scope.")
+
+
+async def _require_agent_project(
+    principal: AuthPrincipal,
+    orchestrator: RuntimeOrchestrator,
+    agent_id: str,
+) -> AgentDefinition:
+    agent = await orchestrator.get_persisted_agent(agent_id)
+    _ensure_resource_project(principal, agent.project_id, "Agent")
+    return agent
+
+
+async def _require_run_project(
+    principal: AuthPrincipal,
+    orchestrator: RuntimeOrchestrator,
+    run_id: str,
+) -> RunState:
+    run = await orchestrator.get_run(run_id)
+    _ensure_resource_project(principal, run.project_id, "Run")
+    return run
+
+
+async def _require_session_project(
+    principal: AuthPrincipal,
+    orchestrator: RuntimeOrchestrator,
+    session_id: str,
+) -> BrowserSessionState:
+    session = await orchestrator.get_session(session_id)
+    _ensure_resource_project(principal, session.project_id, "Session")
+    return session
+
+
+async def _require_profile_project(
+    principal: AuthPrincipal,
+    orchestrator: RuntimeOrchestrator,
+    profile_id: str,
+) -> SessionProfile:
+    profiles = await orchestrator.list_session_profiles()
+    for profile in profiles:
+        if profile.profile_id == profile_id:
+            _ensure_resource_project(principal, profile.project_id, "Session profile")
+            return profile
+    raise HTTPException(status_code=404, detail=f"Session profile not found: {profile_id}")
+
+
+async def _require_checkpoint_project(
+    principal: AuthPrincipal,
+    orchestrator: RuntimeOrchestrator,
+    checkpoint_id: str,
+) -> RuntimeCheckpoint:
+    checkpoint = await orchestrator.get_checkpoint(checkpoint_id)
+    _ensure_resource_project(principal, checkpoint.project_id, "Checkpoint")
+    return checkpoint
+
+
+async def _require_connection_project(
+    principal: AuthPrincipal,
+    orchestrator: RuntimeOrchestrator,
+    agent_id: str,
+) -> ConnectionState:
+    await _require_agent_project(principal, orchestrator, agent_id)
+    return await orchestrator.get_connection(agent_id)
 
 
 @router.get("/health")
@@ -180,9 +250,13 @@ async def create_project_run(
     project_id: str,
     request: TaskRequest,
     principal: TasksWritePrincipal,
+    _project: ProjectPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> RunState:
     _ensure_project_access(principal, project_id)
+    agent = await _require_agent_project(principal, orchestrator, request.agent_id)
+    if agent.project_id != project_id:
+        raise HTTPException(status_code=403, detail="Agent does not belong to this project.")
     result = await orchestrator.execute_task(request)
     run = await orchestrator.get_run(result.run_id)
     if run.project_id != project_id:
@@ -205,6 +279,7 @@ async def create_project_session_profile(
     project_id: str,
     request: SessionProfileCreateRequest,
     principal: BrowserControlPrincipal,
+    _project: ProjectPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> SessionProfile:
     _ensure_project_access(principal, project_id)
@@ -227,6 +302,7 @@ async def create_project_session_profile(
 async def list_project_session_profiles(
     project_id: str,
     principal: TasksReadPrincipal,
+    _project: ProjectPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[SessionProfile]:
     _ensure_project_access(principal, project_id)
@@ -239,6 +315,7 @@ async def advertise_project_capabilities(
     project_id: str,
     request: CapabilityAdvertisementRequest,
     principal: A2ASendPrincipal,
+    _project: ProjectPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> CapabilityRecord:
     _ensure_project_access(principal, project_id)
@@ -263,6 +340,7 @@ async def advertise_project_capabilities(
 async def list_project_capabilities(
     project_id: str,
     principal: A2AReceivePrincipal,
+    _project: ProjectPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[CapabilityRecord]:
     _ensure_project_access(principal, project_id)
@@ -280,6 +358,7 @@ async def find_project_agents(
     project_id: str,
     capability: str,
     principal: A2AReceivePrincipal,
+    _project: ProjectPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[AgentDiscoveryEntry]:
     _ensure_project_access(principal, project_id)
@@ -297,6 +376,7 @@ async def create_project_api_key(
     project_id: str,
     request: APIKeyCreateRequest,
     principal: AdminPrincipal,
+    _project: ProjectPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> APIKeyIssueResponse:
     _ensure_project_access(principal, project_id)
@@ -320,6 +400,7 @@ async def create_project_api_key(
 async def list_project_audit_logs(
     project_id: str,
     principal: AdminPrincipal,
+    _project: ProjectPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[AuditLogRecord]:
     _ensure_project_access(principal, project_id)
@@ -612,24 +693,28 @@ async def scroll_extract(
 @router.post("/agents", response_model=AgentDefinition)
 async def register_agent(
     request: AgentDefinition,
-    _principal: AdminPrincipal,
+    principal: AdminPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> AgentDefinition:
+    if request.organization_id not in {None, principal.organization_id} or request.project_id not in {None, principal.project_id}:
+        raise HTTPException(status_code=403, detail="Agent registration must stay within the caller project scope.")
+    request = request.model_copy(update={"organization_id": principal.organization_id, "project_id": principal.project_id})
     return await orchestrator.register_agent(request)
 
 
 @router.get("/agents", response_model=list[AgentDefinition])
 async def list_agents(_principal: TasksReadPrincipal, orchestrator: RuntimeOrchestrator = Depends(get_orchestrator)) -> list[AgentDefinition]:
-    return await orchestrator.get_persisted_agents()
+    return [agent for agent in await orchestrator.get_persisted_agents() if agent.project_id == _principal.project_id]
 
 
 @router.get("/agents/{agent_id}/budget", response_model=AgentBudgetUsage)
 async def get_agent_budget(
     agent_id: str,
-    _principal: TasksReadPrincipal,
+    principal: TasksReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> AgentBudgetUsage:
     try:
+        await _require_agent_project(principal, orchestrator, agent_id)
         return await orchestrator.get_agent_budget(agent_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -639,10 +724,11 @@ async def get_agent_budget(
 async def save_agent_checkpoint(
     agent_id: str,
     state: dict[str, object],
-    _principal: AdminPrincipal,
+    principal: AdminPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> AgentCheckpoint:
     try:
+        await _require_agent_project(principal, orchestrator, agent_id)
         return await orchestrator.save_agent_checkpoint(agent_id, state)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -651,9 +737,12 @@ async def save_agent_checkpoint(
 @router.post("/agents/register", response_model=AgentDefinition)
 async def register_a2a_agent(
     request: AgentRegistrationRequest,
-    _principal: AdminPrincipal,
+    principal: AdminPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> AgentDefinition:
+    if request.organization_id not in {None, principal.organization_id} or request.project_id not in {None, principal.project_id}:
+        raise HTTPException(status_code=403, detail="A2A registration must stay within the caller project scope.")
+    request = request.model_copy(update={"organization_id": principal.organization_id, "project_id": principal.project_id})
     return await orchestrator.register_a2a_agent(request)
 
 
@@ -662,7 +751,7 @@ async def discover_a2a_agents(
     _principal: A2AReceivePrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[AgentPresence]:
-    return await orchestrator.discover_agents()
+    return [presence for presence in await orchestrator.discover_agents() if presence.agent.project_id == _principal.project_id]
 
 
 @router.get("/agents/find", response_model=list[AgentDiscoveryEntry])
@@ -671,15 +760,18 @@ async def find_agents(
     _principal: A2AReceivePrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[AgentDiscoveryEntry]:
-    return await orchestrator.find_agents(capability)
+    entries = await orchestrator.find_agents(capability)
+    agents = {agent.agent_id: agent for agent in await orchestrator.get_persisted_agents()}
+    return [entry for entry in entries if agents.get(entry.id) is not None and agents[entry.id].project_id == _principal.project_id]
 
 
 @router.post("/agents/capabilities", response_model=CapabilityRecord)
 async def advertise_agent_capabilities(
     request: CapabilityAdvertisementRequest,
-    _principal: AdminPrincipal,
+    principal: AdminPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> CapabilityRecord:
+    await _require_agent_project(principal, orchestrator, request.agent_id)
     return await orchestrator.advertise_capabilities(request)
 
 
@@ -688,16 +780,21 @@ async def list_agent_capabilities(
     _principal: TasksReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[CapabilityRecord]:
-    return await orchestrator.list_capabilities()
+    records = await orchestrator.list_capabilities()
+    agents = {agent.agent_id: agent for agent in await orchestrator.get_persisted_agents()}
+    return [record for record in records if agents.get(record.agent_id) is not None and agents[record.agent_id].project_id == _principal.project_id]
 
 
 @router.post("/agents/message", response_model=AgentWireMessage)
 async def send_agent_message_wire(
     request: AgentWireMessage,
-    _principal: A2ASendPrincipal,
+    principal: A2ASendPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> AgentWireMessage:
     try:
+        await _require_agent_project(principal, orchestrator, request.agent)
+        if request.target_agent is not None:
+            await _require_agent_project(principal, orchestrator, request.target_agent)
         return await orchestrator.send_agent_wire_message(request)
     except ValueError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
@@ -706,10 +803,13 @@ async def send_agent_message_wire(
 @router.post("/agents/delegate", response_model=AgentWireMessage)
 async def delegate_agent_task(
     request: AgentDelegateRequest,
-    _principal: A2ASendPrincipal,
+    principal: A2ASendPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> AgentWireMessage:
     try:
+        await _require_agent_project(principal, orchestrator, request.agent)
+        if request.target_agent is not None:
+            await _require_agent_project(principal, orchestrator, request.target_agent)
         return await orchestrator.delegate_agent_task(request)
     except ValueError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
@@ -718,11 +818,11 @@ async def delegate_agent_task(
 @router.get("/agents/{agent_id}", response_model=AgentDefinition)
 async def get_agent(
     agent_id: str,
-    _principal: TasksReadPrincipal,
+    principal: TasksReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> AgentDefinition:
     try:
-        return await orchestrator.get_persisted_agent(agent_id)
+        return await _require_agent_project(principal, orchestrator, agent_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -730,10 +830,11 @@ async def get_agent(
 @router.get("/agents/{agent_id}/status")
 async def get_agent_status(
     agent_id: str,
-    _principal: TasksReadPrincipal,
+    principal: TasksReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> dict[str, object]:
     try:
+        await _require_agent_project(principal, orchestrator, agent_id)
         return await orchestrator.get_agent_status(agent_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -744,16 +845,19 @@ async def discover_agents(
     _principal: A2AReceivePrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[AgentPresence]:
-    return await orchestrator.discover_agents()
+    return [presence for presence in await orchestrator.discover_agents() if presence.agent.project_id == _principal.project_id]
 
 
 @router.post("/a2a/messages", response_model=A2AEnvelope)
 async def send_a2a_message(
     request: A2AEnvelope,
-    _principal: A2ASendPrincipal,
+    principal: A2ASendPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> A2AEnvelope:
     try:
+        await _require_agent_project(principal, orchestrator, request.sender_agent_id)
+        if request.recipient_agent_id is not None:
+            await _require_agent_project(principal, orchestrator, request.recipient_agent_id)
         return await orchestrator.send_a2a(request)
     except ValueError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
@@ -762,9 +866,11 @@ async def send_a2a_message(
 @router.post("/messages", response_model=AgentMessage)
 async def send_message(
     request: AgentMessage,
-    _principal: A2ASendPrincipal,
+    principal: A2ASendPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> AgentMessage:
+    await _require_agent_project(principal, orchestrator, request.sender_agent_id)
+    await _require_agent_project(principal, orchestrator, request.recipient_agent_id)
     return await orchestrator.send_message(request)
 
 
@@ -776,10 +882,15 @@ async def list_messages(_principal: A2AReceivePrincipal, orchestrator: RuntimeOr
 @router.post("/memory/store", response_model=MemoryRecord)
 async def store_memory(
     request: MemoryStoreRequest,
-    _principal: MemoryWritePrincipal,
+    principal: MemoryWritePrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> MemoryRecord:
     try:
+        agent = await _require_agent_project(principal, orchestrator, request.agent_id)
+        if request.run_id is not None:
+            run = await _require_run_project(principal, orchestrator, request.run_id)
+            if run.agent_id != request.agent_id:
+                raise HTTPException(status_code=403, detail="Run does not belong to the requested agent.")
         return await orchestrator.store_memory(request)
     except AgentBudgetLimitExceeded as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
@@ -788,19 +899,23 @@ async def store_memory(
 @router.post("/memory/search", response_model=list[MemorySearchResult])
 async def search_memory(
     request: MemorySearchRequest,
-    _principal: MemoryReadPrincipal,
+    principal: MemoryReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[MemorySearchResult]:
+    await _require_agent_project(principal, orchestrator, request.agent_id)
+    if request.run_id is not None:
+        await _require_run_project(principal, orchestrator, request.run_id)
     return await orchestrator.search_memory(request)
 
 
 @router.get("/memory/{agent_id}/recent", response_model=list[MemoryRecord])
 async def get_recent_memory(
     agent_id: str,
-    _principal: MemoryReadPrincipal,
+    principal: MemoryReadPrincipal,
     limit: int = 10,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[MemoryRecord]:
+    await _require_agent_project(principal, orchestrator, agent_id)
     return await orchestrator.get_recent_memory(agent_id, limit)
 
 
@@ -812,10 +927,13 @@ async def list_tools(orchestrator: RuntimeOrchestrator = Depends(get_orchestrato
 @router.post("/tools/call")
 async def call_tool(
     request: ToolCallRequest,
-    _principal: BrowserControlPrincipal,
+    principal: BrowserControlPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> dict[str, object]:
     try:
+        if request.agent_id is None:
+            raise HTTPException(status_code=400, detail="agent_id is required for project-scoped tool execution.")
+        await _require_agent_project(principal, orchestrator, request.agent_id)
         return await orchestrator.call_tool(request.tool_name, request.arguments, agent_id=request.agent_id)
     except SecurityAlertError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
@@ -843,10 +961,11 @@ async def reload_plugins(
 @router.post("/tasks")
 async def execute_task(
     request: TaskRequest,
-    _principal: TasksWritePrincipal,
+    principal: TasksWritePrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ):
     try:
+        await _require_agent_project(principal, orchestrator, request.agent_id)
         return await orchestrator.execute_task(request)
     except SecurityAlertError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
@@ -905,17 +1024,18 @@ async def list_sessions(
     agent_id: str | None = None,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[BrowserSessionState]:
-    return await orchestrator.list_sessions(agent_id=agent_id)
+    sessions = await orchestrator.list_sessions(agent_id=agent_id)
+    return [session for session in sessions if session.project_id == _principal.project_id]
 
 
 @router.get("/sessions/{session_id}", response_model=BrowserSessionState)
 async def get_session(
     session_id: str,
-    _principal: BrowserControlPrincipal,
+    principal: BrowserControlPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> BrowserSessionState:
     try:
-        return await orchestrator.get_session(session_id)
+        return await _require_session_project(principal, orchestrator, session_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -923,10 +1043,13 @@ async def get_session(
 @router.post("/profiles/create", response_model=SessionProfile)
 async def create_session_profile(
     request: SessionProfileCreateRequest,
-    _principal: BrowserControlPrincipal,
+    principal: BrowserControlPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> SessionProfile:
     try:
+        if request.agent_id is not None:
+            await _require_agent_project(principal, orchestrator, request.agent_id)
+        request = request.model_copy(update={"organization_id": principal.organization_id, "project_id": principal.project_id})
         return await orchestrator.create_session_profile(request)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -936,10 +1059,13 @@ async def create_session_profile(
 async def load_session_profile(
     profile_id: str,
     request: SessionProfileLoadRequest,
-    _principal: BrowserControlPrincipal,
+    principal: BrowserControlPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> SessionProfile:
     try:
+        await _require_profile_project(principal, orchestrator, profile_id)
+        if request.run_id is not None:
+            await _require_run_project(principal, orchestrator, request.run_id)
         return await orchestrator.load_session_profile(profile_id, request)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -953,16 +1079,18 @@ async def list_session_profiles(
     agent_id: str | None = None,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[SessionProfile]:
-    return await orchestrator.list_session_profiles(agent_id=agent_id)
+    profiles = await orchestrator.list_session_profiles(agent_id=agent_id)
+    return [profile for profile in profiles if profile.project_id == _principal.project_id]
 
 
 @router.delete("/profiles/{profile_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_session_profile(
     profile_id: str,
-    _principal: BrowserControlPrincipal,
+    principal: BrowserControlPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> None:
     try:
+        await _require_profile_project(principal, orchestrator, profile_id)
         await orchestrator.delete_session_profile(profile_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -973,17 +1101,19 @@ async def list_connections(
     _principal: TasksReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[ConnectionState]:
-    return await orchestrator.list_connections()
+    connections = await orchestrator.list_connections()
+    agents = {agent.agent_id: agent for agent in await orchestrator.get_persisted_agents()}
+    return [connection for connection in connections if agents.get(connection.agent_id) is not None and agents[connection.agent_id].project_id == _principal.project_id]
 
 
 @router.get("/connections/{agent_id}", response_model=ConnectionState)
 async def get_connection(
     agent_id: str,
-    _principal: TasksReadPrincipal,
+    principal: TasksReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> ConnectionState:
     try:
-        return await orchestrator.get_connection(agent_id)
+        return await _require_connection_project(principal, orchestrator, agent_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -995,17 +1125,18 @@ async def list_checkpoints(
     task_id: str | None = None,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[RuntimeCheckpoint]:
-    return await orchestrator.list_checkpoints(agent_id=agent_id, task_id=task_id)
+    checkpoints = await orchestrator.list_checkpoints(agent_id=agent_id, task_id=task_id)
+    return [checkpoint for checkpoint in checkpoints if checkpoint.project_id == _principal.project_id]
 
 
 @router.get("/checkpoints/{checkpoint_id}", response_model=RuntimeCheckpoint)
 async def get_checkpoint(
     checkpoint_id: str,
-    _principal: TasksReadPrincipal,
+    principal: TasksReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> RuntimeCheckpoint:
     try:
-        return await orchestrator.get_checkpoint(checkpoint_id)
+        return await _require_checkpoint_project(principal, orchestrator, checkpoint_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -1017,17 +1148,18 @@ async def list_runs(
     task_id: str | None = None,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[RunState]:
-    return await orchestrator.list_runs(agent_id=agent_id, task_id=task_id)
+    runs = await orchestrator.list_runs(agent_id=agent_id, task_id=task_id)
+    return [run for run in runs if run.project_id == _principal.project_id]
 
 
 @router.get("/runs/{run_id}", response_model=RunState)
 async def get_run(
     run_id: str,
-    _principal: TasksReadPrincipal,
+    principal: TasksReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> RunState:
     try:
-        return await orchestrator.get_run(run_id)
+        return await _require_run_project(principal, orchestrator, run_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -1035,19 +1167,21 @@ async def get_run(
 @router.get("/runs/{run_id}/events")
 async def get_run_events(
     run_id: str,
-    _principal: TasksReadPrincipal,
+    principal: TasksReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[dict[str, object]]:
+    await _require_run_project(principal, orchestrator, run_id)
     return await orchestrator.get_run_events(run_id)
 
 
 @router.get("/runs/{run_id}/timeline", response_model=RunTimeline)
 async def get_run_timeline(
     run_id: str,
-    _principal: TasksReadPrincipal,
+    principal: TasksReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> RunTimeline:
     try:
+        await _require_run_project(principal, orchestrator, run_id)
         return await orchestrator.get_run_timeline(run_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -1056,10 +1190,11 @@ async def get_run_timeline(
 @router.get("/runs/{run_id}/replay", response_model=RunReplayView)
 async def get_run_replay(
     run_id: str,
-    _principal: TasksReadPrincipal,
+    principal: TasksReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> RunReplayView:
     try:
+        await _require_run_project(principal, orchestrator, run_id)
         return await orchestrator.get_run_replay(run_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -1068,10 +1203,11 @@ async def get_run_replay(
 @router.get("/runs/{run_id}/graph", response_model=RunGraph)
 async def get_run_graph(
     run_id: str,
-    _principal: TasksReadPrincipal,
+    principal: TasksReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> RunGraph:
     try:
+        await _require_run_project(principal, orchestrator, run_id)
         return await orchestrator.get_run_graph(run_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -1080,10 +1216,11 @@ async def get_run_graph(
 @router.get("/runs/{run_id}/trace", response_model=list[BrowserTraceEntry])
 async def get_run_trace(
     run_id: str,
-    _principal: TasksReadPrincipal,
+    principal: TasksReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[BrowserTraceEntry]:
     try:
+        await _require_run_project(principal, orchestrator, run_id)
         return await orchestrator.get_run_trace(run_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -1092,10 +1229,11 @@ async def get_run_trace(
 @router.get("/runs/{run_id}/network", response_model=list[BrowserNetworkEntry])
 async def get_run_network(
     run_id: str,
-    _principal: TasksReadPrincipal,
+    principal: TasksReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[BrowserNetworkEntry]:
     try:
+        await _require_run_project(principal, orchestrator, run_id)
         return await orchestrator.get_run_network(run_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -1104,28 +1242,32 @@ async def get_run_network(
 @router.get("/runs/{run_id}/checkpoints", response_model=list[RuntimeCheckpoint])
 async def get_run_checkpoints(
     run_id: str,
-    _principal: TasksReadPrincipal,
+    principal: TasksReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[RuntimeCheckpoint]:
+    await _require_run_project(principal, orchestrator, run_id)
     return await orchestrator.get_run_checkpoints(run_id)
 
 
 @router.get("/runs/{run_id}/children", response_model=list[RunState])
 async def get_child_runs(
     run_id: str,
-    _principal: TasksReadPrincipal,
+    principal: TasksReadPrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[RunState]:
-    return await orchestrator.get_child_runs(run_id)
+    await _require_run_project(principal, orchestrator, run_id)
+    runs = await orchestrator.get_child_runs(run_id)
+    return [run for run in runs if run.project_id == principal.project_id]
 
 
 @router.post("/runs/{run_id}/pause", response_model=RunState)
 async def pause_run(
     run_id: str,
-    _principal: TasksWritePrincipal,
+    principal: TasksWritePrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> RunState:
     try:
+        await _require_run_project(principal, orchestrator, run_id)
         return await orchestrator.pause_run(run_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -1134,10 +1276,11 @@ async def pause_run(
 @router.post("/runs/{run_id}/resume")
 async def resume_run(
     run_id: str,
-    _principal: TasksWritePrincipal,
+    principal: TasksWritePrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ):
     try:
+        await _require_run_project(principal, orchestrator, run_id)
         return await orchestrator.resume_run(run_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -1146,10 +1289,11 @@ async def resume_run(
 @router.post("/runs/{run_id}/cancel", response_model=RunState)
 async def cancel_run(
     run_id: str,
-    _principal: TasksWritePrincipal,
+    principal: TasksWritePrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> RunState:
     try:
+        await _require_run_project(principal, orchestrator, run_id)
         return await orchestrator.cancel_run(run_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -1159,11 +1303,13 @@ async def cancel_run(
 async def save_task_checkpoint(
     task_id: str,
     state: dict[str, object],
-    _principal: TasksWritePrincipal,
+    principal: TasksWritePrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> RuntimeCheckpoint:
     try:
-        return await orchestrator.save_checkpoint(task_id, state)
+        checkpoint = await orchestrator.save_checkpoint(task_id, state)
+        _ensure_resource_project(principal, checkpoint.project_id, "Checkpoint")
+        return checkpoint
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -1171,10 +1317,11 @@ async def save_task_checkpoint(
 @router.post("/tasks/resume/{checkpoint_id}")
 async def resume_task(
     checkpoint_id: str,
-    _principal: TasksWritePrincipal,
+    principal: TasksWritePrincipal,
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ):
     try:
+        await _require_checkpoint_project(principal, orchestrator, checkpoint_id)
         return await orchestrator.resume_task(checkpoint_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

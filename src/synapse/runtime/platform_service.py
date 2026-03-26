@@ -61,6 +61,25 @@ class PlatformService:
         await self.state_store.store_project(project.project_id, project.model_dump(mode="json"))
         return project
 
+    async def get_project(self, project_id: str) -> Project:
+        self._require_store()
+        rows = await self.state_store.list_projects()
+        for row in rows:
+            if row.get("project_id") == project_id:
+                return Project.model_validate(row)
+        raise KeyError(f"Project not found: {project_id}")
+
+    async def validate_project_context(
+        self,
+        *,
+        organization_id: str,
+        project_id: str,
+    ) -> Project:
+        project = await self.get_project(project_id)
+        if project.organization_id != organization_id:
+            raise ValueError("Project does not belong to the specified organization.")
+        return project
+
     async def list_projects(self, organization_id: str | None = None) -> list[Project]:
         self._require_store()
         rows = await self.state_store.list_projects()
@@ -95,6 +114,10 @@ class PlatformService:
         self._require_store()
         if self.authenticator is None:
             raise RuntimeError("Authenticator is required for issuing API keys.")
+        await self.validate_project_context(
+            organization_id=request.organization_id,
+            project_id=request.project_id,
+        )
         raw_secret = f"synp_{secrets.token_urlsafe(24)}"
         prefix = raw_secret[:12]
         record = APIKeyRecord(

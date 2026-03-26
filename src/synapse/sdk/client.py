@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import httpx
 
 from synapse.models.a2a import A2AMessageType, AgentWireMessage
@@ -40,11 +42,21 @@ class SynapseClient:
         base_url: str = "http://127.0.0.1:8000",
         timeout: float = 30.0,
         agent_id: str | None = None,
+        api_key: str | None = None,
+        bearer_token: str | None = None,
+        project_id: str | None = None,
+        token_refresh_callback: Callable[[], str] | None = None,
+        transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
-        self._http = httpx.Client(base_url=self.base_url, timeout=timeout)
+        self._http = httpx.Client(base_url=self.base_url, timeout=timeout, transport=transport)
         self.agent_id = agent_id
+        self.api_key = api_key
+        self.bearer_token = bearer_token
+        self.project_id = project_id
+        self.token_refresh_callback = token_refresh_callback
         self._message_signer = MessageSigner()
+        self._apply_auth_headers()
 
     @property
     def browser(self) -> SynapseBrowser:
@@ -64,26 +76,23 @@ class SynapseClient:
         self._http.close()
 
     def create_session(self) -> BrowserSession:
-        response = self._http.post("/api/sessions")
-        response.raise_for_status()
+        response = self._request("POST", "/api/sessions")
         return BrowserSession.model_validate(response.json())
 
     def register_agent(self, agent: AgentDefinition) -> AgentDefinition:
-        response = self._http.post("/api/agents", json=agent.model_dump(mode="json"))
-        response.raise_for_status()
+        response = self._request("POST", "/api/agents", json=agent.model_dump(mode="json"))
         return AgentDefinition.model_validate(response.json())
 
     def list_tools(self) -> list[ToolDescriptor]:
-        response = self._http.get("/api/tools")
-        response.raise_for_status()
+        response = self._request("GET", "/api/tools")
         return [ToolDescriptor.model_validate(item) for item in response.json()]
 
     def call_tool(self, tool_name: str, arguments: dict[str, object] | None = None) -> dict[str, object]:
-        response = self._http.post(
+        response = self._request(
+            "POST",
             "/api/tools/call",
             json={"agent_id": self.agent_id, "tool_name": tool_name, "arguments": arguments or {}},
         )
-        response.raise_for_status()
         return dict(response.json())
 
     def send_agent_message(
@@ -99,8 +108,7 @@ class SynapseClient:
             content=content,
             metadata=metadata or {},
         )
-        response = self._http.post("/api/messages", json=message.model_dump(mode="json"))
-        response.raise_for_status()
+        response = self._request("POST", "/api/messages", json=message.model_dump(mode="json"))
         return AgentMessage.model_validate(response.json())
 
     def sign_a2a_message(
@@ -130,16 +138,14 @@ class SynapseClient:
         )
 
     def send_signed_a2a_message(self, message: AgentWireMessage) -> AgentWireMessage:
-        response = self._http.post("/api/agents/message", json=message.model_dump(mode="json"))
-        response.raise_for_status()
+        response = self._request("POST", "/api/agents/message", json=message.model_dump(mode="json"))
         return AgentWireMessage.model_validate(response.json())
 
     def get_budget(self, agent_id: str | None = None) -> AgentBudgetUsage:
         resolved_agent_id = agent_id or self.agent_id
         if resolved_agent_id is None:
             raise ValueError("agent_id is required to fetch budget usage.")
-        response = self._http.get(f"/api/agents/{resolved_agent_id}/budget")
-        response.raise_for_status()
+        response = self._request("GET", f"/api/agents/{resolved_agent_id}/budget")
         return AgentBudgetUsage.model_validate(response.json())
 
     def save_checkpoint(
@@ -150,12 +156,81 @@ class SynapseClient:
         resolved_agent_id = agent_id or self.agent_id
         if resolved_agent_id is None:
             raise ValueError("agent_id is required to save a checkpoint.")
-        response = self._http.post(
+        response = self._request(
+            "POST",
             f"/api/agents/{resolved_agent_id}/checkpoint",
             json=state or {},
         )
-        response.raise_for_status()
         return dict(response.json())
+
+    def set_bearer_token(self, token: str | None) -> None:
+        self.bearer_token = token
+        self._apply_auth_headers()
+
+    def set_api_key(self, api_key: str | None) -> None:
+        self.api_key = api_key
+        self._apply_auth_headers()
+
+    def set_project_id(self, project_id: str | None) -> None:
+        self.project_id = project_id
+        self._apply_auth_headers()
+
+    def _request(self, method: str, path: str, **kwargs: object) -> httpx.Response:
+        self._apply_auth_headers()
+        response = self._http.request(method, path, **kwargs)
+        if response.status_code == 401 and self.token_refresh_callback is not None:
+            refreshed = self.token_refresh_callback()
+            if refreshed:
+                self.bearer_token = refreshed
+                self._apply_auth_headers()
+                response = self._http.request(method, path, **kwargs)
+        self._raise_for_status(response, method, path)
+        return response
+
+    def _apply_auth_headers(self) -> None:
+        headers: dict[str, str] = {}
+        if self.project_id:
+            headers["X-Synapse-Project-Id"] = self.project_id
+        if self.api_key:
+            headers["X-API-Key"] = self.api_key
+        if self.bearer_token:
+            headers["Authorization"] = f"Bearer {self.bearer_token}"
+        elif self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        self._http.headers.update(headers)
+        for key in ("Authorization", "X-API-Key", "X-Synapse-Project-Id"):
+            if key not in headers and key in self._http.headers:
+                self._http.headers.pop(key, None)
+
+    def _raise_for_status(self, response: httpx.Response, method: str, path: str) -> None:
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            detail = self._extract_error_detail(response)
+            if response.status_code == 401:
+                raise PermissionError(
+                    f"Authentication failed for {method.upper()} {path}: {detail}. "
+                    "Check api_key/bearer_token and refresh configuration."
+                ) from exc
+            if response.status_code == 403:
+                project_suffix = f" in project '{self.project_id}'" if self.project_id else ""
+                raise PermissionError(
+                    f"Authorization failed for {method.upper()} {path}{project_suffix}: {detail}."
+                ) from exc
+            raise
+
+    @staticmethod
+    def _extract_error_detail(response: httpx.Response) -> str:
+        try:
+            payload = response.json()
+        except ValueError:
+            text = response.text.strip()
+            return text or response.reason_phrase
+        if isinstance(payload, dict):
+            detail = payload.get("detail")
+            if isinstance(detail, str):
+                return detail
+        return response.reason_phrase
 
 
 class SynapseBrowser:
@@ -177,20 +252,17 @@ class SynapseBrowser:
 
     def open(self, url: str) -> BrowserState:
         payload = OpenRequest(session_id=self.session_id, agent_id=self._agent_id, url=url)
-        response = self._client._http.post("/api/browser/open", json=payload.model_dump(mode="json"))
-        response.raise_for_status()
+        response = self._client._request("POST", "/api/browser/open", json=payload.model_dump(mode="json"))
         return BrowserState.model_validate(response.json())
 
     def click(self, selector: str) -> BrowserState:
         payload = ClickRequest(session_id=self.session_id, agent_id=self._agent_id, selector=selector)
-        response = self._client._http.post("/api/browser/click", json=payload.model_dump(mode="json"))
-        response.raise_for_status()
+        response = self._client._request("POST", "/api/browser/click", json=payload.model_dump(mode="json"))
         return BrowserState.model_validate(response.json())
 
     def type(self, selector: str, text: str) -> BrowserState:
         payload = TypeRequest(session_id=self.session_id, agent_id=self._agent_id, selector=selector, text=text)
-        response = self._client._http.post("/api/browser/type", json=payload.model_dump(mode="json"))
-        response.raise_for_status()
+        response = self._client._request("POST", "/api/browser/type", json=payload.model_dump(mode="json"))
         return BrowserState.model_validate(response.json())
 
     def extract(
@@ -221,14 +293,12 @@ class SynapseBrowser:
             selector=selector,
             attribute=attribute,
         )
-        response = self._client._http.post("/api/browser/extract", json=payload.model_dump(mode="json"))
-        response.raise_for_status()
+        response = self._client._request("POST", "/api/browser/extract", json=payload.model_dump(mode="json"))
         return ExtractionResult.model_validate(response.json())
 
     def screenshot(self) -> ScreenshotResult:
         payload = ScreenshotRequest(session_id=self.session_id, agent_id=self._agent_id)
-        response = self._client._http.post("/api/browser/screenshot", json=payload.model_dump(mode="json"))
-        response.raise_for_status()
+        response = self._client._request("POST", "/api/browser/screenshot", json=payload.model_dump(mode="json"))
         return ScreenshotResult.model_validate(response.json())
 
     def list_tools(self) -> list[ToolDescriptor]:
@@ -236,14 +306,12 @@ class SynapseBrowser:
 
     def get_layout(self) -> StructuredPageModel:
         payload = LayoutRequest(session_id=self.session_id, agent_id=self._agent_id)
-        response = self._client._http.post("/api/browser/layout", json=payload.model_dump(mode="json"))
-        response.raise_for_status()
+        response = self._client._request("POST", "/api/browser/layout", json=payload.model_dump(mode="json"))
         return StructuredPageModel.model_validate(response.json())
 
     def find_element(self, type: str, text: str) -> list[PageElementMatch]:
         payload = FindElementRequest(session_id=self.session_id, agent_id=self._agent_id, type=type, text=text)
-        response = self._client._http.post("/api/browser/find", json=payload.model_dump(mode="json"))
-        response.raise_for_status()
+        response = self._client._request("POST", "/api/browser/find", json=payload.model_dump(mode="json"))
         return [PageElementMatch.model_validate(item) for item in response.json()]
 
     def find(self, text: str, element_types: list[str] | None = None) -> list[PageElementMatch]:
@@ -261,8 +329,7 @@ class SynapseBrowser:
 
     def inspect(self, selector: str) -> PageInspection:
         payload = InspectRequest(session_id=self.session_id, agent_id=self._agent_id, selector=selector)
-        response = self._client._http.post("/api/browser/inspect", json=payload.model_dump(mode="json"))
-        response.raise_for_status()
+        response = self._client._request("POST", "/api/browser/inspect", json=payload.model_dump(mode="json"))
         return PageInspection.model_validate(response.json())
 
     def call_tool(self, tool_name: str, arguments: dict[str, object] | None = None) -> dict[str, object]:
@@ -270,14 +337,12 @@ class SynapseBrowser:
 
     def dismiss_popups(self) -> BrowserState:
         payload = DismissRequest(session_id=self.session_id, agent_id=self._agent_id)
-        response = self._client._http.post("/api/browser/dismiss", json=payload.model_dump(mode="json"))
-        response.raise_for_status()
+        response = self._client._request("POST", "/api/browser/dismiss", json=payload.model_dump(mode="json"))
         return BrowserState.model_validate(response.json())
 
     def upload(self, selector: str, file_paths: list[str]) -> UploadResult:
         payload = UploadRequest(session_id=self.session_id, agent_id=self._agent_id, selector=selector, file_paths=file_paths)
-        response = self._client._http.post("/api/browser/upload", json=payload.model_dump(mode="json"))
-        response.raise_for_status()
+        response = self._client._request("POST", "/api/browser/upload", json=payload.model_dump(mode="json"))
         return UploadResult.model_validate(response.json())
 
     def download(self, trigger_selector: str | None = None, timeout_ms: int = 15000) -> DownloadResult:
@@ -287,8 +352,7 @@ class SynapseBrowser:
             trigger_selector=trigger_selector,
             timeout_ms=timeout_ms,
         )
-        response = self._client._http.post("/api/browser/download", json=payload.model_dump(mode="json"))
-        response.raise_for_status()
+        response = self._client._request("POST", "/api/browser/download", json=payload.model_dump(mode="json"))
         return DownloadResult.model_validate(response.json())
 
     def scroll_extract(
@@ -306,8 +370,7 @@ class SynapseBrowser:
             max_scrolls=max_scrolls,
             scroll_step=scroll_step,
         )
-        response = self._client._http.post("/api/browser/scroll_extract", json=payload.model_dump(mode="json"))
-        response.raise_for_status()
+        response = self._client._request("POST", "/api/browser/scroll_extract", json=payload.model_dump(mode="json"))
         return ScrollExtractResult.model_validate(response.json())
 
     def send_agent_message(
@@ -374,8 +437,7 @@ class SynapseMemory:
             content=content,
             embedding=embedding or [],
         )
-        response = self._client._http.post("/api/memory/store", json=payload.model_dump(mode="json"))
-        response.raise_for_status()
+        response = self._client._request("POST", "/api/memory/store", json=payload.model_dump(mode="json"))
         return MemoryRecord.model_validate(response.json())
 
     def search(
@@ -393,13 +455,11 @@ class SynapseMemory:
             memory_type=memory_type,
             limit=limit,
         )
-        response = self._client._http.post("/api/memory/search", json=payload.model_dump(mode="json"))
-        response.raise_for_status()
+        response = self._client._request("POST", "/api/memory/search", json=payload.model_dump(mode="json"))
         return [MemorySearchResult.model_validate(item) for item in response.json()]
 
     def get_recent(self, agent_id: str, limit: int = 10) -> list[MemoryRecord]:
-        response = self._client._http.get(f"/api/memory/{agent_id}/recent", params={"limit": limit})
-        response.raise_for_status()
+        response = self._client._request("GET", f"/api/memory/{agent_id}/recent", params={"limit": limit})
         return [MemoryRecord.model_validate(item) for item in response.json()]
 
 
@@ -411,9 +471,21 @@ class SynapseAgent:
         kind: AgentKind | str = AgentKind.CUSTOM,
         limits: dict[str, int] | AgentExecutionLimits | None = None,
         timeout: float = 30.0,
+        api_key: str | None = None,
+        bearer_token: str | None = None,
+        project_id: str | None = None,
+        token_refresh_callback: Callable[[], str] | None = None,
     ) -> None:
         self.name = name
-        self.client = SynapseClient(base_url=base_url, timeout=timeout, agent_id=name)
+        self.client = SynapseClient(
+            base_url=base_url,
+            timeout=timeout,
+            agent_id=name,
+            api_key=api_key,
+            bearer_token=bearer_token,
+            project_id=project_id,
+            token_refresh_callback=token_refresh_callback,
+        )
         self.kind = AgentKind(kind)
         self.limits = (
             limits if isinstance(limits, AgentExecutionLimits) or limits is None else AgentExecutionLimits(**limits)
@@ -453,8 +525,20 @@ class Synapse(SynapseBrowser):
         base_url: str = "http://127.0.0.1:8000",
         timeout: float = 30.0,
         agent_id: str | None = None,
+        api_key: str | None = None,
+        bearer_token: str | None = None,
+        project_id: str | None = None,
+        token_refresh_callback: Callable[[], str] | None = None,
     ) -> None:
-        self.client = SynapseClient(base_url=base_url, timeout=timeout, agent_id=agent_id)
+        self.client = SynapseClient(
+            base_url=base_url,
+            timeout=timeout,
+            agent_id=agent_id,
+            api_key=api_key,
+            bearer_token=bearer_token,
+            project_id=project_id,
+            token_refresh_callback=token_refresh_callback,
+        )
         super().__init__(self.client, agent_id=agent_id)
 
     def close(self) -> None:

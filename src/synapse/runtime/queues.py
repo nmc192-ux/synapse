@@ -42,6 +42,7 @@ class BrowserTaskResult(BaseModel):
     worker_id: str
     action: str
     run_id: str | None = None
+    session_id: str | None = None
     success: bool = True
     payload: Any = None
     error: str | None = None

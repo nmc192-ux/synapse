@@ -4,7 +4,16 @@ from contextlib import suppress
 
 from synapse.models.browser import BrowserState, StructuredPageModel
 from synapse.models.runtime_event import EventType
-from synapse.models.runtime_state import BrowserSessionState, BrowserTaskResultRecord, RunLeaseRecord, WorkerRuntimeStatus
+from synapse.models.runtime_state import (
+    BrowserSessionOwnershipRecord,
+    BrowserSessionState,
+    BrowserTaskRequestRecord,
+    BrowserTaskResultRecord,
+    BrowserWorkerState,
+    RunLeaseRecord,
+    WorkerHealthStatus,
+    WorkerRuntimeStatus,
+)
 from synapse.runtime.event_bus import EventBus
 from synapse.runtime.browser_workers import BrowserWorkerPool
 from synapse.runtime.queues import BrowserTaskEnvelope, BrowserTaskResult
@@ -164,12 +173,14 @@ def test_browser_worker_pool_renews_durable_leases_on_heartbeat() -> None:
             runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
             run_store=run_store,
             lease_timeout_seconds=0.05,
+            controller_id="controller-heartbeat",
         )
         run_id = "run-1"
+        worker_id = "controller-heartbeat:browser-worker-1"
         await run_store.save_lease(
             RunLeaseRecord(
                 run_id=run_id,
-                worker_id="browser-worker-1",
+                worker_id=worker_id,
                 acquired_at=datetime.now(timezone.utc),
                 expires_at=datetime.now(timezone.utc),
                 token=1,
@@ -196,12 +207,14 @@ def test_browser_worker_pool_recovers_persisted_result_after_restart() -> None:
             worker_count=1,
             runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
             run_store=run_store,
+            controller_id="controller-replay",
         )
+        worker_id = "controller-replay:browser-worker-1"
         await run_store.save_worker_result(
             BrowserTaskResultRecord(
                 action_id="action-1",
                 run_id="run-1",
-                worker_id="browser-worker-1",
+                worker_id=worker_id,
                 action="get_layout",
                 success=True,
                 payload={"restored": True},
@@ -212,10 +225,205 @@ def test_browser_worker_pool_recovers_persisted_result_after_restart() -> None:
         await pool.start()
         try:
             payload = await pool._dispatch(
-                "browser-worker-1",
+                worker_id,
                 BrowserTaskEnvelope(action_id="action-1", run_id="run-1", action="get_layout"),
             )
             assert payload == {"restored": True}
+        finally:
+            await pool.stop()
+
+    asyncio.run(scenario())
+
+
+def test_browser_worker_pool_recovers_session_ownership_after_restart() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        controller_id = "controller-a"
+        await run_store.save_session_ownership(
+            BrowserSessionOwnershipRecord(
+                session_id="s1",
+                worker_id=f"{controller_id}:browser-worker-1",
+                controller_id=controller_id,
+                run_id="run-1",
+                current_url="https://example.com/recovered",
+            )
+        )
+
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id=controller_id,
+        )
+        await pool.start()
+        try:
+            assert pool.current_url("s1") == "https://example.com/recovered"
+            assert pool._session_workers["s1"] == f"{controller_id}:browser-worker-1"
+        finally:
+            await pool.stop()
+
+    asyncio.run(scenario())
+
+
+def test_browser_worker_pool_marks_stale_session_ownership() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        sockets = WebSocketManager(state_store=store)
+        bus = EventBus(sockets)
+        bus.set_context_resolver(lambda event: _event_context())
+        await run_store.save_session_ownership(
+            BrowserSessionOwnershipRecord(
+                session_id="s-stale",
+                worker_id="foreign-worker",
+                controller_id="foreign-controller",
+                run_id="run-1",
+            )
+        )
+        await run_store.save_worker(
+            BrowserWorkerState(
+                worker_id="foreign-worker",
+                queue_name="q-foreign",
+                controller_id="foreign-controller",
+                health_status=WorkerHealthStatus.STALE,
+            )
+        )
+
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id="controller-a",
+        )
+        pool.set_event_publisher(bus.publish)
+        await pool.start()
+        try:
+            async with sockets.subscribe("stale-ownership") as queue:
+                try:
+                    await pool.open("s-stale", "https://example.com")
+                except KeyError:
+                    pass
+                else:
+                    raise AssertionError("expected stale ownership to block dispatch")
+                event = await asyncio.wait_for(queue.get(), timeout=0.2)
+                assert event.event_type == EventType.WORKER_OWNERSHIP_STALE
+            stale = await run_store.get_session_ownership("s-stale")
+            assert stale is not None
+            assert stale.status == "stale"
+        finally:
+            await pool.stop()
+
+    asyncio.run(scenario())
+
+
+def test_browser_worker_pool_recovers_outstanding_request_after_controller_restart() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        sockets = WebSocketManager(state_store=store)
+        bus = EventBus(sockets)
+        bus.set_context_resolver(lambda event: _event_context())
+        controller_id = "controller-a"
+        await run_store.save_worker_request(
+            BrowserTaskRequestRecord(
+                action_id="action-1",
+                request_id="request-1",
+                run_id="run-1",
+                worker_id=f"{controller_id}:browser-worker-1",
+                action="open",
+                session_id="s1",
+                status="dispatched",
+                payload={"url": "https://example.com"},
+            )
+        )
+        await run_store.save_session_ownership(
+            BrowserSessionOwnershipRecord(
+                session_id="s1",
+                worker_id=f"{controller_id}:browser-worker-1",
+                controller_id=controller_id,
+                run_id="run-1",
+            )
+        )
+
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id=controller_id,
+        )
+        pool.set_event_publisher(bus.publish)
+        async with sockets.subscribe("recovery") as queue:
+            await pool.start()
+            try:
+                events = []
+                while {
+                    EventType.WORKER_REQUEST_RECOVERED,
+                    EventType.RUN_DISPATCH_RECONCILED,
+                } - {event.event_type for event in events}:
+                    events.append(await asyncio.wait_for(queue.get(), timeout=0.2))
+            finally:
+                await pool.stop()
+
+        event_types = {event.event_type for event in events}
+        assert EventType.WORKER_REQUEST_RECOVERED in event_types
+        assert EventType.RUN_DISPATCH_RECONCILED in event_types
+        request = await run_store.get_worker_request("run-1", "action-1")
+        assert request is not None
+        assert request.status == "recovered"
+
+    asyncio.run(scenario())
+
+
+def test_browser_worker_pool_replays_duplicate_result_idempotently() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        sockets = WebSocketManager(state_store=store)
+        bus = EventBus(sockets)
+        bus.set_context_resolver(lambda event: _event_context())
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id="controller-dup",
+        )
+        pool.set_event_publisher(bus.publish)
+        worker_id = "controller-dup:browser-worker-1"
+        await run_store.save_lease(
+            RunLeaseRecord(
+                run_id="run-1",
+                worker_id=worker_id,
+                acquired_at=datetime.now(timezone.utc),
+                expires_at=datetime.now(timezone.utc),
+                token=2,
+            )
+        )
+        await pool.start()
+        try:
+            result = BrowserTaskResult(
+                action_id="action-dup",
+                request_id="request-dup",
+                run_id="run-1",
+                worker_id=worker_id,
+                action="open",
+                session_id="s1",
+                success=True,
+                payload={"ok": True},
+                fencing_token=2,
+            )
+            async with sockets.subscribe("dup-result") as queue:
+                await pool._handle_result(result)
+                await pool._handle_result(result)
+                replay = await asyncio.wait_for(queue.get(), timeout=0.2)
+                assert replay.event_type == EventType.WORKER_RESULT_REPLAYED
+            stored = await run_store.list_worker_results(run_id="run-1")
+            assert len(stored) == 1
+            assert stored[0].payload == {"ok": True}
         finally:
             await pool.stop()
 
@@ -231,11 +439,13 @@ def test_browser_worker_pool_rejects_stale_fencing_result() -> None:
             worker_count=1,
             runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
             run_store=run_store,
+            controller_id="controller-stale-token",
         )
+        worker_id = "controller-stale-token:browser-worker-1"
         await run_store.save_lease(
             RunLeaseRecord(
                 run_id="run-1",
-                worker_id="browser-worker-1",
+                worker_id=worker_id,
                 acquired_at=datetime.now(timezone.utc),
                 expires_at=datetime.now(timezone.utc),
                 token=2,
@@ -251,7 +461,7 @@ def test_browser_worker_pool_rejects_stale_fencing_result() -> None:
                 BrowserTaskResult(
                     action_id="action-stale",
                     run_id="run-1",
-                    worker_id="browser-worker-1",
+                    worker_id=worker_id,
                     action="open",
                     success=True,
                     payload={"stale": True},

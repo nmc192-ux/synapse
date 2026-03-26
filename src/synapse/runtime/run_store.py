@@ -7,6 +7,7 @@ from synapse.models.run import RunGraph, RunGraphEdge, RunGraphNode, RunState, R
 from synapse.models.runtime_event import RunReplayView, RunTimeline, RunTimelineEntry, infer_event_phase
 from synapse.models.runtime_state import (
     BrowserNetworkEntry,
+    BrowserSessionOwnershipRecord,
     OperatorInterventionRecord,
     OperatorInterventionState,
     BrowserTaskRequestRecord,
@@ -335,6 +336,34 @@ class RunStore:
         rows = await self.state_store.list_workers()
         return [BrowserWorkerState.model_validate(row) for row in rows]
 
+    async def save_session_ownership(self, ownership: BrowserSessionOwnershipRecord) -> BrowserSessionOwnershipRecord:
+        if self.state_store is not None:
+            await self.state_store.store_session_ownership(ownership.session_id, ownership.model_dump(mode="json"))
+        return ownership
+
+    async def get_session_ownership(self, session_id: str) -> BrowserSessionOwnershipRecord | None:
+        if self.state_store is None:
+            return None
+        payload = await self.state_store.get_session_ownership(session_id)
+        if payload is None:
+            return None
+        return BrowserSessionOwnershipRecord.model_validate(payload)
+
+    async def list_session_ownerships(
+        self,
+        *,
+        worker_id: str | None = None,
+        controller_id: str | None = None,
+    ) -> list[BrowserSessionOwnershipRecord]:
+        if self.state_store is None:
+            return []
+        rows = await self.state_store.list_session_ownerships(worker_id=worker_id, controller_id=controller_id)
+        return [BrowserSessionOwnershipRecord.model_validate(row) for row in rows]
+
+    async def delete_session_ownership(self, session_id: str) -> None:
+        if self.state_store is not None:
+            await self.state_store.delete_session_ownership(session_id)
+
     async def save_worker_request(self, request: BrowserTaskRequestRecord) -> BrowserTaskRequestRecord:
         if self.state_store is not None:
             await self.state_store.store_worker_request(request.run_id, request.action_id, request.model_dump(mode="json"))
@@ -348,7 +377,28 @@ class RunStore:
             return None
         return BrowserTaskRequestRecord.model_validate(payload)
 
+    async def list_worker_requests(
+        self,
+        *,
+        run_id: str | None = None,
+        worker_id: str | None = None,
+        session_id: str | None = None,
+        status: str | None = None,
+    ) -> list[BrowserTaskRequestRecord]:
+        if self.state_store is None:
+            return []
+        rows = await self.state_store.list_worker_requests(
+            run_id=run_id,
+            worker_id=worker_id,
+            session_id=session_id,
+            status=status,
+        )
+        return [BrowserTaskRequestRecord.model_validate(row) for row in rows]
+
     async def save_worker_result(self, result: BrowserTaskResultRecord) -> BrowserTaskResultRecord:
+        existing = await self.get_worker_result(result.run_id, result.action_id)
+        if existing is not None:
+            return existing
         if self.state_store is not None:
             await self.state_store.store_worker_result(result.run_id, result.action_id, result.model_dump(mode="json"))
         return result
@@ -360,6 +410,18 @@ class RunStore:
         if payload is None:
             return None
         return BrowserTaskResultRecord.model_validate(payload)
+
+    async def list_worker_results(
+        self,
+        *,
+        run_id: str | None = None,
+        worker_id: str | None = None,
+        session_id: str | None = None,
+    ) -> list[BrowserTaskResultRecord]:
+        if self.state_store is None:
+            return []
+        rows = await self.state_store.list_worker_results(run_id=run_id, worker_id=worker_id, session_id=session_id)
+        return [BrowserTaskResultRecord.model_validate(row) for row in rows]
 
     async def validate_fencing_token(self, run_id: str | None, worker_id: str, token: int | None) -> bool:
         if run_id is None or token is None:

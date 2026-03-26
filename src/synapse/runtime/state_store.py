@@ -154,6 +154,26 @@ class RuntimeStateStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def store_session_ownership(self, session_id: str, ownership_data: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_session_ownership(self, session_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def list_session_ownerships(
+        self,
+        worker_id: str | None = None,
+        controller_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def delete_session_ownership(self, session_id: str) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
     async def store_worker_request(self, run_id: str | None, action_id: str, request_data: dict[str, Any]) -> None:
         raise NotImplementedError
 
@@ -162,11 +182,32 @@ class RuntimeStateStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def list_worker_requests(
+        self,
+        *,
+        run_id: str | None = None,
+        worker_id: str | None = None,
+        session_id: str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
     async def store_worker_result(self, run_id: str | None, action_id: str, result_data: dict[str, Any]) -> None:
         raise NotImplementedError
 
     @abstractmethod
     async def get_worker_result(self, run_id: str | None, action_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def list_worker_results(
+        self,
+        *,
+        run_id: str | None = None,
+        worker_id: str | None = None,
+        session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         raise NotImplementedError
 
     @abstractmethod
@@ -263,6 +304,7 @@ class InMemoryRuntimeStateStore(RuntimeStateStore):
         self._run_leases: dict[str, dict[str, Any]] = {}
         self._lease_counter: int = 0
         self._workers: dict[str, dict[str, Any]] = {}
+        self._session_ownership: dict[str, dict[str, Any]] = {}
         self._worker_requests: dict[tuple[str | None, str], dict[str, Any]] = {}
         self._worker_results: dict[tuple[str | None, str], dict[str, Any]] = {}
         self._interventions: dict[str, dict[str, Any]] = {}
@@ -422,6 +464,28 @@ class InMemoryRuntimeStateStore(RuntimeStateStore):
     async def list_workers(self) -> list[dict[str, Any]]:
         return [dict(value) for value in self._workers.values()]
 
+    async def store_session_ownership(self, session_id: str, ownership_data: dict[str, Any]) -> None:
+        self._session_ownership[session_id] = dict(ownership_data)
+
+    async def get_session_ownership(self, session_id: str) -> dict[str, Any] | None:
+        record = self._session_ownership.get(session_id)
+        return dict(record) if record is not None else None
+
+    async def list_session_ownerships(
+        self,
+        worker_id: str | None = None,
+        controller_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        rows = [dict(value) for value in self._session_ownership.values()]
+        if worker_id is not None:
+            rows = [row for row in rows if row.get("worker_id") == worker_id]
+        if controller_id is not None:
+            rows = [row for row in rows if row.get("controller_id") == controller_id]
+        return rows
+
+    async def delete_session_ownership(self, session_id: str) -> None:
+        self._session_ownership.pop(session_id, None)
+
     async def store_worker_request(self, run_id: str | None, action_id: str, request_data: dict[str, Any]) -> None:
         self._worker_requests[(run_id, action_id)] = dict(request_data)
 
@@ -429,12 +493,49 @@ class InMemoryRuntimeStateStore(RuntimeStateStore):
         record = self._worker_requests.get((run_id, action_id))
         return dict(record) if record is not None else None
 
+    async def list_worker_requests(
+        self,
+        *,
+        run_id: str | None = None,
+        worker_id: str | None = None,
+        session_id: str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        rows = [dict(value) for value in self._worker_requests.values()]
+        if run_id is not None:
+            rows = [row for row in rows if row.get("run_id") == run_id]
+        if worker_id is not None:
+            rows = [row for row in rows if row.get("worker_id") == worker_id]
+        if session_id is not None:
+            rows = [row for row in rows if row.get("session_id") == session_id]
+        if status is not None:
+            rows = [row for row in rows if row.get("status") == status]
+        rows.sort(key=lambda row: str(row.get("created_at", "")))
+        return rows
+
     async def store_worker_result(self, run_id: str | None, action_id: str, result_data: dict[str, Any]) -> None:
         self._worker_results[(run_id, action_id)] = dict(result_data)
 
     async def get_worker_result(self, run_id: str | None, action_id: str) -> dict[str, Any] | None:
         record = self._worker_results.get((run_id, action_id))
         return dict(record) if record is not None else None
+
+    async def list_worker_results(
+        self,
+        *,
+        run_id: str | None = None,
+        worker_id: str | None = None,
+        session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        rows = [dict(value) for value in self._worker_results.values()]
+        if run_id is not None:
+            rows = [row for row in rows if row.get("run_id") == run_id]
+        if worker_id is not None:
+            rows = [row for row in rows if row.get("worker_id") == worker_id]
+        if session_id is not None:
+            rows = [row for row in rows if row.get("session_id") == session_id]
+        rows.sort(key=lambda row: str(row.get("completed_at", "")))
+        return rows
 
     async def store_intervention(self, intervention_id: str, intervention_data: dict[str, Any]) -> None:
         self._interventions[intervention_id] = dict(intervention_data)
@@ -855,25 +956,153 @@ class RedisRuntimeStateStore(RuntimeStateStore):
         ids = await redis.smembers("synapse:workers:index")
         return await self._mget_json([self._worker_key(worker_id) for worker_id in ids])
 
+    async def store_session_ownership(self, session_id: str, ownership_data: dict[str, Any]) -> None:
+        redis = self._require_redis()
+        previous = await self.get_session_ownership(session_id)
+        await redis.set(self._session_ownership_key(session_id), json.dumps(ownership_data))
+        await redis.sadd("synapse:session-ownership:index", session_id)
+        if previous is not None:
+            if isinstance(previous.get("worker_id"), str):
+                await redis.srem(f"synapse:session-ownership:worker:{previous['worker_id']}", session_id)
+            if isinstance(previous.get("controller_id"), str):
+                await redis.srem(f"synapse:session-ownership:controller:{previous['controller_id']}", session_id)
+        worker_id = ownership_data.get("worker_id")
+        controller_id = ownership_data.get("controller_id")
+        if isinstance(worker_id, str) and worker_id:
+            await redis.sadd(f"synapse:session-ownership:worker:{worker_id}", session_id)
+        if isinstance(controller_id, str) and controller_id:
+            await redis.sadd(f"synapse:session-ownership:controller:{controller_id}", session_id)
+
+    async def get_session_ownership(self, session_id: str) -> dict[str, Any] | None:
+        redis = self._require_redis()
+        payload = await redis.get(self._session_ownership_key(session_id))
+        return self._decode(payload)
+
+    async def list_session_ownerships(
+        self,
+        worker_id: str | None = None,
+        controller_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        redis = self._require_redis()
+        if worker_id is not None:
+            ids = await redis.smembers(f"synapse:session-ownership:worker:{worker_id}")
+        elif controller_id is not None:
+            ids = await redis.smembers(f"synapse:session-ownership:controller:{controller_id}")
+        else:
+            ids = await redis.smembers("synapse:session-ownership:index")
+        rows = await self._mget_json([self._session_ownership_key(session_id) for session_id in ids])
+        if worker_id is not None:
+            rows = [row for row in rows if row.get("worker_id") == worker_id]
+        if controller_id is not None:
+            rows = [row for row in rows if row.get("controller_id") == controller_id]
+        return rows
+
+    async def delete_session_ownership(self, session_id: str) -> None:
+        redis = self._require_redis()
+        existing = await self.get_session_ownership(session_id)
+        await redis.delete(self._session_ownership_key(session_id))
+        await redis.srem("synapse:session-ownership:index", session_id)
+        if existing is not None:
+            if isinstance(existing.get("worker_id"), str):
+                await redis.srem(f"synapse:session-ownership:worker:{existing['worker_id']}", session_id)
+            if isinstance(existing.get("controller_id"), str):
+                await redis.srem(f"synapse:session-ownership:controller:{existing['controller_id']}", session_id)
+
     async def store_worker_request(self, run_id: str | None, action_id: str, request_data: dict[str, Any]) -> None:
         redis = self._require_redis()
         await redis.set(self._worker_request_key(run_id, action_id), json.dumps(request_data))
         await redis.sadd(self._worker_request_index_key(run_id), action_id)
+        worker_id = request_data.get("worker_id")
+        session_id = request_data.get("session_id")
+        if isinstance(worker_id, str) and worker_id:
+            await redis.sadd(f"synapse:worker-requests:worker:{worker_id}", self._worker_request_storage_key(run_id, action_id))
+        if isinstance(session_id, str) and session_id:
+            await redis.sadd(f"synapse:worker-requests:session:{session_id}", self._worker_request_storage_key(run_id, action_id))
+        if isinstance(request_data.get("status"), str):
+            await redis.sadd(
+                f"synapse:worker-requests:status:{request_data['status']}",
+                self._worker_request_storage_key(run_id, action_id),
+            )
 
     async def get_worker_request(self, run_id: str | None, action_id: str) -> dict[str, Any] | None:
         redis = self._require_redis()
         payload = await redis.get(self._worker_request_key(run_id, action_id))
         return self._decode(payload)
 
+    async def list_worker_requests(
+        self,
+        *,
+        run_id: str | None = None,
+        worker_id: str | None = None,
+        session_id: str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        redis = self._require_redis()
+        if worker_id is not None:
+            storage_keys = await redis.smembers(f"synapse:worker-requests:worker:{worker_id}")
+        elif session_id is not None:
+            storage_keys = await redis.smembers(f"synapse:worker-requests:session:{session_id}")
+        elif status is not None:
+            storage_keys = await redis.smembers(f"synapse:worker-requests:status:{status}")
+        elif run_id is not None:
+            storage_keys = [self._worker_request_storage_key(run_id, action_id) for action_id in await redis.smembers(self._worker_request_index_key(run_id))]
+        else:
+            keys = await redis.keys("synapse:worker-requests:*:*")
+            storage_keys = [item for item in (self._storage_key_from_worker_request_key(key) for key in keys) if item]
+        rows = await self._mget_json([self._worker_request_key_from_storage_key(item) for item in storage_keys])
+        if run_id is not None:
+            rows = [row for row in rows if row.get("run_id") == run_id]
+        if worker_id is not None:
+            rows = [row for row in rows if row.get("worker_id") == worker_id]
+        if session_id is not None:
+            rows = [row for row in rows if row.get("session_id") == session_id]
+        if status is not None:
+            rows = [row for row in rows if row.get("status") == status]
+        rows.sort(key=lambda row: str(row.get("created_at", "")))
+        return rows
+
     async def store_worker_result(self, run_id: str | None, action_id: str, result_data: dict[str, Any]) -> None:
         redis = self._require_redis()
         await redis.set(self._worker_result_key(run_id, action_id), json.dumps(result_data))
         await redis.sadd(self._worker_result_index_key(run_id), action_id)
+        worker_id = result_data.get("worker_id")
+        session_id = result_data.get("session_id")
+        if isinstance(worker_id, str) and worker_id:
+            await redis.sadd(f"synapse:worker-results:worker:{worker_id}", self._worker_result_storage_key(run_id, action_id))
+        if isinstance(session_id, str) and session_id:
+            await redis.sadd(f"synapse:worker-results:session:{session_id}", self._worker_result_storage_key(run_id, action_id))
 
     async def get_worker_result(self, run_id: str | None, action_id: str) -> dict[str, Any] | None:
         redis = self._require_redis()
         payload = await redis.get(self._worker_result_key(run_id, action_id))
         return self._decode(payload)
+
+    async def list_worker_results(
+        self,
+        *,
+        run_id: str | None = None,
+        worker_id: str | None = None,
+        session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        redis = self._require_redis()
+        if worker_id is not None:
+            storage_keys = await redis.smembers(f"synapse:worker-results:worker:{worker_id}")
+        elif session_id is not None:
+            storage_keys = await redis.smembers(f"synapse:worker-results:session:{session_id}")
+        elif run_id is not None:
+            storage_keys = [self._worker_result_storage_key(run_id, action_id) for action_id in await redis.smembers(self._worker_result_index_key(run_id))]
+        else:
+            keys = await redis.keys("synapse:worker-results:*:*")
+            storage_keys = [item for item in (self._storage_key_from_worker_result_key(key) for key in keys) if item]
+        rows = await self._mget_json([self._worker_result_key_from_storage_key(item) for item in storage_keys])
+        if run_id is not None:
+            rows = [row for row in rows if row.get("run_id") == run_id]
+        if worker_id is not None:
+            rows = [row for row in rows if row.get("worker_id") == worker_id]
+        if session_id is not None:
+            rows = [row for row in rows if row.get("session_id") == session_id]
+        rows.sort(key=lambda row: str(row.get("completed_at", "")))
+        return rows
 
     async def store_intervention(self, intervention_id: str, intervention_data: dict[str, Any]) -> None:
         redis = self._require_redis()
@@ -1088,6 +1317,10 @@ class RedisRuntimeStateStore(RuntimeStateStore):
         return f"synapse:workers:{worker_id}"
 
     @staticmethod
+    def _session_ownership_key(session_id: str) -> str:
+        return f"synapse:session-ownership:{session_id}"
+
+    @staticmethod
     def _worker_request_key(run_id: str | None, action_id: str) -> str:
         run_part = run_id or "global"
         return f"synapse:worker-requests:{run_part}:{action_id}"
@@ -1098,6 +1331,24 @@ class RedisRuntimeStateStore(RuntimeStateStore):
         return f"synapse:worker-requests:index:{run_part}"
 
     @staticmethod
+    def _worker_request_storage_key(run_id: str | None, action_id: str) -> str:
+        run_part = run_id or "global"
+        return f"{run_part}:{action_id}"
+
+    @staticmethod
+    def _worker_request_key_from_storage_key(storage_key: str) -> str:
+        run_part, _, action_id = storage_key.partition(":")
+        return RedisRuntimeStateStore._worker_request_key(None if run_part == "global" else run_part, action_id)
+
+    @staticmethod
+    def _storage_key_from_worker_request_key(key: str) -> str:
+        prefix = "synapse:worker-requests:"
+        storage_key = key.removeprefix(prefix)
+        if storage_key.startswith("index:"):
+            return ""
+        return storage_key
+
+    @staticmethod
     def _worker_result_key(run_id: str | None, action_id: str) -> str:
         run_part = run_id or "global"
         return f"synapse:worker-results:{run_part}:{action_id}"
@@ -1106,6 +1357,24 @@ class RedisRuntimeStateStore(RuntimeStateStore):
     def _worker_result_index_key(run_id: str | None) -> str:
         run_part = run_id or "global"
         return f"synapse:worker-results:index:{run_part}"
+
+    @staticmethod
+    def _worker_result_storage_key(run_id: str | None, action_id: str) -> str:
+        run_part = run_id or "global"
+        return f"{run_part}:{action_id}"
+
+    @staticmethod
+    def _worker_result_key_from_storage_key(storage_key: str) -> str:
+        run_part, _, action_id = storage_key.partition(":")
+        return RedisRuntimeStateStore._worker_result_key(None if run_part == "global" else run_part, action_id)
+
+    @staticmethod
+    def _storage_key_from_worker_result_key(key: str) -> str:
+        prefix = "synapse:worker-results:"
+        storage_key = key.removeprefix(prefix)
+        if storage_key.startswith("index:"):
+            return ""
+        return storage_key
 
     @staticmethod
     def _intervention_key(intervention_id: str) -> str:

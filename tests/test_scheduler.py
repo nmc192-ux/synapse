@@ -22,14 +22,15 @@ from synapse.transports.websocket_manager import WebSocketManager
 
 
 class _StubWorkerPool:
-    def __init__(self, workers: list[BrowserWorkerState]) -> None:
+    def __init__(self, workers: list[BrowserWorkerState], registered: list[BrowserWorkerState] | None = None) -> None:
         self._workers = workers
+        self._registered = registered or workers
 
     def list_workers(self) -> list[BrowserWorkerState]:
         return [worker.model_copy(deep=True) for worker in self._workers]
 
     async def list_registered_workers(self) -> list[BrowserWorkerState]:
-        return self.list_workers()
+        return [worker.model_copy(deep=True) for worker in self._registered]
 
 
 class _StubBrowserService:
@@ -278,6 +279,66 @@ def test_scheduler_uses_exponential_backoff_metadata() -> None:
         await scheduler.requeue_run(run.run_id, reason="retry", attempts=3, reassign=False)
         persisted = await run_store.get(run.run_id)
         assert persisted.metadata["retry_backoff_seconds"] == 0.04
+
+    asyncio.run(scenario())
+
+
+def test_scheduler_uses_durable_registry_scoped_to_controller() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        bus = EventBus(WebSocketManager(state_store=store))
+        bus.set_context_resolver(lambda event: _event_context())
+
+        worker_a = BrowserWorkerState(
+            worker_id="worker-a",
+            queue_name="qa",
+            controller_id="controller-a",
+            status=WorkerRuntimeStatus.IDLE,
+        )
+        worker_b = BrowserWorkerState(
+            worker_id="worker-b",
+            queue_name="qb",
+            controller_id="controller-b",
+            status=WorkerRuntimeStatus.IDLE,
+        )
+        scheduler = RunScheduler(
+            run_store,
+            _StubWorkerPool([worker_a], registered=[worker_a]),
+            bus,
+            cleanup_interval_seconds=60,
+        )
+        await run_store.save_worker(worker_a)
+        await run_store.save_worker(worker_b)
+        run = await run_store.create_run(task_id="task-1", agent_id="agent-1")
+        lease = await scheduler.assign_run(run.run_id)
+        assert lease.worker_id == "worker-a"
+
+    asyncio.run(scenario())
+
+
+def test_multi_controller_assignment_returns_actual_winning_lease() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        bus = EventBus(WebSocketManager(state_store=store))
+        bus.set_context_resolver(lambda event: _event_context())
+        worker_a = BrowserWorkerState(worker_id="worker-a", queue_name="qa", controller_id="controller-a", status=WorkerRuntimeStatus.IDLE)
+        worker_b = BrowserWorkerState(worker_id="worker-b", queue_name="qb", controller_id="controller-b", status=WorkerRuntimeStatus.IDLE)
+        await run_store.save_worker(worker_a)
+        await run_store.save_worker(worker_b)
+        scheduler_a = RunScheduler(run_store, _StubWorkerPool([worker_a], registered=[worker_a]), bus, cleanup_interval_seconds=60)
+        scheduler_b = RunScheduler(run_store, _StubWorkerPool([worker_b], registered=[worker_b]), bus, cleanup_interval_seconds=60)
+        run = await run_store.create_run(task_id="task-race", agent_id="agent-1")
+
+        first, second = await asyncio.gather(
+            scheduler_a.assign_run(run.run_id),
+            scheduler_b.assign_run(run.run_id),
+        )
+
+        assert first.worker_id == second.worker_id
+        persisted = await run_store.get(run.run_id)
+        assert persisted.metadata["assigned_worker_id"] == first.worker_id
 
     asyncio.run(scenario())
 

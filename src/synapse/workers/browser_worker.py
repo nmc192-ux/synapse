@@ -93,9 +93,11 @@ class BrowserWorker:
                 await self.result_handler(
                     BrowserTaskResult(
                         action_id=item.action_id,
+                        request_id=item.request_id,
                         worker_id=self.worker_id,
                         action=item.action,
                         run_id=item.run_id,
+                        session_id=item.session_id,
                         success=True,
                         payload=payload,
                         fencing_token=item.fencing_token,
@@ -106,9 +108,11 @@ class BrowserWorker:
                 await self.result_handler(
                     BrowserTaskResult(
                         action_id=item.action_id,
+                        request_id=item.request_id,
                         worker_id=self.worker_id,
                         action=item.action,
                         run_id=item.run_id,
+                        session_id=item.session_id,
                         success=False,
                         error=str(exc),
                         fencing_token=item.fencing_token,

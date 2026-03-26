@@ -8,7 +8,13 @@ from pydantic import BaseModel, Field
 from synapse.config import settings
 from synapse.models.run import RunState, RunStatus
 from synapse.models.runtime_event import EventSeverity, EventType
-from synapse.models.runtime_state import BrowserWorkerState, RunLeaseRecord, RunLeaseStatus, WorkerRuntimeStatus
+from synapse.models.runtime_state import (
+    BrowserWorkerState,
+    RunLeaseRecord,
+    RunLeaseStatus,
+    WorkerHealthStatus,
+    WorkerRuntimeStatus,
+)
 from synapse.runtime.event_bus import EventBus
 from synapse.runtime.run_store import RunStore
 
@@ -89,6 +95,16 @@ class RunScheduler:
             attempts=attempts,
         )
         lease = self._from_record(lease_record)
+        if lease.worker_id != worker.worker_id:
+            await self.run_store.update_metadata(
+                run_id,
+                {
+                    "assigned_worker_id": lease.worker_id,
+                    "lease_expires_at": lease.expires_at.isoformat(),
+                    "lease_token": lease.token,
+                },
+            )
+            return lease
         await self.run_store.update_status(
             run_id,
             RunStatus.RUNNING if run.status != RunStatus.PAUSED else RunStatus.RESUMED,
@@ -232,6 +248,7 @@ class RunScheduler:
             worker
             for worker in await self.browser_workers.list_registered_workers()
             if worker.status not in {WorkerRuntimeStatus.OFFLINE, WorkerRuntimeStatus.FAILED}
+            and worker.health_status in {WorkerHealthStatus.HEALTHY, WorkerHealthStatus.DEGRADED}
         ]
         if not workers:
             return None
@@ -242,6 +259,7 @@ class RunScheduler:
         return any(
             worker.worker_id == worker_id
             and worker.status not in {WorkerRuntimeStatus.OFFLINE, WorkerRuntimeStatus.FAILED}
+            and worker.health_status in {WorkerHealthStatus.HEALTHY, WorkerHealthStatus.DEGRADED}
             for worker in await self.browser_workers.list_registered_workers()
         )
 

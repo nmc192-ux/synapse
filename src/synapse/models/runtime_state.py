@@ -19,6 +19,13 @@ class WorkerRuntimeStatus(str, Enum):
     FAILED = "failed"
 
 
+class WorkerHealthStatus(str, Enum):
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    STALE = "stale"
+    UNAVAILABLE = "unavailable"
+
+
 class AgentRuntimeRecord(BaseModel):
     agent_id: str
     organization_id: str | None = None
@@ -66,11 +73,14 @@ class BrowserWorkerState(BaseModel):
     worker_id: str
     queue_name: str
     status: WorkerRuntimeStatus = WorkerRuntimeStatus.STARTING
+    health_status: WorkerHealthStatus = WorkerHealthStatus.HEALTHY
     last_heartbeat: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     active_sessions: int = 0
     current_request_id: str | None = None
     capabilities: list[str] = Field(default_factory=list)
     current_runs: list[str] = Field(default_factory=list)
+    controller_id: str | None = None
+    owned_sessions: list[str] = Field(default_factory=list)
     metadata: dict[str, object] = Field(default_factory=dict)
 
 
@@ -108,6 +118,7 @@ class RunLeaseRecord(BaseModel):
 
 class BrowserTaskRequestRecord(BaseModel):
     action_id: str
+    request_id: str | None = None
     run_id: str | None = None
     worker_id: str
     action: str
@@ -120,18 +131,44 @@ class BrowserTaskRequestRecord(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+    @model_validator(mode="after")
+    def _sync_request_id(self) -> "BrowserTaskRequestRecord":
+        if self.request_id is None:
+            self.request_id = self.action_id
+        return self
+
 
 class BrowserTaskResultRecord(BaseModel):
     action_id: str
+    request_id: str | None = None
     run_id: str | None = None
     worker_id: str
     action: str
+    session_id: str | None = None
     success: bool = True
     payload: dict[str, object] = Field(default_factory=dict)
     error: str | None = None
     fencing_token: int | None = None
     status: str = "completed"
     completed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @model_validator(mode="after")
+    def _sync_request_id(self) -> "BrowserTaskResultRecord":
+        if self.request_id is None:
+            self.request_id = self.action_id
+        return self
+
+
+class BrowserSessionOwnershipRecord(BaseModel):
+    session_id: str
+    worker_id: str
+    controller_id: str | None = None
+    run_id: str | None = None
+    project_id: str | None = None
+    current_url: str | None = None
+    status: str = "active"
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class RuntimeCheckpoint(BaseModel):

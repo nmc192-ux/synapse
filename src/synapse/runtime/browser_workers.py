@@ -10,9 +10,12 @@ from synapse.config import settings
 from synapse.models.runtime_event import EventType, RuntimeEvent
 from synapse.models.runtime_state import (
     BrowserSessionState,
+    BrowserSessionOwnershipRecord,
     BrowserTaskRequestRecord,
     BrowserTaskResultRecord,
     BrowserWorkerState,
+    WorkerHealthStatus,
+    WorkerRuntimeStatus,
 )
 from synapse.runtime.execution_plane import ExecutionPlaneRuntime, RuntimeEventPublisher
 from synapse.runtime.queues import BrowserTaskEnvelope, BrowserTaskQueue, BrowserTaskResult, create_browser_task_queue
@@ -36,9 +39,11 @@ class BrowserWorkerPool:
         queue_factory: Callable[[str], BrowserTaskQueue] | None = None,
         run_store: RunStore | None = None,
         lease_timeout_seconds: float | None = None,
+        controller_id: str | None = None,
     ) -> None:
         self.state_store = state_store
         self._event_publisher: RuntimeEventPublisher | None = None
+        self.controller_id = controller_id or str(uuid.uuid4())
         self.worker_count = max(1, worker_count or settings.browser_worker_count)
         self.heartbeat_interval_seconds = (
             heartbeat_interval_seconds or settings.browser_worker_heartbeat_interval_seconds
@@ -72,7 +77,7 @@ class BrowserWorkerPool:
         if self._workers:
             return
         for index in range(self.worker_count):
-            worker_id = f"browser-worker-{index + 1}"
+            worker_id = f"{self.controller_id}:browser-worker-{index + 1}"
             queue_name = f"{settings.browser_worker_queue_prefix}:{worker_id}"
             worker = BrowserWorker(
                 worker_id=worker_id,
@@ -85,7 +90,10 @@ class BrowserWorkerPool:
             )
             self._workers[worker_id] = worker
             await worker.start()
+            worker.state.controller_id = self.controller_id
+            worker.state.health_status = WorkerHealthStatus.HEALTHY
             await self._persist_worker_state(worker_id)
+        await self._recover_durable_state()
 
     async def stop(self) -> None:
         for worker in self._workers.values():
@@ -120,6 +128,7 @@ class BrowserWorkerPool:
         )
         self._session_workers[session_id] = worker_id
         self._session_runs[session_id] = run_id
+        await self._persist_session_ownership(session_id, worker_id, run_id=run_id)
         self._refresh_worker_state(worker_id)
         return payload
 
@@ -230,6 +239,7 @@ class BrowserWorkerPool:
         self._session_workers.pop(session_id, None)
         self._session_runs.pop(session_id, None)
         self._session_urls.pop(session_id, None)
+        await self._delete_session_ownership(session_id)
         self._refresh_worker_state(worker_id)
 
     async def save_session_state(self, session_id: str, run_id: str | None = None):
@@ -251,6 +261,7 @@ class BrowserWorkerPool:
         )
         self._session_workers[session_id] = worker_id
         self._session_runs[session_id] = None
+        await self._persist_session_ownership(session_id, worker_id, run_id=None)
         self._update_session_url(session_id, payload)
         self._refresh_worker_state(worker_id)
         return payload
@@ -284,7 +295,7 @@ class BrowserWorkerPool:
         if target_worker_id is None and run_id is not None:
             target_worker_id = await self._assigned_worker_for_run(run_id)
         if target_worker_id is None:
-            target_worker_id = self._choose_worker_id()
+            target_worker_id = await self._choose_dispatchable_worker_id()
         return await self._dispatch(
             target_worker_id,
             BrowserTaskEnvelope(
@@ -308,7 +319,16 @@ class BrowserWorkerPool:
         if self._run_store is not None:
             registered = await self._run_store.list_workers()
             if registered:
-                return registered
+                now = datetime.now(timezone.utc)
+                dispatchable: list[BrowserWorkerState] = []
+                for worker in registered:
+                    if worker.controller_id != self.controller_id:
+                        continue
+                    refreshed = self._with_computed_health(worker, now)
+                    if refreshed.health_status in {WorkerHealthStatus.HEALTHY, WorkerHealthStatus.DEGRADED}:
+                        dispatchable.append(refreshed)
+                if dispatchable:
+                    return dispatchable
         return self.list_workers()
 
     async def _on_worker_heartbeat(self, worker_id: str) -> None:
@@ -325,7 +345,7 @@ class BrowserWorkerPool:
         self._refresh_worker_state(worker_id)
 
     async def _dispatch_session(self, action: str, session_id: str, arguments: dict[str, Any]):
-        worker_id = self._require_worker_id(session_id)
+        worker_id = await self._require_worker_id(session_id)
         payload = await self._dispatch(
             worker_id,
             BrowserTaskEnvelope(
@@ -345,13 +365,16 @@ class BrowserWorkerPool:
             if not existing_result.success:
                 raise RuntimeError(existing_result.error or f"Browser worker task failed: {item.action}")
             return existing_result.payload
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[BrowserTaskResult] = loop.create_future()
         if item.request_id is None:
             item.request_id = item.action_id
+        existing_request = await self._load_existing_request(item.run_id, item.action_id)
+        if existing_request is not None and existing_request.status in {"queued", "dispatched", "running"}:
+            return await self._wait_for_durable_result(existing_request)
         item.fencing_token = await self._current_fencing_token(item.run_id, worker_id)
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[BrowserTaskResult] = loop.create_future()
         self._pending[item.action_id] = future
-        await self._persist_request(worker_id, item)
+        await self._persist_request(worker_id, item, status="dispatched")
         await worker.queue.put(item)
         if self._event_publisher is not None:
             await self._event_publisher(
@@ -373,7 +396,7 @@ class BrowserWorkerPool:
                     correlation_id=item.request_id,
                 )
             )
-        result = await future
+        result = await self._await_result(item, future)
         if not result.success:
             raise RuntimeError(result.error or f"Browser worker task failed: {item.action}")
         return result.payload
@@ -395,8 +418,36 @@ class BrowserWorkerPool:
         self._next_worker_index += 1
         return worker_id
 
-    def _require_worker_id(self, session_id: str) -> str:
+    async def _choose_dispatchable_worker_id(self) -> str:
+        workers = await self.list_registered_workers()
+        if not workers:
+            raise RuntimeError("No dispatchable browser workers available.")
+        workers.sort(key=lambda item: (item.active_sessions, item.last_heartbeat))
+        return workers[0].worker_id
+
+    async def _require_worker_id(self, session_id: str) -> str:
         worker_id = self._session_workers.get(session_id)
+        if worker_id is None:
+            ownership = await self._load_session_ownership(session_id)
+            if ownership is not None:
+                if await self._worker_ownership_is_stale(ownership.worker_id):
+                    await self._emit_worker_event(
+                        EventType.WORKER_OWNERSHIP_STALE,
+                        session_id=session_id,
+                        run_id=ownership.run_id,
+                        payload={
+                            "session_id": session_id,
+                            "worker_id": ownership.worker_id,
+                            "controller_id": ownership.controller_id,
+                        },
+                    )
+                    await self._mark_session_ownership_stale(ownership)
+                else:
+                    worker_id = ownership.worker_id
+                    self._session_workers[session_id] = worker_id
+                    self._session_runs[session_id] = ownership.run_id
+                    if ownership.current_url:
+                        self._session_urls[session_id] = ownership.current_url
         if worker_id is None:
             raise KeyError(f"No browser worker assigned to session: {session_id}")
         return worker_id
@@ -405,6 +456,8 @@ class BrowserWorkerPool:
         worker = self._workers[worker_id]
         worker.state.active_sessions = sum(1 for assigned in self._session_workers.values() if assigned == worker_id)
         worker.state.last_heartbeat = datetime.now(timezone.utc)
+        worker.state.health_status = WorkerHealthStatus.HEALTHY
+        worker.state.controller_id = self.controller_id
         worker.state.current_runs = sorted(
             {
                 run_id
@@ -413,6 +466,9 @@ class BrowserWorkerPool:
                 for run_id in [self._session_runs.get(session_id)]
                 if run_id is not None
             }
+        )
+        worker.state.owned_sessions = sorted(
+            session_id for session_id, assigned in self._session_workers.items() if assigned == worker_id
         )
         asyncio.create_task(self._persist_worker_state(worker_id))
 
@@ -425,6 +481,10 @@ class BrowserWorkerPool:
             url = str(current_url) if current_url else None
         if url is not None:
             self._session_urls[session_id] = url
+            worker_id = self._session_workers.get(session_id)
+            run_id = self._session_runs.get(session_id)
+            if worker_id is not None:
+                asyncio.create_task(self._persist_session_ownership(session_id, worker_id, run_id=run_id, current_url=url))
 
     async def _assigned_worker_for_run(self, run_id: str) -> str | None:
         if self._run_store is not None:
@@ -456,12 +516,13 @@ class BrowserWorkerPool:
             return
         await self._run_store.save_worker(worker.state.model_copy(deep=True))
 
-    async def _persist_request(self, worker_id: str, item: BrowserTaskEnvelope) -> None:
+    async def _persist_request(self, worker_id: str, item: BrowserTaskEnvelope, *, status: str) -> None:
         if self._run_store is None:
             return
         await self._run_store.save_worker_request(
             BrowserTaskRequestRecord(
                 action_id=item.action_id,
+                request_id=item.request_id,
                 run_id=item.run_id,
                 worker_id=worker_id,
                 action=item.action,
@@ -469,6 +530,7 @@ class BrowserWorkerPool:
                 task_id=item.task_id,
                 agent_id=item.agent_id,
                 fencing_token=item.fencing_token,
+                status=status,
                 payload=dict(item.arguments),
             )
         )
@@ -478,20 +540,45 @@ class BrowserWorkerPool:
             return True
         if not await self._run_store.validate_fencing_token(result.run_id, result.worker_id, result.fencing_token):
             return False
+        existing = await self._run_store.get_worker_result(result.run_id, result.action_id)
+        if existing is not None:
+            await self._emit_worker_event(
+                EventType.WORKER_RESULT_REPLAYED,
+                run_id=result.run_id,
+                payload={
+                    "worker_id": result.worker_id,
+                    "action_id": result.action_id,
+                    "request_id": result.request_id or result.action_id,
+                },
+            )
+            return True
         payload = result.payload if isinstance(result.payload, dict) else {"value": result.payload}
         await self._run_store.save_worker_result(
             BrowserTaskResultRecord(
                 action_id=result.action_id,
+                request_id=result.request_id,
                 run_id=result.run_id,
                 worker_id=result.worker_id,
                 action=result.action,
+                session_id=result.session_id,
                 success=result.success,
                 payload=payload,
                 error=result.error,
                 fencing_token=result.fencing_token,
                 status="completed" if result.success else "failed",
+                completed_at=result.completed_at,
             )
         )
+        request = await self._run_store.get_worker_request(result.run_id, result.action_id)
+        if request is not None:
+            await self._run_store.save_worker_request(
+                request.model_copy(
+                    update={
+                        "status": "completed" if result.success else "failed",
+                        "updated_at": datetime.now(timezone.utc),
+                    }
+                )
+            )
         return True
 
     async def _load_existing_result(self, item: BrowserTaskEnvelope) -> BrowserTaskResult | None:
@@ -502,15 +589,22 @@ class BrowserWorkerPool:
             return None
         return BrowserTaskResult(
             action_id=existing.action_id,
+            request_id=existing.request_id,
             worker_id=existing.worker_id,
             action=existing.action,
             run_id=existing.run_id,
+            session_id=existing.session_id,
             success=existing.success,
             payload=existing.payload,
             error=existing.error,
             fencing_token=existing.fencing_token,
             completed_at=existing.completed_at,
         )
+
+    async def _load_existing_request(self, run_id: str | None, action_id: str) -> BrowserTaskRequestRecord | None:
+        if self._run_store is None:
+            return None
+        return await self._run_store.get_worker_request(run_id, action_id)
 
     async def _current_fencing_token(self, run_id: str | None, worker_id: str) -> int | None:
         if self._run_store is None or run_id is None:
@@ -519,3 +613,196 @@ class BrowserWorkerPool:
         if lease is None or lease.worker_id != worker_id:
             return None
         return lease.token
+
+    async def _await_result(
+        self,
+        item: BrowserTaskEnvelope,
+        future: asyncio.Future[BrowserTaskResult],
+    ) -> BrowserTaskResult:
+        try:
+            return await asyncio.wait_for(asyncio.shield(future), timeout=self._lease_timeout_seconds)
+        except TimeoutError:
+            return await self._wait_for_durable_result(item)
+
+    async def _wait_for_durable_result(
+        self,
+        item_or_request: BrowserTaskEnvelope | BrowserTaskRequestRecord,
+    ) -> BrowserTaskResult:
+        if self._run_store is None:
+            raise RuntimeError("Durable worker result tracking is not configured.")
+        run_id = item_or_request.run_id
+        action_id = item_or_request.action_id
+        started = datetime.now(timezone.utc)
+        while (datetime.now(timezone.utc) - started).total_seconds() <= self._lease_timeout_seconds:
+            existing = await self._run_store.get_worker_result(run_id, action_id)
+            if existing is not None:
+                return BrowserTaskResult(
+                    action_id=existing.action_id,
+                    request_id=existing.request_id,
+                    worker_id=existing.worker_id,
+                    action=existing.action,
+                    run_id=existing.run_id,
+                    session_id=existing.session_id,
+                    success=existing.success,
+                    payload=existing.payload,
+                    error=existing.error,
+                    fencing_token=existing.fencing_token,
+                    completed_at=existing.completed_at,
+                )
+            await asyncio.sleep(0.05)
+        raise TimeoutError(f"Timed out waiting for durable worker result: {action_id}")
+
+    async def _persist_session_ownership(
+        self,
+        session_id: str,
+        worker_id: str,
+        *,
+        run_id: str | None,
+        current_url: str | None = None,
+        status: str = "active",
+    ) -> None:
+        if self._run_store is None:
+            return
+        existing = await self._run_store.get_session_ownership(session_id)
+        project_id = None
+        if run_id is not None:
+            try:
+                run = await self._run_store.get(run_id)
+            except KeyError:
+                run = None
+            if run is not None:
+                project_id = run.project_id
+        await self._run_store.save_session_ownership(
+            BrowserSessionOwnershipRecord(
+                session_id=session_id,
+                worker_id=worker_id,
+                controller_id=self.controller_id,
+                run_id=run_id,
+                project_id=project_id or (existing.project_id if existing is not None else None),
+                current_url=current_url or self._session_urls.get(session_id),
+                status=status,
+                created_at=existing.created_at if existing is not None else datetime.now(timezone.utc),
+            )
+        )
+
+    async def _delete_session_ownership(self, session_id: str) -> None:
+        if self._run_store is not None:
+            await self._run_store.delete_session_ownership(session_id)
+
+    async def _load_session_ownership(self, session_id: str) -> BrowserSessionOwnershipRecord | None:
+        if self._run_store is None:
+            return None
+        return await self._run_store.get_session_ownership(session_id)
+
+    async def _mark_session_ownership_stale(self, ownership: BrowserSessionOwnershipRecord) -> None:
+        await self._run_store.save_session_ownership(
+            ownership.model_copy(update={"status": "stale", "updated_at": datetime.now(timezone.utc)})
+        )
+
+    async def _worker_ownership_is_stale(self, worker_id: str) -> bool:
+        if self._run_store is None:
+            return worker_id not in self._workers
+        workers = await self._run_store.list_workers()
+        for worker in workers:
+            if worker.worker_id == worker_id:
+                refreshed = self._with_computed_health(worker, datetime.now(timezone.utc))
+                return refreshed.controller_id != self.controller_id or refreshed.health_status in {
+                    WorkerHealthStatus.STALE,
+                    WorkerHealthStatus.UNAVAILABLE,
+                }
+        return True
+
+    def _with_computed_health(self, worker: BrowserWorkerState, now: datetime) -> BrowserWorkerState:
+        age = (now - worker.last_heartbeat).total_seconds()
+        if worker.status in {WorkerRuntimeStatus.OFFLINE, WorkerRuntimeStatus.FAILED}:
+            health = WorkerHealthStatus.UNAVAILABLE
+        elif age > self.heartbeat_interval_seconds * 4:
+            health = WorkerHealthStatus.STALE
+        elif age > self.heartbeat_interval_seconds * 2:
+            health = WorkerHealthStatus.DEGRADED
+        else:
+            health = WorkerHealthStatus.HEALTHY
+        return worker.model_copy(update={"health_status": health})
+
+    async def _recover_durable_state(self) -> None:
+        if self._run_store is None:
+            return
+        for ownership in await self._run_store.list_session_ownerships(controller_id=self.controller_id):
+            if ownership.worker_id in self._workers and ownership.status == "active":
+                self._session_workers[ownership.session_id] = ownership.worker_id
+                self._session_runs[ownership.session_id] = ownership.run_id
+                if ownership.current_url is not None:
+                    self._session_urls[ownership.session_id] = ownership.current_url
+            else:
+                await self._emit_worker_event(
+                    EventType.WORKER_OWNERSHIP_STALE,
+                    session_id=ownership.session_id,
+                    run_id=ownership.run_id,
+                    payload=ownership.model_dump(mode="json"),
+                )
+        for worker in self._workers:
+            requests = await self._run_store.list_worker_requests(worker_id=worker)
+            for request in requests:
+                if request.status not in {"queued", "dispatched", "running"}:
+                    continue
+                result = await self._run_store.get_worker_result(request.run_id, request.action_id)
+                if result is not None:
+                    await self._run_store.save_worker_request(
+                        request.model_copy(update={"status": result.status, "updated_at": datetime.now(timezone.utc)})
+                    )
+                    await self._emit_worker_event(
+                        EventType.WORKER_RESULT_REPLAYED,
+                        run_id=request.run_id,
+                        session_id=request.session_id,
+                        payload={
+                            "worker_id": request.worker_id,
+                            "action_id": request.action_id,
+                            "request_id": request.request_id,
+                        },
+                    )
+                else:
+                    await self._run_store.save_worker_request(
+                        request.model_copy(update={"status": "recovered", "updated_at": datetime.now(timezone.utc)})
+                    )
+                    await self._emit_worker_event(
+                        EventType.WORKER_REQUEST_RECOVERED,
+                        run_id=request.run_id,
+                        session_id=request.session_id,
+                        payload={
+                            "worker_id": request.worker_id,
+                            "action_id": request.action_id,
+                            "request_id": request.request_id,
+                        },
+                    )
+        recovered_run_ids = {
+            ownership.run_id
+            for ownership in await self._run_store.list_session_ownerships(controller_id=self.controller_id)
+            if ownership.run_id is not None
+        }
+        for run_id in sorted(recovered_run_ids):
+            await self._emit_worker_event(
+                EventType.RUN_DISPATCH_RECONCILED,
+                run_id=run_id,
+                payload={"controller_id": self.controller_id, "recovered": True},
+            )
+
+    async def _emit_worker_event(
+        self,
+        event_type: EventType,
+        *,
+        run_id: str | None = None,
+        session_id: str | None = None,
+        payload: dict[str, object],
+    ) -> None:
+        if self._event_publisher is None:
+            return
+        await self._event_publisher(
+            RuntimeEvent(
+                event_type=event_type,
+                run_id=run_id,
+                session_id=session_id,
+                source="browser_worker_pool",
+                payload=payload,
+                correlation_id=str(payload.get("request_id") or payload.get("action_id") or run_id or session_id),
+            )
+        )

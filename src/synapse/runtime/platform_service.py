@@ -187,6 +187,31 @@ class PlatformService:
             api_key_id=record.api_key_id,
         )
 
+    async def can_service_act_for_agent(
+        self,
+        principal: AuthPrincipal,
+        agent_id: str,
+        organization_id: str | None,
+        project_id: str | None,
+    ) -> bool:
+        if principal.principal_type != PrincipalType.SERVICE:
+            return False
+        if not organization_id or not project_id:
+            return False
+        if principal.organization_id != organization_id or principal.project_id != project_id:
+            return False
+        if principal.api_key_id:
+            records = await self.list_api_keys(project_id=project_id)
+            for record in records:
+                if record.api_key_id != principal.api_key_id:
+                    continue
+                allowlist = record.metadata.get("allowed_agent_ids") or record.metadata.get("a2a_agent_allowlist") or []
+                if isinstance(allowlist, list):
+                    normalized = {str(value) for value in allowlist}
+                    if "*" in normalized or agent_id in normalized:
+                        return True
+        return False
+
     async def assign_agent_ownership(self, agent_id: str, request: AgentOwnershipRequest) -> AgentOwnership:
         self._require_store()
         definition = self.agents.get(agent_id).model_copy(deep=True)

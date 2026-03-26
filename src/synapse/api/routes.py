@@ -811,7 +811,7 @@ async def send_agent_message_wire(
 ) -> AgentWireMessage:
     try:
         agent = await _require_agent_project(principal, orchestrator, request.agent)
-        authenticator.authorize_agent_binding(
+        await authenticator.authorize_agent_binding(
             principal,
             agent_id=request.agent,
             organization_id=agent.organization_id,
@@ -834,7 +834,7 @@ async def delegate_agent_task(
 ) -> AgentWireMessage:
     try:
         agent = await _require_agent_project(principal, orchestrator, request.agent)
-        authenticator.authorize_agent_binding(
+        await authenticator.authorize_agent_binding(
             principal,
             agent_id=request.agent,
             organization_id=agent.organization_id,
@@ -1533,7 +1533,7 @@ async def websocket_a2a(
         return
     try:
         agent = await _require_agent_project(principal, orchestrator, agent_id)
-        authenticator.authorize_agent_binding(
+        await authenticator.authorize_agent_binding(
             principal,
             agent_id=agent_id,
             organization_id=agent.organization_id,
@@ -1551,7 +1551,7 @@ async def websocket_a2a(
             wire_message = AgentWireMessage.model_validate({**payload, "agent": agent_id})
             response = await orchestrator.send_agent_wire_message(wire_message)
             await orchestrator.a2a.cleanup_stale_connections()
-            if response is not None:
+            if response is not None and getattr(orchestrator, "event_bus", None) is not None:
                 await orchestrator.event_bus.publish(
                     RuntimeEvent(
                         event_type=EventType.A2A_MESSAGE,

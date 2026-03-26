@@ -168,6 +168,12 @@ The UI renders a Synapse operator dashboard with agent activity, page view, thou
 actions log, memory, and agent communication. It listens to `NEXT_PUBLIC_SYNAPSE_WS_URL`
 and defaults to `ws://127.0.0.1:8000/api/ws`.
 
+For secured deployments, set:
+- `NEXT_PUBLIC_SYNAPSE_BEARER_TOKEN` or `NEXT_PUBLIC_SYNAPSE_API_KEY`
+- `NEXT_PUBLIC_SYNAPSE_PROJECT_ID`
+- `NEXT_PUBLIC_SYNAPSE_API_BASE_URL` when the UI is hosted separately from the API
+- `NEXT_PUBLIC_SYNAPSE_WS_URL`
+
 ## Fixture Web
 
 Synapse includes a controlled fixture web app for reproducible browsing benchmarks.
@@ -278,6 +284,16 @@ API keys, and agent ownership.
 Project-scoped API keys issue JWT access tokens that carry `organization_id`,
 `project_id`, and `api_key_id` claims for downstream policy enforcement.
 
+For A2A hosted deployments, service-to-agent binding is deny-by-default unless:
+- the token is for that exact agent
+- the principal has `admin`
+- the service is allowlisted in `SYNAPSE_A2A_SERVICE_AGENT_ALLOWLIST`
+
+Identity signing can be configured with:
+- `SYNAPSE_A2A_IDENTITY_SIGNING_KEY`
+- `SYNAPSE_A2A_IDENTITY_SIGNING_KEY_ID`
+- `SYNAPSE_A2A_IDENTITY_TRUSTED_KEYS`
+
 Hosted control plane APIs are also available under project-scoped cloud routes:
 
 - `POST /api/cloud/projects/{project_id}/api-keys`
@@ -378,11 +394,16 @@ agent or run security policy. Supported values are:
 - `retry_with_profile`
 # Plugin execution modes
 
-Hosted environments should use `SYNAPSE_PLUGIN_EXECUTION_MODE=isolated_hosted`. In this mode, Synapse executes plugin tools in a subprocess boundary with timeout enforcement via `SYNAPSE_PLUGIN_EXECUTION_TIMEOUT_SECONDS`.
+Hosted environments should use `SYNAPSE_PLUGIN_EXECUTION_MODE=isolated_hosted`. In this mode, Synapse only allows `trusted_internal` plugins and explicitly allowlisted `trusted_partner` plugins. `untrusted_external` plugins are denied by policy for hosted alpha deployments.
 
 Modes:
 - `trusted_local`: current development default, plugin handlers run in-process.
-- `isolated_hosted`: plugin handlers run in a subprocess and report execution telemetry.
+- `isolated_hosted`: plugin handlers run in a restricted runner and report execution telemetry, but are still policy-gated.
+
+Hosted plugin policy:
+- `trusted_internal`: allowed
+- `trusted_partner`: allowed only when present in `SYNAPSE_HOSTED_PLUGIN_PARTNER_ALLOWLIST`
+- `untrusted_external`: denied
 
 Telemetry:
 - `plugin.execution.started`
@@ -390,8 +411,8 @@ Telemetry:
 - `plugin.execution.failed`
 
 Limitations:
-- The hosted isolation boundary is process-level only. It does not yet provide container, VM, or syscall sandboxing.
-- Subprocess plugins still share the Python environment and host-level network access available to the Synapse process.
+- The hosted runner is still not a full container, VM, or syscall sandbox.
+- Because of that, hosted alpha must fail closed for untrusted third-party plugins.
 - Stateful in-memory plugin behavior does not persist across isolated executions.
 
 Migration path:

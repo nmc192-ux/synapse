@@ -50,11 +50,16 @@ class Settings(BaseSettings):
     scheduler_cleanup_interval_seconds: float = 15.0
     scheduler_max_assignment_retries: int = 3
     scheduler_retry_base_delay_seconds: float = 1.0
+    a2a_identity_signing_key: str = "synapse-agent-identity"
+    a2a_identity_signing_key_id: str = "default"
+    a2a_identity_trusted_keys: dict[str, str] = Field(default_factory=dict)
+    a2a_service_agent_allowlist: dict[str, list[str]] = Field(default_factory=dict)
     auth_required: bool = True
     jwt_secret: str = "synapse-dev-secret"
     jwt_issuer: str = "synapse"
     jwt_audience: str = "synapse-api"
     jwt_expiration_seconds: int = 3600
+    hosted_plugin_partner_allowlist: list[str] = Field(default_factory=list)
 
     model_config = SettingsConfigDict(env_prefix="SYNAPSE_", env_file=".env", extra="ignore")
 

@@ -304,6 +304,13 @@ class BrowserWorkerPool:
     def list_workers(self) -> list[BrowserWorkerState]:
         return [worker.state.model_copy(deep=True) for worker in self._workers.values()]
 
+    async def list_registered_workers(self) -> list[BrowserWorkerState]:
+        if self._run_store is not None:
+            registered = await self._run_store.list_workers()
+            if registered:
+                return registered
+        return self.list_workers()
+
     async def _on_worker_heartbeat(self, worker_id: str) -> None:
         if self._run_store is None:
             await self._persist_worker_state(worker_id)

@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 
 from synapse.models.agent import AgentDefinition, AgentKind
-from synapse.models.plugin import PluginExecutionMode
+from synapse.models.plugin import PluginExecutionMode, PluginTrustLevel
 from synapse.models.runtime_event import EventSeverity, EventType
 from synapse.runtime.budget import AgentBudgetManager
 from synapse.runtime.budget_service import BudgetService
@@ -151,6 +151,57 @@ def test_hosted_plugins_are_rejected_when_isolation_backend_unavailable(monkeypa
     asyncio.run(scenario())
 
 
+def test_hosted_untrusted_plugins_are_denied_by_policy() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        tools = ToolRegistry(
+            execution_mode=PluginExecutionMode.ISOLATED_HOSTED,
+            execution_timeout_seconds=1.0,
+            state_store=store,
+        )
+        plugin = tools.register_plugin(
+            name="external-tooling",
+            module="external.plugin",
+            capabilities=["echo"],
+            endpoint="external",
+        )
+        assert plugin.trust_level == PluginTrustLevel.UNTRUSTED_EXTERNAL
+        tools.register("external.echo", lambda arguments: asyncio.sleep(0, result={"echo": arguments}), plugin_name="external-tooling")
+
+        try:
+            await tools.call("external.echo", {"value": "blocked"}, run_id="run-1", project_id="project-1")
+        except PermissionError as exc:
+            assert "denied" in str(exc).lower()
+        else:
+            raise AssertionError("expected hosted policy denial")
+
+        audit_logs = await store.list_audit_logs(project_id="project-1", limit=10)
+        assert any(
+            entry.get("action") == "plugin.execution"
+            and "hosted_policy_denied" in entry.get("metadata", {}).get("policy_violations", [])
+            for entry in audit_logs
+        )
+
+    asyncio.run(scenario())
+
+
+def test_local_trusted_and_untrusted_plugins_remain_callable() -> None:
+    async def scenario() -> None:
+        tools = ToolRegistry(execution_mode=PluginExecutionMode.TRUSTED_LOCAL)
+        tools.register_plugin(
+            name="external-tooling",
+            module="external.plugin",
+            capabilities=["echo"],
+            endpoint="external",
+        )
+        tools.register("external.echo", lambda arguments: asyncio.sleep(0, result={"echo": arguments}), plugin_name="external-tooling")
+
+        result = await tools.call("external.echo", {"value": "ok"})
+        assert result == {"echo": {"value": "ok"}}
+
+    asyncio.run(scenario())
+
+
 def test_tool_service_emits_plugin_failure_telemetry() -> None:
     async def scenario() -> None:
         store = InMemoryRuntimeStateStore()
@@ -160,10 +211,13 @@ def test_tool_service_emits_plugin_failure_telemetry() -> None:
                 agent_id="agent-1",
                 kind=AgentKind.CUSTOM,
                 name="Agent 1",
+                organization_id="org-1",
+                project_id="project-1",
                 security={"allowed_tools": ["isolated.echo"]},
             )
         )
         bus = EventBus(WebSocketManager(state_store=store))
+        bus.set_context_resolver(lambda event: _plugin_event_context())
         budget = BudgetService(AgentBudgetManager(), registry, bus)
         tools = ToolRegistry(
             execution_mode=PluginExecutionMode.ISOLATED_HOSTED,
@@ -187,3 +241,7 @@ def test_tool_service_emits_plugin_failure_telemetry() -> None:
             assert event_types[2].severity == EventSeverity.ERROR
 
     asyncio.run(scenario())
+
+
+async def _plugin_event_context() -> dict[str, object]:
+    return {"organization_id": "org-1", "project_id": "project-1"}

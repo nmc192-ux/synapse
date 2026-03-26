@@ -58,10 +58,16 @@ class HostedPluginIsolationBackend:
     def is_available() -> bool:
         return os.name == "posix" and shutil.which(Path(sys.executable).name) is not None
 
+    @staticmethod
+    def supports_untrusted_plugins() -> bool:
+        return False
+
     async def execute(self, request: PluginExecutionRequest) -> PluginExecutionResult:
         if not self.is_available():
             raise HostedPluginIsolationUnavailableError("Hosted plugin isolation backend is not available.")
-        src_path = str(Path(__file__).resolve().parents[2])
+        repo_root = Path(__file__).resolve().parents[3]
+        src_path = str(repo_root / "src")
+        agent_limits_path = str(repo_root / "config" / "agent_limits.yaml")
         sandbox_root = tempfile.mkdtemp(prefix="synapse-plugin-hosted-")
         stdout_ref = str(Path(sandbox_root) / "plugin.stdout.log")
         stderr_ref = str(Path(sandbox_root) / "plugin.stderr.log")
@@ -72,12 +78,13 @@ class HostedPluginIsolationBackend:
             memory_limit_mb=self.memory_limit_mb,
             cpu_limit_seconds=self.cpu_limit_seconds,
             allowed_network_hosts=self.network_allowlist,
-            allowed_read_roots=(src_path,),
+            allowed_read_roots=(src_path, str(repo_root / "config")),
             allowed_write_roots=(sandbox_root,),
             sandbox_root=sandbox_root,
         )
         env = build_sandbox_env({}, config)
         env["PYTHONPATH"] = src_path
+        env["SYNAPSE_AGENT_LIMITS_CONFIG_PATH"] = agent_limits_path
         env["TMPDIR"] = sandbox_root
         env["TEMP"] = sandbox_root
         env["TMP"] = sandbox_root

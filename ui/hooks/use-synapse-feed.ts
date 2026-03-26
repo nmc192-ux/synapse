@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { initialState } from "@/lib/mock-data";
+import { buildSynapseHeaders, buildSynapseWebSocketUrl, resolveUiAuth } from "@/lib/auth";
 import {
   ActionItem,
   ActivityItem,
@@ -17,8 +18,11 @@ import {
 
 const defaultSocketUrl =
   process.env.NEXT_PUBLIC_SYNAPSE_WS_URL ?? "ws://127.0.0.1:8000/api/ws";
+const defaultApiBaseUrl = process.env.NEXT_PUBLIC_SYNAPSE_API_BASE_URL ?? "";
 
 type DashboardFeed = DashboardState & {
+  authStatus: "ready" | "missing" | "expired" | "forbidden" | "error";
+  authError: string | null;
   refreshInterventions: () => Promise<void>;
   approveIntervention: (interventionId: string) => Promise<void>;
   rejectIntervention: (interventionId: string, reason?: string) => Promise<void>;
@@ -27,9 +31,19 @@ type DashboardFeed = DashboardState & {
 
 export function useSynapseFeed(): DashboardFeed {
   const [state, setState] = useState<DashboardState>(initialState);
+  const [authStatus, setAuthStatus] = useState<DashboardFeed["authStatus"]>("ready");
+  const [authError, setAuthError] = useState<string | null>(null);
 
   useEffect(() => {
-    const socket = new WebSocket(defaultSocketUrl);
+    const auth = resolveUiAuth();
+    if (!auth.bearerToken && !auth.apiKey) {
+      setAuthStatus("missing");
+      setAuthError("Missing Synapse bearer token or API key for the dashboard.");
+      return;
+    }
+    setAuthStatus("ready");
+    setAuthError(null);
+    const socket = new WebSocket(buildSynapseWebSocketUrl(defaultSocketUrl, auth));
 
     socket.onmessage = (message) => {
       const event = JSON.parse(message.data) as SynapseEvent;
@@ -37,7 +51,16 @@ export function useSynapseFeed(): DashboardFeed {
     };
 
     socket.onerror = () => {
+      setAuthStatus("error");
+      setAuthError("WebSocket connection failed.");
       socket.close();
+    };
+
+    socket.onclose = (event) => {
+      if (event.code === 1008) {
+        setAuthStatus("forbidden");
+        setAuthError("WebSocket subscription denied for this project or token.");
+      }
     };
 
     return () => {
@@ -50,11 +73,17 @@ export function useSynapseFeed(): DashboardFeed {
   }, []);
 
   async function refreshInterventions() {
+    const auth = resolveUiAuth();
     try {
-      const response = await fetch("/api/interventions");
+      const response = await fetch(`${defaultApiBaseUrl}/api/interventions`, {
+        headers: buildSynapseHeaders(auth),
+      });
       if (!response.ok) {
+        handleAuthFailure(response.status);
         return;
       }
+      setAuthStatus("ready");
+      setAuthError(null);
       const interventions = (await response.json()) as Record<string, unknown>[];
       setState((current) => ({
         ...current,
@@ -66,30 +95,61 @@ export function useSynapseFeed(): DashboardFeed {
   }
 
   async function approveIntervention(interventionId: string) {
-    await fetch(`/api/interventions/${interventionId}/approve`, { method: "POST" });
+    const auth = resolveUiAuth();
+    const response = await fetch(`${defaultApiBaseUrl}/api/interventions/${interventionId}/approve`, {
+      method: "POST",
+      headers: buildSynapseHeaders(auth),
+    });
+    handleAuthFailure(response.status);
     await refreshInterventions();
   }
 
   async function rejectIntervention(interventionId: string, reason?: string) {
-    await fetch(`/api/interventions/${interventionId}/reject`, {
+    const auth = resolveUiAuth();
+    const response = await fetch(`${defaultApiBaseUrl}/api/interventions/${interventionId}/reject`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { ...buildSynapseHeaders(auth), "Content-Type": "application/json" },
       body: JSON.stringify(reason ? { reason } : {}),
     });
+    handleAuthFailure(response.status);
     await refreshInterventions();
   }
 
   async function provideInterventionInput(interventionId: string, payload: Record<string, unknown>) {
-    await fetch(`/api/interventions/${interventionId}/provide_input`, {
+    const auth = resolveUiAuth();
+    const response = await fetch(`${defaultApiBaseUrl}/api/interventions/${interventionId}/provide_input`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { ...buildSynapseHeaders(auth), "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+    handleAuthFailure(response.status);
     await refreshInterventions();
+  }
+
+  function handleAuthFailure(status: number) {
+    if (status === 401) {
+      setAuthStatus("expired");
+      setAuthError("Synapse token expired or API key is invalid.");
+      return;
+    }
+    if (status === 403) {
+      setAuthStatus("forbidden");
+      setAuthError("Synapse access denied for the configured project or scopes.");
+      return;
+    }
+    if (status >= 400) {
+      setAuthStatus("error");
+      setAuthError(`Synapse request failed with status ${status}.`);
+      return;
+    }
+    setAuthStatus("ready");
+    setAuthError(null);
   }
 
   return {
     ...state,
+    authStatus,
+    authError,
     refreshInterventions,
     approveIntervention,
     rejectIntervention,

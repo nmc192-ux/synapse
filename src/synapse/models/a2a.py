@@ -101,6 +101,7 @@ class AgentIdentityRecord(BaseModel):
     project_id: str | None = None
     verification_key: str
     key_id: str
+    issuer_key_id: str | None = None
     reputation: float = 0.5
     capabilities: list[str] = Field(default_factory=list)
     issued_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

@@ -1,6 +1,7 @@
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
+import logging
 from typing import Any
 
 from fastapi import WebSocket
@@ -18,9 +19,12 @@ from synapse.runtime.state_store import RuntimeStateStore
 from synapse.security.identity import AgentIdentityManager
 from synapse.security.signing import MessageExpiredError, MessageReplayError, MessageSigner, SignatureValidationError
 from synapse.transports.websocket_manager import WebSocketManager
+from synapse.config import settings
 
 
 TaskExecutor = Callable[[TaskRequest], Awaitable[TaskResult]]
+RuntimeEventPublisher = Callable[[RuntimeEvent], Awaitable[None]]
+logger = logging.getLogger(__name__)
 
 
 class A2AHub:
@@ -31,6 +35,8 @@ class A2AHub:
         sockets: WebSocketManager | None = None,
         compression_provider: CompressionProvider | None = None,
         sandbox: AgentSecuritySandbox | None = None,
+        event_publisher: RuntimeEventPublisher | None = None,
+        identity_manager: AgentIdentityManager | None = None,
     ) -> None:
         self.agents = agents
         self._connections: dict[str, WebSocket] = {}
@@ -41,7 +47,12 @@ class A2AHub:
         self._compression_provider = compression_provider or NoOpCompressionProvider()
         self._sandbox = sandbox
         self._signer = MessageSigner()
-        self._identity_manager = AgentIdentityManager("synapse-agent-identity")
+        self._identity_manager = identity_manager or AgentIdentityManager(
+            settings.a2a_identity_signing_key,
+            platform_key_id=settings.a2a_identity_signing_key_id,
+            trusted_signing_keys=settings.a2a_identity_trusted_keys,
+        )
+        self._event_publisher = event_publisher
         self._seen_nonces: dict[str, set[str]] = {}
 
     def set_state_store(self, state_store: RuntimeStateStore) -> None:
@@ -52,6 +63,9 @@ class A2AHub:
 
     def set_sandbox(self, sandbox: AgentSecuritySandbox | None) -> None:
         self._sandbox = sandbox
+
+    def set_event_publisher(self, publisher: RuntimeEventPublisher | None) -> None:
+        self._event_publisher = publisher
 
     def set_compression_provider(self, compression_provider: CompressionProvider | None) -> None:
         self._compression_provider = compression_provider or NoOpCompressionProvider()
@@ -372,28 +386,24 @@ class A2AHub:
         return error
 
     async def _emit_compact_message(self, envelope: A2AEnvelope) -> None:
-        if self._sockets is None:
-            return
         compact_payload = await self._build_compact_payload(envelope)
-        await self._sockets.broadcast(
-                RuntimeEvent(
-                    event_type=EventType.A2A_MESSAGE_COMPRESSED,
-                    run_id=self._run_id_from_payload(envelope.payload),
-                    agent_id=envelope.sender_agent_id,
-                task_id=self._task_id_from_payload(envelope.payload),
-                source="a2a_runtime",
-                payload={
-                    "message_id": envelope.message_id,
-                    "type": envelope.type.value,
-                    "sender_agent_id": envelope.sender_agent_id,
-                    "recipient_agent_id": envelope.recipient_agent_id,
-                    "key_id": envelope.key_id,
-                    "nonce": envelope.nonce,
-                    "compact_payload": compact_payload,
-                    "correlation_id": envelope.correlation_id,
-                },
-                correlation_id=envelope.correlation_id or envelope.message_id,
-            )
+        await self._emit_runtime_event(
+            EventType.A2A_MESSAGE_COMPRESSED,
+            sender_agent_id=envelope.sender_agent_id,
+            recipient_agent_id=envelope.recipient_agent_id,
+            run_id=self._run_id_from_payload(envelope.payload),
+            task_id=self._task_id_from_payload(envelope.payload),
+            correlation_id=envelope.correlation_id or envelope.message_id,
+            payload={
+                "message_id": envelope.message_id,
+                "type": envelope.type.value,
+                "sender_agent_id": envelope.sender_agent_id,
+                "recipient_agent_id": envelope.recipient_agent_id,
+                "key_id": envelope.key_id,
+                "nonce": envelope.nonce,
+                "compact_payload": compact_payload,
+                "correlation_id": envelope.correlation_id,
+            },
         )
 
     async def _emit_approval_required(
@@ -403,23 +413,19 @@ class A2AHub:
         exc: SandboxApprovalRequiredError,
         envelope: A2AEnvelope,
     ) -> None:
-        if self._sockets is None:
-            return
-        await self._sockets.broadcast(
-            RuntimeEvent(
-                event_type=EventType.APPROVAL_REQUIRED,
-                run_id=run_id,
-                agent_id=agent_id,
-                source="a2a_runtime",
-                payload={
-                    "action": exc.action,
-                    "reason": exc.reason,
-                    "recipient_agent_id": envelope.recipient_agent_id,
-                    "message_id": envelope.message_id,
-                    **exc.metadata,
-                },
-                correlation_id=envelope.correlation_id or envelope.message_id,
-            )
+        await self._emit_runtime_event(
+            EventType.APPROVAL_REQUIRED,
+            sender_agent_id=agent_id,
+            recipient_agent_id=envelope.recipient_agent_id,
+            run_id=run_id,
+            correlation_id=envelope.correlation_id or envelope.message_id,
+            payload={
+                "action": exc.action,
+                "reason": exc.reason,
+                "recipient_agent_id": envelope.recipient_agent_id,
+                "message_id": envelope.message_id,
+                **exc.metadata,
+            },
         )
 
     async def _build_compact_payload(self, envelope: A2AEnvelope) -> dict[str, Any]:
@@ -496,25 +502,21 @@ class A2AHub:
         envelope: A2AEnvelope,
         task: TaskRequest,
     ) -> None:
-        if self._sockets is None:
-            return
-        await self._sockets.broadcast(
-            RuntimeEvent(
-                event_type=event_type,
-                run_id=task.run_id,
-                agent_id=envelope.sender_agent_id,
-                task_id=task.task_id,
-                source="a2a_runtime",
-                payload={
-                    "message_id": envelope.message_id,
-                    "sender_agent_id": envelope.sender_agent_id,
-                    "recipient_agent_id": envelope.recipient_agent_id,
-                    "task_id": task.task_id,
-                    "run_id": task.run_id,
-                    "parent_run_id": task.parent_run_id,
-                },
-                correlation_id=envelope.correlation_id or envelope.message_id,
-            )
+        await self._emit_runtime_event(
+            event_type,
+            sender_agent_id=envelope.sender_agent_id,
+            recipient_agent_id=envelope.recipient_agent_id,
+            run_id=task.run_id,
+            task_id=task.task_id,
+            correlation_id=envelope.correlation_id or envelope.message_id,
+            payload={
+                "message_id": envelope.message_id,
+                "sender_agent_id": envelope.sender_agent_id,
+                "recipient_agent_id": envelope.recipient_agent_id,
+                "task_id": task.task_id,
+                "run_id": task.run_id,
+                "parent_run_id": task.parent_run_id,
+            },
         )
 
     @staticmethod
@@ -634,24 +636,16 @@ class A2AHub:
                 await self._state_store.store_connection(agent_id, connection.model_dump(mode="json"))
         await self.agents.update_agent_last_seen(agent_id, now)
         await self.agents.update_agent_status(agent_id, AgentRuntimeStatus.ACTIVE)
-        if self._sockets is not None:
-            await self._sockets.broadcast(
-                RuntimeEvent(
-                    event_type=EventType.AGENT_STATUS_UPDATED,
-                    agent_id=agent_id,
-                    source="a2a_runtime",
-                    payload={"agent_id": agent_id, "status": AgentRuntimeStatus.ACTIVE.value},
-                )
-            )
-        if self._sockets is not None:
-            await self._sockets.broadcast(
-                RuntimeEvent(
-                    event_type=EventType.CONNECTION_HEARTBEAT,
-                    agent_id=agent_id,
-                    source="a2a_runtime",
-                    payload={"agent_id": agent_id, "last_heartbeat": now.isoformat()},
-                )
-            )
+        await self._emit_runtime_event(
+            EventType.AGENT_STATUS_UPDATED,
+            sender_agent_id=agent_id,
+            payload={"agent_id": agent_id, "status": AgentRuntimeStatus.ACTIVE.value},
+        )
+        await self._emit_runtime_event(
+            EventType.CONNECTION_HEARTBEAT,
+            sender_agent_id=agent_id,
+            payload={"agent_id": agent_id, "last_heartbeat": now.isoformat()},
+        )
 
     async def mark_disconnected(self, agent_id: str) -> None:
         connection = self._connection_state.get(agent_id)
@@ -663,15 +657,11 @@ class A2AHub:
         if self._state_store is not None:
             await self._state_store.delete_connection(agent_id)
         await self.agents.update_agent_status(agent_id, AgentRuntimeStatus.OFFLINE)
-        if self._sockets is not None:
-            await self._sockets.broadcast(
-                RuntimeEvent(
-                    event_type=EventType.AGENT_STATUS_UPDATED,
-                    agent_id=agent_id,
-                    source="a2a_runtime",
-                    payload={"agent_id": agent_id, "status": AgentRuntimeStatus.OFFLINE.value},
-                )
-            )
+        await self._emit_runtime_event(
+            EventType.AGENT_STATUS_UPDATED,
+            sender_agent_id=agent_id,
+            payload={"agent_id": agent_id, "status": AgentRuntimeStatus.OFFLINE.value},
+        )
 
     async def cleanup_stale_connections(self, ttl_seconds: int = 60) -> list[str]:
         now = datetime.now(timezone.utc)
@@ -685,25 +675,97 @@ class A2AHub:
                 if self._state_store is not None:
                     await self._state_store.store_connection(agent_id, connection.model_dump(mode="json"))
                 await self.agents.update_agent_status(agent_id, AgentRuntimeStatus.OFFLINE)
-                if self._sockets is not None:
-                    await self._sockets.broadcast(
-                        RuntimeEvent(
-                            event_type=EventType.AGENT_STATUS_UPDATED,
-                            agent_id=agent_id,
-                            source="a2a_runtime",
-                            payload={"agent_id": agent_id, "status": AgentRuntimeStatus.OFFLINE.value},
-                        )
-                    )
-                if self._sockets is not None:
-                    await self._sockets.broadcast(
-                        RuntimeEvent(
-                            event_type=EventType.CONNECTION_STALE,
-                            agent_id=agent_id,
-                            source="a2a_runtime",
-                            payload={"agent_id": agent_id, "ttl_seconds": ttl_seconds},
-                        )
-                    )
+                await self._emit_runtime_event(
+                    EventType.AGENT_STATUS_UPDATED,
+                    sender_agent_id=agent_id,
+                    payload={"agent_id": agent_id, "status": AgentRuntimeStatus.OFFLINE.value},
+                )
+                await self._emit_runtime_event(
+                    EventType.CONNECTION_STALE,
+                    sender_agent_id=agent_id,
+                    payload={"agent_id": agent_id, "ttl_seconds": ttl_seconds},
+                )
         return stale
+
+    async def _emit_runtime_event(
+        self,
+        event_type: EventType,
+        *,
+        sender_agent_id: str | None = None,
+        recipient_agent_id: str | None = None,
+        run_id: str | None = None,
+        task_id: str | None = None,
+        correlation_id: str | None = None,
+        payload: dict[str, object] | None = None,
+    ) -> None:
+        if self._event_publisher is None:
+            return
+        organization_id, project_id = await self._resolve_tenant_context(
+            sender_agent_id=sender_agent_id,
+            recipient_agent_id=recipient_agent_id,
+            run_id=run_id,
+        )
+        if organization_id is None or project_id is None:
+            logger.warning(
+                "Blocking external A2A runtime event without tenant context",
+                extra={
+                    "event_type": event_type.value,
+                    "sender_agent_id": sender_agent_id,
+                    "recipient_agent_id": recipient_agent_id,
+                    "run_id": run_id,
+                    "task_id": task_id,
+                },
+            )
+            return
+        await self._event_publisher(
+            RuntimeEvent(
+                event_type=event_type,
+                organization_id=organization_id,
+                project_id=project_id,
+                run_id=run_id,
+                agent_id=sender_agent_id,
+                task_id=task_id,
+                source="a2a_runtime",
+                payload=payload or {},
+                correlation_id=correlation_id,
+            )
+        )
+
+    async def _resolve_tenant_context(
+        self,
+        *,
+        sender_agent_id: str | None,
+        recipient_agent_id: str | None,
+        run_id: str | None,
+    ) -> tuple[str | None, str | None]:
+        if sender_agent_id is not None:
+            try:
+                sender = self.agents.get(sender_agent_id)
+            except KeyError:
+                sender = None
+            if sender is not None:
+                return sender.organization_id, sender.project_id
+        if recipient_agent_id is not None:
+            try:
+                recipient = self.agents.get(recipient_agent_id)
+            except KeyError:
+                recipient = None
+            if recipient is not None:
+                return recipient.organization_id, recipient.project_id
+        if run_id is not None and self._state_store is not None:
+            payload = await self._state_store.get_run(run_id)
+            if isinstance(payload, dict):
+                project_id = payload.get("project_id")
+                if isinstance(project_id, str) and project_id:
+                    agent_id = payload.get("agent_id")
+                    if isinstance(agent_id, str):
+                        try:
+                            agent = self.agents.get(agent_id)
+                        except KeyError:
+                            agent = None
+                        if agent is not None:
+                            return agent.organization_id, project_id
+        return None, None
 
     async def list_persisted_connections(self) -> list[ConnectionState]:
         if self._state_store is None:

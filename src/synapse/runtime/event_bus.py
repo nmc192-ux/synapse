@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from collections import defaultdict
+import logging
 from typing import Any
 
 from fastapi import WebSocket
@@ -13,6 +14,7 @@ from synapse.runtime.compression.noop import NoOpCompressionProvider
 from synapse.runtime.state_store import RuntimeStateStore
 from synapse.transports.websocket_manager import WebSocketManager
 
+logger = logging.getLogger(__name__)
 
 class EventBus:
     def __init__(
@@ -62,7 +64,9 @@ class EventBus:
             yield queue
 
     async def publish(self, event: RuntimeEvent) -> None:
-        normalized = await self._enrich_event(self._normalize_event(event))
+        normalized = await self._prepare_external_event(event)
+        if normalized is None:
+            return
         await self.sockets.broadcast(normalized)
         for listener in list(self._listeners):
             await listener(normalized)
@@ -170,7 +174,10 @@ class EventBus:
             },
             correlation_id=event.correlation_id,
         )
-        await self.sockets.broadcast(await self._enrich_event(compact_event))
+        enriched = await self._prepare_external_event(compact_event)
+        if enriched is None:
+            return
+        await self.sockets.broadcast(enriched)
         self._recent_event_groups[key] = bucket[-2:]
 
     @staticmethod
@@ -191,3 +198,23 @@ class EventBus:
         if updates:
             return event.model_copy(update=updates)
         return event
+
+    async def _prepare_external_event(self, event: RuntimeEvent) -> RuntimeEvent | None:
+        normalized = await self._enrich_event(self._normalize_event(event))
+        if normalized.organization_id and normalized.project_id:
+            return normalized
+        logger.warning(
+            "Blocking external runtime event without tenant context",
+            extra={
+                "event_type": normalized.event_type.value,
+                "event_id": normalized.event_id,
+                "source": normalized.source,
+                "run_id": normalized.run_id,
+                "agent_id": normalized.agent_id,
+                "task_id": normalized.task_id,
+                "session_id": normalized.session_id,
+                "organization_id": normalized.organization_id,
+                "project_id": normalized.project_id,
+            },
+        )
+        return None

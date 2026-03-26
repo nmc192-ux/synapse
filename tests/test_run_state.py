@@ -134,6 +134,10 @@ class _CapturingAdapter:
         )
 
 
+async def _development_context() -> dict[str, object]:
+    return {"organization_id": "development", "project_id": "development"}
+
+
 def test_run_store_crud() -> None:
     async def scenario() -> None:
         store = InMemoryRuntimeStateStore()
@@ -152,12 +156,21 @@ def test_task_runtime_creates_and_persists_run_state() -> None:
     async def scenario() -> None:
         store = InMemoryRuntimeStateStore()
         agents = AgentRegistry(state_store=store)
-        agent = agents.register(AgentDefinition(agent_id="agent-1", kind=AgentKind.CUSTOM, name="Agent One"))
+        agent = agents.register(
+            AgentDefinition(
+                agent_id="agent-1",
+                kind=AgentKind.CUSTOM,
+                name="Agent One",
+                organization_id="development",
+                project_id="development",
+            )
+        )
         await agents.save_to_store(agent)
         agents.build_adapter = lambda *args, **kwargs: _StubAdapter()  # type: ignore[method-assign]
 
         browser_service = _StubBrowserService()
         events = EventBus(WebSocketManager(state_store=store))
+        events.set_context_resolver(lambda event: _development_context())
         checkpoint_service = CheckpointService(store, browser_service, events)
         run_store = RunStore(store)
         runtime = TaskRuntime(
@@ -190,7 +203,15 @@ def test_run_api_endpoints() -> None:
     async def scenario() -> RuntimeOrchestrator:
         store = InMemoryRuntimeStateStore()
         agents = AgentRegistry(state_store=store)
-        agent = agents.register(AgentDefinition(agent_id="agent-1", kind=AgentKind.CUSTOM, name="Agent One"))
+        agent = agents.register(
+            AgentDefinition(
+                agent_id="agent-1",
+                kind=AgentKind.CUSTOM,
+                name="Agent One",
+                organization_id="development",
+                project_id="development",
+            )
+        )
         await agents.save_to_store(agent)
         orchestrator = RuntimeOrchestrator(
             browser=_StubBrowserService(),
@@ -213,7 +234,15 @@ def test_run_api_endpoints() -> None:
             project_id="development",
             correlation_id="task-2",
         )
-        await orchestrator.event_bus.emit(EventType.TASK_UPDATED, run_id=run.run_id, agent_id="agent-1", task_id="task-2", payload={"ok": True})
+        await orchestrator.event_bus.emit(
+            EventType.TASK_UPDATED,
+            organization_id="development",
+            project_id="development",
+            run_id=run.run_id,
+            agent_id="agent-1",
+            task_id="task-2",
+            payload={"ok": True},
+        )
         return orchestrator
 
     orchestrator = asyncio.run(scenario())
@@ -341,6 +370,8 @@ def test_task_runtime_creates_child_run_for_capability_delegation() -> None:
                 kind=AgentKind.CUSTOM,
                 name="Research Agent",
                 capability_tags=["web_scraping"],
+                organization_id="development",
+                project_id="development",
             )
         )
         child_agent = registry.register(
@@ -349,6 +380,8 @@ def test_task_runtime_creates_child_run_for_capability_delegation() -> None:
                 kind=AgentKind.A2A,
                 name="Analysis Agent",
                 capability_tags=["analysis"],
+                organization_id="development",
+                project_id="development",
             )
         )
         await registry.save_to_store(parent_agent)
@@ -361,11 +394,15 @@ def test_task_runtime_creates_child_run_for_capability_delegation() -> None:
             AgentRegistrationRequest(
                 agent_id="analysis-agent",
                 name="Analysis Agent",
+                organization_id="development",
+                project_id="development",
                 capabilities=["analysis"],
                 verification_key="analysis-key",
             )
         )
         events = EventBus(sockets)
+        events.set_context_resolver(lambda event: _development_context())
+        a2a.set_event_publisher(events.publish)
         browser_service = _StubBrowserService()
         checkpoint_service = CheckpointService(store, browser_service, events)
         run_store = RunStore(store)
@@ -469,12 +506,15 @@ def test_operator_intervention_transitions_run_and_resume() -> None:
         run = await orchestrator.run_store.create_run(
             task_id="task-operator",
             agent_id="agent-1",
+            project_id="development",
             correlation_id="task-operator",
             metadata={"goal": "Continue after approval"},
         )
 
         await orchestrator.event_bus.emit(
             EventType.APPROVAL_REQUIRED,
+            organization_id="development",
+            project_id="development",
             run_id=run.run_id,
             agent_id=run.agent_id,
             task_id=run.task_id,
@@ -515,7 +555,15 @@ def test_operator_intervention_api_endpoints() -> None:
     async def scenario() -> RuntimeOrchestrator:
         store = InMemoryRuntimeStateStore()
         agents = AgentRegistry(state_store=store)
-        agent = agents.register(AgentDefinition(agent_id="agent-1", kind=AgentKind.CUSTOM, name="Agent One"))
+        agent = agents.register(
+            AgentDefinition(
+                agent_id="agent-1",
+                kind=AgentKind.CUSTOM,
+                name="Agent One",
+                organization_id="development",
+                project_id="development",
+            )
+        )
         await agents.save_to_store(agent)
         orchestrator = RuntimeOrchestrator(
             browser=_StubBrowserService(),
@@ -541,6 +589,8 @@ def test_operator_intervention_api_endpoints() -> None:
         )
         await orchestrator.event_bus.emit(
             EventType.BROWSER_CAPTCHA_DETECTED,
+            organization_id="development",
+            project_id="development",
             run_id=run.run_id,
             agent_id=run.agent_id,
             task_id=run.task_id,

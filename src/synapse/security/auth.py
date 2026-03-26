@@ -7,7 +7,7 @@ from fastapi import Depends, Header, HTTPException, Request, WebSocket, status
 from pydantic import BaseModel, Field
 
 from synapse.config import Settings
-from synapse.security.policies import PrincipalType, scopes_require_project_context
+from synapse.security.policies import PrincipalType, Scope, scopes_require_project_context
 from synapse.security.tokens import JWTCodec, TokenValidationError
 
 
@@ -26,12 +26,19 @@ class Authenticator:
         self.settings = settings
         self.codec = JWTCodec(settings.jwt_secret, settings.jwt_issuer, settings.jwt_audience)
         self._api_key_validator: Callable[[str, str | None], Awaitable[AuthPrincipal]] | None = None
+        self._service_agent_authorizer: Callable[[AuthPrincipal, str, str | None, str | None], Awaitable[bool]] | None = None
 
     def set_api_key_validator(
         self,
         validator: Callable[[str, str | None], Awaitable[AuthPrincipal]],
     ) -> None:
         self._api_key_validator = validator
+
+    def set_service_agent_authorizer(
+        self,
+        authorizer: Callable[[AuthPrincipal, str, str | None, str | None], Awaitable[bool]],
+    ) -> None:
+        self._service_agent_authorizer = authorizer
 
     def issue_token(
         self,
@@ -169,7 +176,32 @@ class Authenticator:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Token is not authorized for this project.")
         return principal
 
-    def authorize_agent_binding(
+    async def can_service_act_for_agent(
+        self,
+        principal: AuthPrincipal,
+        *,
+        agent_id: str,
+        organization_id: str | None,
+        project_id: str | None,
+    ) -> bool:
+        if principal.principal_type != PrincipalType.SERVICE:
+            return False
+        if not organization_id or not project_id:
+            return False
+        if principal.organization_id != organization_id or principal.project_id != project_id:
+            return False
+        if Scope.ADMIN.value in principal.scopes:
+            return True
+        configured = self.settings.a2a_service_agent_allowlist.get(principal.subject, [])
+        configured_api_key = self.settings.a2a_service_agent_allowlist.get(principal.api_key_id or "", [])
+        allowed = set(configured) | set(configured_api_key)
+        if "*" in allowed or agent_id in allowed:
+            return True
+        if self._service_agent_authorizer is None:
+            return False
+        return await self._service_agent_authorizer(principal, agent_id, organization_id, project_id)
+
+    async def authorize_agent_binding(
         self,
         principal: AuthPrincipal,
         *,
@@ -186,8 +218,16 @@ class Authenticator:
             if principal.agent_id != agent_id:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Agent token cannot bind to another agent.")
             return principal
-        if principal.principal_type == PrincipalType.SERVICE and allow_service:
+        if principal.principal_type == PrincipalType.OPERATOR and Scope.ADMIN.value in principal.scopes:
             return principal
+        if principal.principal_type == PrincipalType.SERVICE and allow_service:
+            if await self.can_service_act_for_agent(
+                principal,
+                agent_id=agent_id,
+                organization_id=organization_id,
+                project_id=project_id,
+            ):
+                return principal
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Principal is not allowed to act on behalf of this agent.")
 
 

@@ -8,6 +8,12 @@ class PluginExecutionMode(str, Enum):
     ISOLATED_HOSTED = "isolated_hosted"
 
 
+class PluginTrustLevel(str, Enum):
+    TRUSTED_INTERNAL = "trusted_internal"
+    TRUSTED_PARTNER = "trusted_partner"
+    UNTRUSTED_EXTERNAL = "untrusted_external"
+
+
 class ToolDescriptor(BaseModel):
     name: str
     description: str = ""
@@ -16,6 +22,7 @@ class ToolDescriptor(BaseModel):
     endpoint: str | None = None
     execution_mode: PluginExecutionMode = PluginExecutionMode.TRUSTED_LOCAL
     isolation_strategy: str = "in_process"
+    trust_level: PluginTrustLevel = PluginTrustLevel.TRUSTED_INTERNAL
 
 
 class PluginDescriptor(BaseModel):
@@ -27,6 +34,7 @@ class PluginDescriptor(BaseModel):
     execution_mode: PluginExecutionMode = PluginExecutionMode.TRUSTED_LOCAL
     isolation_strategy: str = "in_process"
     timeout_seconds: float = 10.0
+    trust_level: PluginTrustLevel = PluginTrustLevel.TRUSTED_INTERNAL
 
 
 class PluginReloadRequest(BaseModel):

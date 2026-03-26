@@ -67,7 +67,7 @@ class RunScheduler:
         run = await self.run_store.get(run_id)
         await self.cleanup_expired_leases()
         existing = await self._load_lease(run_id)
-        if existing is not None and self._worker_available(existing.worker_id):
+        if existing is not None and await self._worker_available(existing.worker_id):
             return await self.renew_lease(run_id, token=existing.token)
         next_retry_at = run.metadata.get("next_retry_at")
         if isinstance(next_retry_at, str):
@@ -75,7 +75,7 @@ class RunScheduler:
             if retry_at > datetime.now(timezone.utc):
                 raise RuntimeError("Run is waiting for retry backoff.")
 
-        worker = self._select_worker()
+        worker = await self._select_worker()
         if worker is None:
             await self._emit_worker_unavailable(run)
             await self.requeue_run(run_id, reason="No browser workers available.")
@@ -227,10 +227,10 @@ class RunScheduler:
             await asyncio.sleep(self.cleanup_interval_seconds)
             await self.cleanup_expired_leases()
 
-    def _select_worker(self) -> BrowserWorkerState | None:
+    async def _select_worker(self) -> BrowserWorkerState | None:
         workers = [
             worker
-            for worker in self.browser_workers.list_workers()
+            for worker in await self.browser_workers.list_registered_workers()
             if worker.status not in {WorkerRuntimeStatus.OFFLINE, WorkerRuntimeStatus.FAILED}
         ]
         if not workers:
@@ -238,11 +238,11 @@ class RunScheduler:
         workers.sort(key=lambda item: (item.active_sessions, item.last_heartbeat))
         return workers[0]
 
-    def _worker_available(self, worker_id: str) -> bool:
+    async def _worker_available(self, worker_id: str) -> bool:
         return any(
             worker.worker_id == worker_id
             and worker.status not in {WorkerRuntimeStatus.OFFLINE, WorkerRuntimeStatus.FAILED}
-            for worker in self.browser_workers.list_workers()
+            for worker in await self.browser_workers.list_registered_workers()
         )
 
     @staticmethod
@@ -265,7 +265,7 @@ class RunScheduler:
     async def renew_worker_leases(self, worker_id: str) -> None:
         leases = await self.run_store.list_leases(worker_id=worker_id)
         for lease in leases:
-            if self._worker_available(worker_id):
+            if await self._worker_available(worker_id):
                 await self.renew_lease(lease.run_id, token=lease.token)
 
     async def _load_lease(self, run_id: str) -> RunLease | None:

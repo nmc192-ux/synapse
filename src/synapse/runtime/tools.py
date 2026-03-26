@@ -7,7 +7,8 @@ from datetime import datetime, timezone
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
-from synapse.models.plugin import PluginDescriptor, PluginExecutionMode, ToolDescriptor
+from synapse.config import settings
+from synapse.models.plugin import PluginDescriptor, PluginExecutionMode, PluginTrustLevel, ToolDescriptor
 from synapse.runtime.plugin_isolation import (
     HostedPluginIsolationBackend,
     HostedPluginIsolationUnavailableError,
@@ -28,6 +29,7 @@ class ToolRegistry:
         execution_timeout_seconds: float = 10.0,
         state_store: RuntimeStateStore | None = None,
         isolation_backend: HostedPluginIsolationBackend | None = None,
+        hosted_partner_allowlist: list[str] | None = None,
     ) -> None:
         self._tools: dict[str, ToolHandler] = {}
         self._tool_descriptors: dict[str, ToolDescriptor] = {}
@@ -37,6 +39,7 @@ class ToolRegistry:
         self.execution_timeout_seconds = execution_timeout_seconds
         self.state_store = state_store
         self.isolation_backend = isolation_backend or HostedPluginIsolationBackend()
+        self.hosted_partner_allowlist = set(hosted_partner_allowlist or settings.hosted_plugin_partner_allowlist)
 
     def set_state_store(self, state_store: RuntimeStateStore | None) -> None:
         self.state_store = state_store
@@ -58,6 +61,7 @@ class ToolRegistry:
             endpoint=plugin.endpoint if plugin else None,
             execution_mode=plugin.execution_mode if plugin else self.execution_mode,
             isolation_strategy=plugin.isolation_strategy if plugin else self._default_isolation_strategy(self.execution_mode),
+            trust_level=plugin.trust_level if plugin else PluginTrustLevel.TRUSTED_INTERNAL,
         )
         if plugin_name:
             if plugin is None:
@@ -67,6 +71,7 @@ class ToolRegistry:
                     execution_mode=self.execution_mode,
                     isolation_strategy=self._default_isolation_strategy(self.execution_mode),
                     timeout_seconds=self.execution_timeout_seconds,
+                    trust_level=self._classify_plugin(plugin_name, plugin_name),
                 )
                 self._plugins[plugin_name] = plugin
             if name not in plugin.tools:
@@ -88,6 +93,7 @@ class ToolRegistry:
             execution_mode=self.execution_mode,
             isolation_strategy=self._default_isolation_strategy(self.execution_mode),
             timeout_seconds=self.execution_timeout_seconds,
+            trust_level=self._classify_plugin(name, module),
         )
         self._plugins[name] = descriptor
         return descriptor
@@ -152,6 +158,7 @@ class ToolRegistry:
             execution_mode=self.execution_mode,
             isolation_strategy=self._default_isolation_strategy(self.execution_mode),
             timeout_seconds=self.execution_timeout_seconds,
+            trust_level=self._classify_plugin(plugin_name, module_name),
         )
         register(self)
         plugin = self._plugins[plugin_name]
@@ -163,6 +170,7 @@ class ToolRegistry:
             descriptor.endpoint = plugin.endpoint
             descriptor.execution_mode = plugin.execution_mode
             descriptor.isolation_strategy = plugin.isolation_strategy
+            descriptor.trust_level = plugin.trust_level
         return plugin_name
 
     def load_plugins(self, package_names: list[str] | None = None, module_names: list[str] | None = None) -> list[str]:
@@ -193,6 +201,27 @@ class ToolRegistry:
         project_id: str | None = None,
     ) -> dict[str, object]:
         resolved_project_id = project_id or await self._project_id_for_run(run_id)
+        if not self._hosted_execution_allowed(plugin):
+            now = datetime.now(timezone.utc)
+            await self._append_audit_log(
+                plugin=plugin,
+                tool_name=name,
+                arguments=arguments,
+                run_id=run_id,
+                project_id=resolved_project_id,
+                stdout="",
+                stderr="hosted policy denied plugin execution",
+                exit_status=-1,
+                status="denied",
+                start_time=now,
+                end_time=now,
+                stdout_ref=None,
+                stderr_ref=None,
+                policy_violations=["hosted_policy_denied", plugin.trust_level.value],
+            )
+            raise PermissionError(
+                f"Hosted plugin execution denied for {plugin.name} ({plugin.trust_level.value})."
+            )
         if not self.isolation_backend.is_available():
             await self._append_audit_log(
                 plugin=plugin,
@@ -288,6 +317,7 @@ class ToolRegistry:
             "mode": plugin.execution_mode.value,
             "execution_mode": plugin.execution_mode.value,
             "isolation_strategy": plugin.isolation_strategy,
+            "trust_level": plugin.trust_level.value,
             "start_time": start_time.isoformat(),
             "end_time": end_time.isoformat(),
             "status": status,
@@ -322,6 +352,21 @@ class ToolRegistry:
         if mode == PluginExecutionMode.ISOLATED_HOSTED:
             return "jailed_runner"
         return "in_process"
+
+    def _classify_plugin(self, name: str, module: str) -> PluginTrustLevel:
+        normalized = {name, module}
+        if any(item in self.hosted_partner_allowlist for item in normalized):
+            return PluginTrustLevel.TRUSTED_PARTNER
+        if module == "synapse.main" or module.startswith("synapse."):
+            return PluginTrustLevel.TRUSTED_INTERNAL
+        return PluginTrustLevel.UNTRUSTED_EXTERNAL
+
+    @staticmethod
+    def _hosted_execution_allowed(plugin: PluginDescriptor) -> bool:
+        return plugin.trust_level in {
+            PluginTrustLevel.TRUSTED_INTERNAL,
+            PluginTrustLevel.TRUSTED_PARTNER,
+        }
 
     async def _project_id_for_run(self, run_id: str | None) -> str | None:
         if run_id is None or self.state_store is None:

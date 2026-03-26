@@ -5,6 +5,7 @@ from contextlib import suppress
 from synapse.models.browser import BrowserState, StructuredPageModel
 from synapse.models.runtime_event import EventType
 from synapse.models.runtime_state import BrowserSessionState, BrowserTaskResultRecord, RunLeaseRecord, WorkerRuntimeStatus
+from synapse.runtime.event_bus import EventBus
 from synapse.runtime.browser_workers import BrowserWorkerPool
 from synapse.runtime.queues import BrowserTaskEnvelope, BrowserTaskResult
 from synapse.runtime.run_store import RunStore
@@ -68,7 +69,9 @@ def test_browser_worker_pool_dispatches_and_preserves_session_affinity() -> None
             heartbeat_interval_seconds=0.05,
             runtime_factory=runtime_factory,
         )
-        pool.set_event_publisher(sockets.broadcast)
+        bus = EventBus(sockets)
+        bus.set_context_resolver(lambda event: _event_context())
+        pool.set_event_publisher(bus.publish)
         await pool.start()
 
         try:
@@ -90,34 +93,43 @@ def test_browser_worker_pool_dispatches_and_preserves_session_affinity() -> None
     asyncio.run(scenario())
 
 
-def test_browser_worker_pool_emits_status_and_heartbeat_events() -> None:
+def test_browser_worker_pool_blocks_projectless_status_events_but_emits_run_scoped_events() -> None:
     async def scenario() -> None:
-        sockets = WebSocketManager(state_store=InMemoryRuntimeStateStore())
+        store = InMemoryRuntimeStateStore()
+        sockets = WebSocketManager(state_store=store)
+        bus = EventBus(sockets)
+        bus.set_context_resolver(lambda event: _event_context())
 
         def runtime_factory() -> _FakeBrowserRuntime:
             return _FakeBrowserRuntime(worker_name="worker-1")
 
         pool = BrowserWorkerPool(
-            state_store=InMemoryRuntimeStateStore(),
+            state_store=store,
             worker_count=1,
             heartbeat_interval_seconds=0.01,
             runtime_factory=runtime_factory,
         )
-        pool.set_event_publisher(sockets.broadcast)
+        pool.set_event_publisher(bus.publish)
 
         async with sockets.subscribe("browser-worker-test") as queue:
             await pool.start()
+            await pool.create_session("s1", agent_id="agent-1", run_id="run-1")
+            await pool.open("s1", "https://example.com")
             events = []
-            while len(events) < 2:
+            while EventType.BROWSER_TASK_COMPLETED not in {event.event_type for event in events}:
                 events.append(await queue.get())
             await pool.stop()
 
         event_types = {event.event_type for event in events}
-        assert EventType.BROWSER_WORKER_STATUS_UPDATED in event_types
-        assert EventType.BROWSER_WORKER_HEARTBEAT in event_types
+        assert EventType.BROWSER_TASK_DISPATCHED in event_types
+        assert EventType.BROWSER_TASK_COMPLETED in event_types
         assert pool.list_workers() == []
 
     asyncio.run(scenario())
+
+
+async def _event_context() -> dict[str, object]:
+    return {"organization_id": "org-1", "project_id": "project-1"}
 
 
 def test_browser_worker_pool_lists_sessions_from_workers() -> None:

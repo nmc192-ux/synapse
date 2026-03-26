@@ -13,6 +13,7 @@ from synapse.models.runtime_event import EventType
 from synapse.runtime.compression.base import CompressionProvider
 from synapse.models.runtime_state import AgentRuntimeStatus
 from synapse.runtime.a2a import A2AHub
+from synapse.runtime.event_bus import EventBus
 from synapse.runtime.registry import AgentRegistry
 from synapse.config import Settings
 from synapse.security.auth import Authenticator
@@ -242,7 +243,8 @@ def test_a2a_connect_does_not_auto_register_unknown_agents() -> None:
 
 class _StubA2AOrchestrator:
     def __init__(self) -> None:
-        self.a2a = A2AHub(AgentRegistry(), state_store=InMemoryRuntimeStateStore(), sockets=WebSocketManager())
+        registry = AgentRegistry()
+        self.a2a = A2AHub(registry, state_store=InMemoryRuntimeStateStore(), sockets=WebSocketManager())
         self.event_bus = None
         self.sockets = WebSocketManager()
         self._agents = {
@@ -261,6 +263,8 @@ class _StubA2AOrchestrator:
                 project_id="project-2",
             ),
         }
+        for agent in self._agents.values():
+            registry.register(agent)
 
     async def get_persisted_agent(self, agent_id: str):
         if agent_id not in self._agents:
@@ -268,12 +272,13 @@ class _StubA2AOrchestrator:
         return self._agents[agent_id]
 
 
-def _build_a2a_client() -> tuple[TestClient, Authenticator]:
+def _build_a2a_client(*, service_allowlist: dict[str, list[str]] | None = None) -> tuple[TestClient, Authenticator]:
     settings = Settings(
         auth_required=True,
         jwt_secret="a2a-secret",
         jwt_issuer="synapse-test",
         jwt_audience="synapse-test-api",
+        a2a_service_agent_allowlist=service_allowlist or {},
     )
     authenticator = Authenticator(settings)
     orchestrator = _StubA2AOrchestrator()
@@ -337,11 +342,13 @@ def test_a2a_emits_compact_message_summary() -> None:
         store = InMemoryRuntimeStateStore()
         registry = AgentRegistry(state_store=store)
         sockets = WebSocketManager(state_store=store, compression_provider=_StubCompressionProvider())
+        bus = EventBus(sockets, compression_provider=_StubCompressionProvider())
         hub = A2AHub(
             registry,
             state_store=store,
             sockets=sockets,
             compression_provider=_StubCompressionProvider(),
+            event_publisher=bus.publish,
         )
         hub.register_agent(
             AgentRegistrationRequest(
@@ -367,7 +374,7 @@ def test_a2a_emits_compact_message_summary() -> None:
         await hub.register_connection("agent-b", {"transport": "websocket"})
         hub._connections["agent-b"] = _FakeWebSocket()
 
-        async with sockets.subscribe("subscriber") as queue:
+        async with sockets.subscribe("subscriber", organization_id="org-1", project_id="project-1") as queue:
             await hub.send(
                 A2AEnvelope(
                     type=A2AMessageType.REQUEST_TASK,

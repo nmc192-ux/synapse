@@ -35,7 +35,7 @@ class WebSocketManager:
         compression_provider: CompressionProvider | None = None,
     ) -> None:
         self._connections: dict[WebSocket, WebSocketSubscription] = {}
-        self._subscribers: dict[str, tuple[asyncio.Queue[RuntimeEvent], str | None, str | None]] = {}
+        self._subscribers: dict[str, tuple[asyncio.Queue[RuntimeEvent], str | None, str | None, str | None]] = {}
         self._principals: dict[WebSocket, "AuthPrincipal"] = {}
         self._state_store = state_store
         self._compression_provider = compression_provider or NoOpCompressionProvider()
@@ -79,11 +79,12 @@ class WebSocketManager:
         self,
         subscriber_id: str,
         *,
+        organization_id: str | None = None,
         project_id: str | None = None,
         run_id: str | None = None,
     ) -> AsyncIterator[asyncio.Queue[RuntimeEvent]]:
         queue: asyncio.Queue[RuntimeEvent] = asyncio.Queue()
-        self._subscribers[subscriber_id] = (queue, project_id, run_id)
+        self._subscribers[subscriber_id] = (queue, organization_id, project_id, run_id)
         try:
             yield queue
         finally:
@@ -101,7 +102,7 @@ class WebSocketManager:
 
         dead_connections: list[WebSocket] = []
         for connection, subscription in list(self._connections.items()):
-            if not self._should_deliver(subscription.project_id, subscription.run_id, event):
+            if not self._should_deliver(subscription.organization_id, subscription.project_id, subscription.run_id, event):
                 continue
             try:
                 await connection.send_json(event.model_dump(mode="json"))
@@ -111,8 +112,8 @@ class WebSocketManager:
         for connection in dead_connections:
             self.disconnect(connection)
 
-        for queue, project_id, run_id in self._subscribers.values():
-            if self._should_deliver(project_id, run_id, event):
+        for queue, organization_id, project_id, run_id in self._subscribers.values():
+            if self._should_deliver(organization_id, project_id, run_id, event):
                 await queue.put(event)
 
     async def get_compact_event_history(
@@ -150,7 +151,14 @@ class WebSocketManager:
         }
 
     @staticmethod
-    def _should_deliver(project_id: str | None, run_id: str | None, event: RuntimeEvent) -> bool:
+    def _should_deliver(
+        organization_id: str | None,
+        project_id: str | None,
+        run_id: str | None,
+        event: RuntimeEvent,
+    ) -> bool:
+        if organization_id is not None and event.organization_id != organization_id:
+            return False
         if project_id is not None and event.project_id != project_id:
             return False
         if run_id is not None and event.run_id != run_id:

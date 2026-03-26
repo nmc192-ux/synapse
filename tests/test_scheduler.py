@@ -28,6 +28,9 @@ class _StubWorkerPool:
     def list_workers(self) -> list[BrowserWorkerState]:
         return [worker.model_copy(deep=True) for worker in self._workers]
 
+    async def list_registered_workers(self) -> list[BrowserWorkerState]:
+        return self.list_workers()
+
 
 class _StubBrowserService:
     def __init__(self) -> None:
@@ -113,6 +116,7 @@ def test_scheduler_assigns_run_to_available_worker() -> None:
         store = InMemoryRuntimeStateStore()
         run_store = RunStore(store)
         bus = EventBus(WebSocketManager(state_store=store))
+        bus.set_context_resolver(lambda event: _event_context())
         scheduler = RunScheduler(
             run_store,
             _StubWorkerPool(
@@ -147,6 +151,7 @@ def test_scheduler_requeues_when_no_workers_available() -> None:
         store = InMemoryRuntimeStateStore()
         run_store = RunStore(store)
         bus = EventBus(WebSocketManager(state_store=store))
+        bus.set_context_resolver(lambda event: _event_context())
         scheduler = RunScheduler(run_store, _StubWorkerPool([]), bus, cleanup_interval_seconds=60)
         run = await run_store.create_run(task_id="task-1", agent_id="agent-1")
 
@@ -168,6 +173,7 @@ def test_scheduler_requeues_expired_leases() -> None:
         store = InMemoryRuntimeStateStore()
         run_store = RunStore(store)
         bus = EventBus(WebSocketManager(state_store=store))
+        bus.set_context_resolver(lambda event: _event_context())
         scheduler = RunScheduler(
             run_store,
             _StubWorkerPool([BrowserWorkerState(worker_id="worker-1", queue_name="q1", status=WorkerRuntimeStatus.IDLE)]),
@@ -211,6 +217,7 @@ def test_scheduler_prevents_double_assignment_race() -> None:
         store = InMemoryRuntimeStateStore()
         run_store = RunStore(store)
         bus = EventBus(WebSocketManager(state_store=store))
+        bus.set_context_resolver(lambda event: _event_context())
         scheduler = RunScheduler(
             run_store,
             _StubWorkerPool([BrowserWorkerState(worker_id="worker-1", queue_name="q1", status=WorkerRuntimeStatus.IDLE)]),
@@ -257,6 +264,7 @@ def test_scheduler_uses_exponential_backoff_metadata() -> None:
         store = InMemoryRuntimeStateStore()
         run_store = RunStore(store)
         bus = EventBus(WebSocketManager(state_store=store))
+        bus.set_context_resolver(lambda event: _event_context())
         scheduler = RunScheduler(
             run_store,
             _StubWorkerPool([BrowserWorkerState(worker_id="worker-1", queue_name="q1", status=WorkerRuntimeStatus.IDLE)]),
@@ -272,6 +280,10 @@ def test_scheduler_uses_exponential_backoff_metadata() -> None:
         assert persisted.metadata["retry_backoff_seconds"] == 0.04
 
     asyncio.run(scenario())
+
+
+async def _event_context() -> dict[str, object]:
+    return {"organization_id": "org-1", "project_id": "project-1"}
 
 
 def test_task_runtime_uses_scheduler_assignment_for_session_creation() -> None:

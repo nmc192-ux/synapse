@@ -136,6 +136,7 @@ class RuntimeController:
         self.platform = PlatformService(state_store, authenticator, agents)
         if self.authenticator is not None:
             self.authenticator.set_api_key_validator(self.platform.authenticate_api_key_principal)
+            self.authenticator.set_service_agent_authorizer(self.platform.can_service_act_for_agent)
         self.benchmarks = BenchmarkSuite(self.run_store, state_store)
         self.scheduler = RunScheduler(self.run_store, browser, self.event_bus)
         self.budget_service = BudgetService(budget_manager, agents, self.event_bus, self.run_store)
@@ -172,6 +173,8 @@ class RuntimeController:
             scheduler=self.scheduler,
             a2a=a2a,
         )
+        if hasattr(self.a2a, "set_event_publisher"):
+            self.a2a.set_event_publisher(self.event_bus.publish)
 
     @property
     def state_store(self) -> RuntimeStateStore | None:

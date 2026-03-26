@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from abc import ABC, abstractmethod
@@ -250,6 +251,7 @@ class RuntimeStateStore(ABC):
 
 class InMemoryRuntimeStateStore(RuntimeStateStore):
     def __init__(self) -> None:
+        self._lease_lock = asyncio.Lock()
         self._agents: dict[str, dict[str, Any]] = {}
         self._sessions: dict[str, dict[str, Any]] = {}
         self._connections: dict[str, dict[str, Any]] = {}
@@ -385,28 +387,30 @@ class InMemoryRuntimeStateStore(RuntimeStateStore):
         self._run_leases.pop(run_id, None)
 
     async def acquire_run_lease(self, run_id: str, lease_data: dict[str, Any]) -> dict[str, Any]:
-        current = self._run_leases.get(run_id)
-        if current is not None:
-            expires_at = current.get("expires_at")
-            status = current.get("status")
-            if status == "active" and isinstance(expires_at, str) and datetime.fromisoformat(expires_at) > datetime.now(timezone.utc):
-                return dict(current)
-        self._lease_counter += 1
-        payload = dict(lease_data)
-        payload["token"] = self._lease_counter
-        self._run_leases[run_id] = payload
-        return dict(payload)
+        async with self._lease_lock:
+            current = self._run_leases.get(run_id)
+            if current is not None:
+                expires_at = current.get("expires_at")
+                status = current.get("status")
+                if status == "active" and isinstance(expires_at, str) and datetime.fromisoformat(expires_at) > datetime.now(timezone.utc):
+                    return dict(current)
+            self._lease_counter += 1
+            payload = dict(lease_data)
+            payload["token"] = self._lease_counter
+            self._run_leases[run_id] = payload
+            return dict(payload)
 
     async def renew_run_lease(self, run_id: str, worker_id: str, token: int, lease_data: dict[str, Any]) -> dict[str, Any]:
-        current = self._run_leases.get(run_id)
-        if current is None:
-            raise KeyError(f"Run lease not found: {run_id}")
-        if current.get("worker_id") != worker_id or int(current.get("token", -1)) != token:
-            raise PermissionError("Stale fencing token for run lease renewal.")
-        payload = dict(lease_data)
-        payload["token"] = token
-        self._run_leases[run_id] = payload
-        return dict(payload)
+        async with self._lease_lock:
+            current = self._run_leases.get(run_id)
+            if current is None:
+                raise KeyError(f"Run lease not found: {run_id}")
+            if current.get("worker_id") != worker_id or int(current.get("token", -1)) != token:
+                raise PermissionError("Stale fencing token for run lease renewal.")
+            payload = dict(lease_data)
+            payload["token"] = token
+            self._run_leases[run_id] = payload
+            return dict(payload)
 
     async def store_worker(self, worker_id: str, worker_data: dict[str, Any]) -> None:
         self._workers[worker_id] = dict(worker_data)
@@ -750,7 +754,10 @@ class RedisRuntimeStateStore(RuntimeStateStore):
         else:
             ids = await redis.smembers(f"synapse:run-leases:worker:{worker_id}")
         keys = [self._run_lease_key(run_id) for run_id in ids]
-        return await self._mget_json(keys)
+        rows = await self._mget_json(keys)
+        if worker_id is not None:
+            rows = [row for row in rows if row.get("worker_id") == worker_id]
+        return rows
 
     async def delete_run_lease(self, run_id: str) -> None:
         redis = self._require_redis()
@@ -762,28 +769,76 @@ class RedisRuntimeStateStore(RuntimeStateStore):
 
     async def acquire_run_lease(self, run_id: str, lease_data: dict[str, Any]) -> dict[str, Any]:
         redis = self._require_redis()
-        current = await self.get_run_lease(run_id)
-        if current is not None:
-            expires_at = current.get("expires_at")
-            status = current.get("status")
-            if status == "active" and isinstance(expires_at, str) and datetime.fromisoformat(expires_at) > datetime.now(timezone.utc):
-                return current
-        token = int(await redis.incr("synapse:run-leases:token"))
         payload = dict(lease_data)
-        payload["token"] = token
-        await self.store_run_lease(run_id, payload)
-        return payload
+        result = await redis.eval(
+            """
+            local lease_key = KEYS[1]
+            local counter_key = KEYS[2]
+            local now_iso = ARGV[1]
+            local payload = cjson.decode(ARGV[2])
+            local current_raw = redis.call("GET", lease_key)
+            if current_raw then
+              local current = cjson.decode(current_raw)
+              if current["status"] == "active" and current["expires_at"] and tostring(current["expires_at"]) > now_iso then
+                return current_raw
+              end
+            end
+            local token = redis.call("INCR", counter_key)
+            payload["token"] = token
+            local encoded = cjson.encode(payload)
+            redis.call("SET", lease_key, encoded)
+            return encoded
+            """,
+            2,
+            self._run_lease_key(run_id),
+            "synapse:run-leases:token",
+            datetime.now(timezone.utc).isoformat(),
+            json.dumps(payload),
+        )
+        resolved = self._decode(result) or payload
+        worker_id = resolved.get("worker_id")
+        if isinstance(worker_id, str) and worker_id:
+            await redis.sadd("synapse:run-leases:index", run_id)
+            await redis.sadd(f"synapse:run-leases:worker:{worker_id}", run_id)
+        return resolved
 
     async def renew_run_lease(self, run_id: str, worker_id: str, token: int, lease_data: dict[str, Any]) -> dict[str, Any]:
-        current = await self.get_run_lease(run_id)
-        if current is None:
-            raise KeyError(f"Run lease not found: {run_id}")
-        if current.get("worker_id") != worker_id or int(current.get("token", -1)) != token:
-            raise PermissionError("Stale fencing token for run lease renewal.")
+        redis = self._require_redis()
         payload = dict(lease_data)
-        payload["token"] = token
-        await self.store_run_lease(run_id, payload)
-        return payload
+        result = await redis.eval(
+            """
+            local lease_key = KEYS[1]
+            local current_raw = redis.call("GET", lease_key)
+            if not current_raw then
+              return cjson.encode({error="missing"})
+            end
+            local current = cjson.decode(current_raw)
+            if tostring(current["worker_id"]) ~= ARGV[1] or tonumber(current["token"]) ~= tonumber(ARGV[2]) then
+              return cjson.encode({error="stale"})
+            end
+            local payload = cjson.decode(ARGV[3])
+            payload["token"] = tonumber(ARGV[2])
+            local encoded = cjson.encode(payload)
+            redis.call("SET", lease_key, encoded)
+            return encoded
+            """,
+            1,
+            self._run_lease_key(run_id),
+            worker_id,
+            str(token),
+            json.dumps(payload),
+        )
+        decoded = self._decode(result)
+        if decoded is None:
+            raise RuntimeError(f"Failed to renew run lease: {run_id}")
+        if decoded.get("error") == "missing":
+            raise KeyError(f"Run lease not found: {run_id}")
+        if decoded.get("error") == "stale":
+            raise PermissionError("Stale fencing token for run lease renewal.")
+        resolved = decoded
+        await redis.sadd("synapse:run-leases:index", run_id)
+        await redis.sadd(f"synapse:run-leases:worker:{worker_id}", run_id)
+        return resolved
 
     async def store_worker(self, worker_id: str, worker_data: dict[str, Any]) -> None:
         redis = self._require_redis()

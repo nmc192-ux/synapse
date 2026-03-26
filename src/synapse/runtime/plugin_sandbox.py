@@ -85,6 +85,9 @@ def configure_process_sandbox() -> None:
     config = PluginSandboxConfig.from_env()
     if config is None:
         return
+    # This is a policy-enforcement runner, not a sufficient trust boundary for
+    # untrusted hosted plugins. Hosted admission control must reject those at a
+    # higher layer unless a stronger isolation backend exists.
     _apply_memory_limit(config.memory_limit_mb)
     _apply_cpu_limit(config.cpu_limit_seconds)
     _install_network_guard(config.allowed_network_hosts)

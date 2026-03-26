@@ -11,6 +11,7 @@ from synapse.runtime.browser import BrowserRuntime
 from synapse.runtime.budget_service import BudgetService
 from synapse.runtime.compression.base import CompressionProvider
 from synapse.runtime.compression.noop import NoOpCompressionProvider
+from synapse.runtime.event_bus import EventBus
 from synapse.runtime.llm import LLMProvider
 from synapse.runtime.memory_service import MemoryService
 from synapse.runtime.planning import NavigationEvaluator, NavigationPlanner, NavigationReflector
@@ -41,6 +42,7 @@ class EventDrivenAgentLoop:
         self.budget_service = budget_service
         self.llm = llm
         self.compression_provider = compression_provider or NoOpCompressionProvider()
+        self.events = EventBus(sockets, compression_provider=self.compression_provider)
         self.planner = NavigationPlanner(llm=llm, compression=self.compression_provider)
         self.evaluator = NavigationEvaluator(llm=llm, compression=self.compression_provider)
         self.reflector = NavigationReflector(llm=llm)
@@ -57,7 +59,7 @@ class EventDrivenAgentLoop:
 
         async with self.sockets.subscribe(f"{task.agent_id}:{task.task_id}") as event_queue:
             observed = await self._observe(task, event_queue)
-            await self.sockets.broadcast(
+            await self.events.publish(
                 RuntimeEvent(
                     event_type=EventType.LOOP_OBSERVED,
                     run_id=task.run_id,
@@ -107,7 +109,7 @@ class EventDrivenAgentLoop:
                 action.result = result
                 completed_actions.append(action)
                 artifacts["actions"].append(action.model_dump(mode="json"))
-                await self.sockets.broadcast(
+                await self.events.publish(
                     RuntimeEvent(
                         event_type=EventType.LOOP_ACTED,
                         run_id=task.run_id,
@@ -135,7 +137,7 @@ class EventDrivenAgentLoop:
                     memory_summary=await self._memory_summary(task),
                 )
                 remaining_actions = [candidate.model_copy() for candidate in evaluation.next_actions]
-                await self.sockets.broadcast(
+                await self.events.publish(
                     RuntimeEvent(
                         event_type=EventType.LOOP_EVALUATED,
                         run_id=task.run_id,
@@ -159,7 +161,7 @@ class EventDrivenAgentLoop:
                 remaining_actions=len(remaining_actions),
                 notes=f"Planner executed {len(completed_actions)} browser actions and evaluator updated the plan after each step.",
             )
-            await self.sockets.broadcast(
+            await self.events.publish(
                 RuntimeEvent(
                     event_type=EventType.LOOP_REFLECTED,
                     run_id=task.run_id,
@@ -278,7 +280,7 @@ class EventDrivenAgentLoop:
     async def _ensure_page_safe(self, task: TaskRequest, page: StructuredPageModel, action: str) -> None:
         finding = self.safety.inspect_page(page, action)
         if finding is not None:
-            await self.sockets.broadcast(
+            await self.events.publish(
                 RuntimeEvent(
                     event_type=EventType.SECURITY_ALERT,
                     run_id=task.run_id,
@@ -294,7 +296,7 @@ class EventDrivenAgentLoop:
             raise SecurityAlertError(finding)
 
     async def _emit_approval_required(self, task: TaskRequest, exc: SandboxApprovalRequiredError) -> None:
-        await self.sockets.broadcast(
+        await self.events.publish(
             RuntimeEvent(
                 event_type=EventType.APPROVAL_REQUIRED,
                 run_id=task.run_id,
@@ -319,7 +321,7 @@ class EventDrivenAgentLoop:
     async def _broadcast_plan(self, task: TaskRequest, actions: list[AgentAction]) -> None:
         telemetry = self.planner.get_last_context_telemetry()
         if telemetry:
-            await self.sockets.broadcast(
+            await self.events.publish(
                 RuntimeEvent(
                     event_type=EventType.PLANNER_CONTEXT_COMPRESSED,
                     run_id=task.run_id,
@@ -331,7 +333,7 @@ class EventDrivenAgentLoop:
                     correlation_id=task.task_id,
                 )
             )
-        await self.sockets.broadcast(
+        await self.events.publish(
             RuntimeEvent(
                 event_type=EventType.LOOP_PLANNED,
                 run_id=task.run_id,

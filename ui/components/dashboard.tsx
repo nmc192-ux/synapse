@@ -72,6 +72,23 @@ export function Dashboard() {
           </div>
         </header>
 
+        {state.authError ? (
+          <section className="panel" style={{ marginBottom: 18 }}>
+            <div className="panel-inner">
+              <div className="panel-title">
+                <h2>Operator Auth</h2>
+                <span className="panel-badge">{state.authStatus}</span>
+              </div>
+              <p>{state.authError}</p>
+              <p className="footer-note">
+                Configure <span className="mono">NEXT_PUBLIC_SYNAPSE_BEARER_TOKEN</span> or{" "}
+                <span className="mono">NEXT_PUBLIC_SYNAPSE_API_KEY</span> and{" "}
+                <span className="mono">NEXT_PUBLIC_SYNAPSE_PROJECT_ID</span> for project-scoped dashboard access.
+              </p>
+            </div>
+          </section>
+        ) : null}
+
         <div className="dashboard-grid">
           <Panel title="Web Page View" badge={state.page.title} className="page-view">
             <div className="browser-frame">
@@ -308,7 +325,9 @@ export function Dashboard() {
             <p className="footer-note">
               Live updates subscribe to <span className="mono">/api/ws</span>. Set{" "}
               <span className="mono">NEXT_PUBLIC_SYNAPSE_WS_URL</span> to point this UI at a
-              running Synapse backend.
+              running Synapse backend, and provide auth with{" "}
+              <span className="mono">NEXT_PUBLIC_SYNAPSE_BEARER_TOKEN</span> or{" "}
+              <span className="mono">NEXT_PUBLIC_SYNAPSE_API_KEY</span>.
             </p>
           </Panel>
         </div>

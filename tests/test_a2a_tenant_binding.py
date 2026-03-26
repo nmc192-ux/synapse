@@ -45,6 +45,35 @@ def test_cross_project_service_binding_is_denied_for_a2a_websocket() -> None:
             pass
 
 
+def test_same_project_service_binding_requires_explicit_allowlist() -> None:
+    client, authenticator = _build_a2a_client()
+    token = authenticator.issue_token(
+        subject="service-1",
+        principal_type=PrincipalType.SERVICE,
+        scopes=[Scope.A2A_RECEIVE.value],
+        organization_id="org-1",
+        project_id="project-1",
+    )
+
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(f"/api/a2a/ws/agent-1?token={token}"):
+            pass
+
+
+def test_same_project_service_binding_is_allowed_when_explicitly_allowlisted() -> None:
+    client, authenticator = _build_a2a_client(service_allowlist={"service-1": ["agent-1"]})
+    token = authenticator.issue_token(
+        subject="service-1",
+        principal_type=PrincipalType.SERVICE,
+        scopes=[Scope.A2A_RECEIVE.value],
+        organization_id="org-1",
+        project_id="project-1",
+    )
+
+    with client.websocket_connect(f"/api/a2a/ws/agent-1?token={token}") as websocket:
+        websocket.close()
+
+
 def test_invalid_signature_and_replayed_nonce_are_denied() -> None:
     signer = MessageSigner()
     store = InMemoryRuntimeStateStore()

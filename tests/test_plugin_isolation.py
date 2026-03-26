@@ -9,6 +9,7 @@ from synapse.models.runtime_event import EventSeverity, EventType
 from synapse.runtime.budget import AgentBudgetManager
 from synapse.runtime.budget_service import BudgetService
 from synapse.runtime.event_bus import EventBus
+from synapse.runtime.plugin_isolation import HostedPluginIsolationBackend
 from synapse.runtime.registry import AgentRegistry
 from synapse.runtime.safety import AgentSafetyLayer
 from synapse.runtime.security import AgentSecuritySandbox
@@ -31,7 +32,7 @@ def test_isolated_plugin_executes_in_subprocess() -> None:
         assert result == {"echo": "ok", "mode": "isolated"}
         descriptor = tools.describe("isolated.echo")
         assert descriptor.execution_mode == PluginExecutionMode.ISOLATED_HOSTED
-        assert descriptor.isolation_strategy == "sandboxed_subprocess"
+        assert descriptor.isolation_strategy == "jailed_runner"
 
     asyncio.run(scenario())
 
@@ -77,15 +78,14 @@ def test_sandboxed_plugin_filters_environment_and_captures_audit_logs() -> None:
     asyncio.run(scenario())
 
 
-def test_sandboxed_plugin_blocks_network_and_outside_filesystem_access() -> None:
+def test_sandboxed_plugin_blocks_network_and_repo_filesystem_access() -> None:
     async def scenario() -> None:
         tools = ToolRegistry(
             execution_mode=PluginExecutionMode.ISOLATED_HOSTED,
             execution_timeout_seconds=1.0,
         )
         tools.load_module("synapse.testing.isolated_plugin")
-        outside = Path(tempfile.gettempdir()) / "synapse-outside-read.txt"
-        outside.write_text("forbidden")
+        repo_file = Path(__file__).resolve().parents[1] / "README.md"
 
         try:
             try:
@@ -96,13 +96,57 @@ def test_sandboxed_plugin_blocks_network_and_outside_filesystem_access() -> None
                 raise AssertionError("expected blocked network access")
 
             try:
-                await tools.call("isolated.echo", {"read_path": str(outside)})
+                await tools.call("isolated.echo", {"read_path": str(repo_file)})
             except RuntimeError as exc:
                 assert "cannot read" in str(exc).lower()
             else:
                 raise AssertionError("expected blocked filesystem read")
         finally:
-            outside.unlink(missing_ok=True)
+            pass
+
+    asyncio.run(scenario())
+
+
+def test_hosted_plugin_audit_logs_are_persisted_durably() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        tools = ToolRegistry(
+            execution_mode=PluginExecutionMode.ISOLATED_HOSTED,
+            execution_timeout_seconds=1.0,
+            state_store=store,
+        )
+        tools.load_module("synapse.testing.isolated_plugin")
+
+        await tools.call("isolated.echo", {"value": "ok"}, run_id="run-1")
+
+        audit_logs = await store.list_audit_logs(limit=10)
+        plugin_logs = [entry for entry in audit_logs if entry.get("action") == "plugin.execution"]
+        assert plugin_logs
+        metadata = plugin_logs[-1]["metadata"]
+        assert metadata["plugin_name"] == "isolated_plugin"
+        assert metadata["run_id"] == "run-1"
+        assert metadata["mode"] == PluginExecutionMode.ISOLATED_HOSTED.value
+        assert metadata["stdout_ref"]
+        assert metadata["stderr_ref"]
+
+    asyncio.run(scenario())
+
+
+def test_hosted_plugins_are_rejected_when_isolation_backend_unavailable(monkeypatch) -> None:
+    async def scenario() -> None:
+        monkeypatch.setattr(HostedPluginIsolationBackend, "is_available", staticmethod(lambda: False))
+        tools = ToolRegistry(
+            execution_mode=PluginExecutionMode.ISOLATED_HOSTED,
+            execution_timeout_seconds=1.0,
+        )
+        tools.load_module("synapse.testing.isolated_plugin")
+
+        try:
+            await tools.call("isolated.echo", {"value": "ok"})
+        except RuntimeError as exc:
+            assert "backend unavailable" in str(exc).lower()
+        else:
+            raise AssertionError("expected hosted isolation rejection")
 
     asyncio.run(scenario())
 

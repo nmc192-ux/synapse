@@ -180,6 +180,7 @@ class RuntimeController:
         self.checkpoint_service.set_state_store(state_store) if hasattr(self, "checkpoint_service") else None
         self.memory_service.set_state_store(state_store) if hasattr(self, "memory_service") else None
         self.tool_service.set_state_store(state_store) if hasattr(self, "tool_service") else None
+        self.tools.set_state_store(state_store) if hasattr(self.tools, "set_state_store") else None
         self.tool_service.set_execution_plane(self.browser) if hasattr(self, "tool_service") else None
         self.sandbox.set_state_store(state_store) if hasattr(self, "sandbox") else None
         if state_store is not None and hasattr(self, "event_bus"):

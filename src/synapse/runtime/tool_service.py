@@ -33,6 +33,8 @@ class ToolService:
 
     def set_state_store(self, state_store: RuntimeStateStore | None) -> None:
         self.state_store = state_store
+        if hasattr(self.tools, "set_state_store"):
+            self.tools.set_state_store(state_store)
 
     def set_execution_plane(self, execution_plane) -> None:
         self.execution_plane = execution_plane
@@ -81,7 +83,7 @@ class ToolService:
                     worker_id=assigned_worker_id,
                 )
             else:
-                result = await self.tools.call(tool_name, arguments)
+                result = await self.tools.call(tool_name, arguments, run_id=effective_run_id)
             duration_ms = round((perf_counter() - start) * 1000, 2)
             await self.events.emit(
                 EventType.TOOL_CALLED,

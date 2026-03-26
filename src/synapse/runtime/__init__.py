@@ -1,56 +1,47 @@
 """Core runtime services for Synapse."""
 
-from synapse.runtime.compression.base import CompressionProvider, create_compression_provider
-from synapse.runtime.llm import AnthropicProvider, LLMProvider, LocalModelProvider, OpenAIProvider, create_llm_provider
-from synapse.runtime.control_plane import ControlPlane
-from synapse.runtime.event_bus import EventBus
-from synapse.runtime.browser_service import BrowserService
-from synapse.runtime.browser_workers import BrowserWorkerPool
-from synapse.runtime.benchmarking import BenchmarkSuite
-from synapse.runtime.budget_service import BudgetService
-from synapse.runtime.capabilities import CapabilityRegistry
-from synapse.runtime.checkpoint_service import CheckpointService
-from synapse.runtime.execution_plane import ExecutionPlaneRuntime
-from synapse.runtime.memory_service import MemoryService
-from synapse.runtime.platform_service import PlatformService
-from synapse.runtime.runtime_controller import RuntimeController
-from synapse.runtime.scheduler import RunScheduler
-from synapse.runtime.session_profiles import SessionProfileManager
-from synapse.runtime.state_store import (
-    InMemoryRuntimeStateStore,
-    RedisRuntimeStateStore,
-    RuntimeStateStore,
-    create_runtime_state_store,
-)
-from synapse.runtime.task_runtime import TaskRuntime
-from synapse.runtime.tool_service import ToolService
+from __future__ import annotations
 
-__all__ = [
-    "AnthropicProvider",
-    "BrowserService",
-    "BudgetService",
-    "BenchmarkSuite",
-    "CapabilityRegistry",
-    "CheckpointService",
-    "CompressionProvider",
-    "ControlPlane",
-    "EventBus",
-    "ExecutionPlaneRuntime",
-    "LLMProvider",
-    "LocalModelProvider",
-    "MemoryService",
-    "OpenAIProvider",
-    "PlatformService",
-    "BrowserWorkerPool",
-    "InMemoryRuntimeStateStore",
-    "RedisRuntimeStateStore",
-    "RuntimeController",
-    "RuntimeStateStore",
-    "RunScheduler",
-    "SessionProfileManager",
-    "TaskRuntime",
-    "ToolService",
-    "create_compression_provider",
-    "create_llm_provider",
-    "create_runtime_state_store",
-]
+from importlib import import_module
+
+_EXPORTS = {
+    "CompressionProvider": "synapse.runtime.compression.base",
+    "create_compression_provider": "synapse.runtime.compression.base",
+    "AnthropicProvider": "synapse.runtime.llm",
+    "LLMProvider": "synapse.runtime.llm",
+    "LocalModelProvider": "synapse.runtime.llm",
+    "OpenAIProvider": "synapse.runtime.llm",
+    "create_llm_provider": "synapse.runtime.llm",
+    "ControlPlane": "synapse.runtime.control_plane",
+    "EventBus": "synapse.runtime.event_bus",
+    "BrowserService": "synapse.runtime.browser_service",
+    "BrowserWorkerPool": "synapse.runtime.browser_workers",
+    "BenchmarkSuite": "synapse.runtime.benchmarking",
+    "BudgetService": "synapse.runtime.budget_service",
+    "CapabilityRegistry": "synapse.runtime.capabilities",
+    "CheckpointService": "synapse.runtime.checkpoint_service",
+    "ExecutionPlaneRuntime": "synapse.runtime.execution_plane",
+    "MemoryService": "synapse.runtime.memory_service",
+    "PlatformService": "synapse.runtime.platform_service",
+    "RuntimeController": "synapse.runtime.runtime_controller",
+    "RunScheduler": "synapse.runtime.scheduler",
+    "SessionProfileManager": "synapse.runtime.session_profiles",
+    "InMemoryRuntimeStateStore": "synapse.runtime.state_store",
+    "RedisRuntimeStateStore": "synapse.runtime.state_store",
+    "RuntimeStateStore": "synapse.runtime.state_store",
+    "create_runtime_state_store": "synapse.runtime.state_store",
+    "TaskRuntime": "synapse.runtime.task_runtime",
+    "ToolService": "synapse.runtime.tool_service",
+}
+
+__all__ = sorted(_EXPORTS)
+
+
+def __getattr__(name: str):
+    module_name = _EXPORTS.get(name)
+    if module_name is None:
+        raise AttributeError(name)
+    module = import_module(module_name)
+    value = getattr(module, name)
+    globals()[name] = value
+    return value

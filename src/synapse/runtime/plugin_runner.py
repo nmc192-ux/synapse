@@ -23,6 +23,8 @@ async def _run(module_name: str, tool_name: str, payload: str) -> int:
     sys.stdout.write(
         json.dumps(
             {
+                "plugin_module": module_name,
+                "tool_name": tool_name,
                 "result": result,
                 "stdout": captured_stdout.getvalue(),
                 "stderr": captured_stderr.getvalue(),
@@ -40,6 +42,9 @@ def main() -> int:
     module_name, tool_name, payload = sys.argv[1:4]
     try:
         return asyncio.run(_run(module_name, tool_name, payload))
+    except PermissionError as exc:  # pragma: no cover - defensive CLI path
+        sys.stderr.write(f"policy_violation:{type(exc).__name__}: {exc}\n")
+        return 1
     except Exception as exc:  # pragma: no cover - defensive CLI path
         sys.stderr.write(f"{type(exc).__name__}: {exc}\n")
         return 1

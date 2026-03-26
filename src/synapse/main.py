@@ -32,6 +32,7 @@ agent_registry = AgentRegistry(state_store=runtime_state_store)
 tool_registry = ToolRegistry(
     execution_mode=settings.plugin_execution_mode,
     execution_timeout_seconds=settings.plugin_execution_timeout_seconds,
+    state_store=runtime_state_store,
 )
 message_bus = AgentMessageBus()
 websocket_manager = WebSocketManager(state_store=runtime_state_store, compression_provider=compression_provider)

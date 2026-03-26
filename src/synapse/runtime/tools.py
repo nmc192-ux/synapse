@@ -1,20 +1,21 @@
 from __future__ import annotations
 
-import asyncio
 import importlib
-import json
-import os
 import pkgutil
-import sys
-import tempfile
-from pathlib import Path
+import uuid
+from datetime import datetime, timezone
 from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
 
 from synapse.models.plugin import PluginDescriptor, PluginExecutionMode, ToolDescriptor
-from synapse.runtime.plugin_sandbox import (
-    PluginSandboxConfig,
-    build_sandbox_env,
+from synapse.runtime.plugin_isolation import (
+    HostedPluginIsolationBackend,
+    HostedPluginIsolationUnavailableError,
+    PluginExecutionRequest,
 )
+
+if TYPE_CHECKING:
+    from synapse.runtime.state_store import RuntimeStateStore
 
 ToolHandler = Callable[[dict[str, object]], Awaitable[dict[str, object]]]
 
@@ -25,6 +26,8 @@ class ToolRegistry:
         *,
         execution_mode: PluginExecutionMode = PluginExecutionMode.TRUSTED_LOCAL,
         execution_timeout_seconds: float = 10.0,
+        state_store: RuntimeStateStore | None = None,
+        isolation_backend: HostedPluginIsolationBackend | None = None,
     ) -> None:
         self._tools: dict[str, ToolHandler] = {}
         self._tool_descriptors: dict[str, ToolDescriptor] = {}
@@ -32,6 +35,11 @@ class ToolRegistry:
         self._plugin_audit_logs: list[dict[str, object]] = []
         self.execution_mode = execution_mode
         self.execution_timeout_seconds = execution_timeout_seconds
+        self.state_store = state_store
+        self.isolation_backend = isolation_backend or HostedPluginIsolationBackend()
+
+    def set_state_store(self, state_store: RuntimeStateStore | None) -> None:
+        self.state_store = state_store
 
     def register(
         self,
@@ -84,13 +92,20 @@ class ToolRegistry:
         self._plugins[name] = descriptor
         return descriptor
 
-    async def call(self, name: str, arguments: dict[str, object]) -> dict[str, object]:
+    async def call(
+        self,
+        name: str,
+        arguments: dict[str, object],
+        *,
+        run_id: str | None = None,
+        project_id: str | None = None,
+    ) -> dict[str, object]:
         descriptor = self._tool_descriptors.get(name)
         if descriptor is None:
             raise KeyError(f"Tool not found: {name}")
         plugin = self._plugins.get(descriptor.plugin) if descriptor.plugin else None
         if plugin is not None and plugin.execution_mode == PluginExecutionMode.ISOLATED_HOSTED:
-            return await self._call_isolated(name, arguments, plugin)
+            return await self._call_isolated(name, arguments, plugin, run_id=run_id, project_id=project_id)
         handler = self._tools.get(name)
         if handler is None:
             raise KeyError(f"Tool not found: {name}")
@@ -173,118 +188,162 @@ class ToolRegistry:
         name: str,
         arguments: dict[str, object],
         plugin: PluginDescriptor,
+        *,
+        run_id: str | None = None,
+        project_id: str | None = None,
     ) -> dict[str, object]:
-        src_path = str(Path(__file__).resolve().parents[2])
-        repo_root = Path(__file__).resolve().parents[3]
-        existing_pythonpath = os.environ.get("PYTHONPATH", "")
-        sandbox_root = tempfile.mkdtemp(prefix="synapse-plugin-", dir=str(repo_root))
-        allowed_roots = (sandbox_root, src_path, str(repo_root))
-        config = PluginSandboxConfig(
-            plugin_module=plugin.module,
-            tool_name=name,
-            timeout_seconds=plugin.timeout_seconds,
-            allowed_read_roots=allowed_roots,
-            allowed_write_roots=(sandbox_root,),
-        )
-        env = build_sandbox_env(dict(os.environ), config)
-        env["PYTHONPATH"] = src_path if not existing_pythonpath else f"{src_path}:{existing_pythonpath}"
-        process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "synapse.runtime.plugin_runner",
-            plugin.module,
-            name,
-            json.dumps(arguments),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(repo_root),
-            env=env,
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=plugin.timeout_seconds,
-            )
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.communicate()
-            self._append_audit_log(
+        resolved_project_id = project_id or await self._project_id_for_run(run_id)
+        if not self.isolation_backend.is_available():
+            await self._append_audit_log(
                 plugin=plugin,
                 tool_name=name,
                 arguments=arguments,
+                run_id=run_id,
+                project_id=resolved_project_id,
                 stdout="",
-                stderr="timeout",
-                returncode=-9,
-                status="timeout",
+                stderr="hosted isolation backend unavailable",
+                exit_status=-1,
+                status="rejected",
+                start_time=datetime.now(timezone.utc),
+                end_time=datetime.now(timezone.utc),
+                stdout_ref=None,
+                stderr_ref=None,
+                policy_violations=["backend_unavailable"],
             )
-            raise TimeoutError(
-                f"Plugin tool timed out after {plugin.timeout_seconds:.1f}s: {name}"
-            ) from None
-
-        stdout_text = stdout.decode("utf-8", errors="replace")
-        stderr_text = stderr.decode("utf-8", errors="replace")
-        if process.returncode != 0:
-            self._append_audit_log(
-                plugin=plugin,
-                tool_name=name,
-                arguments=arguments,
-                stdout=stdout_text,
-                stderr=stderr_text,
-                returncode=process.returncode or 0,
-                status="failed",
+            raise HostedPluginIsolationUnavailableError(
+                f"Hosted plugin isolation backend unavailable; rejecting plugin '{plugin.name}'."
             )
-            detail = stderr_text.strip() or "plugin subprocess failed"
-            raise RuntimeError(f"Plugin tool failed: {name}: {detail}")
-        payload = stdout_text.strip()
-        if not payload:
-            return {}
-        envelope = json.loads(payload)
-        if not isinstance(envelope, dict):
-            raise TypeError(f"Plugin tool returned non-object payload: {name}")
-        result = envelope.get("result", {})
-        if not isinstance(result, dict):
-            raise TypeError(f"Plugin tool returned non-object payload: {name}")
-        self._append_audit_log(
+        started_at = datetime.now(timezone.utc)
+        request = PluginExecutionRequest(
             plugin=plugin,
             tool_name=name,
             arguments=arguments,
-            stdout=str(envelope.get("stdout", "")),
-            stderr=str(envelope.get("stderr", "")),
-            returncode=process.returncode or 0,
-            status="ok",
+            timeout_seconds=plugin.timeout_seconds,
+            run_id=run_id,
+            project_id=resolved_project_id,
         )
-        return result
+        try:
+            execution = await self.isolation_backend.execute(request)
+        except Exception as exc:
+            ended_at = datetime.now(timezone.utc)
+            await self._append_audit_log(
+                plugin=plugin,
+                tool_name=name,
+                arguments=arguments,
+                run_id=run_id,
+                project_id=resolved_project_id,
+                stdout="",
+                stderr=str(exc),
+                exit_status=-1,
+                status="failed",
+                start_time=started_at,
+                end_time=ended_at,
+                stdout_ref=None,
+                stderr_ref=None,
+                policy_violations=self._policy_violations_from_error(str(exc)),
+            )
+            raise
+        await self._append_audit_log(
+            plugin=plugin,
+            tool_name=name,
+            arguments=arguments,
+            run_id=run_id,
+            project_id=resolved_project_id,
+            stdout=execution.stdout,
+            stderr=execution.stderr,
+            exit_status=execution.exit_status,
+            status="ok",
+            start_time=execution.start_time,
+            end_time=execution.end_time,
+            stdout_ref=execution.stdout_ref,
+            stderr_ref=execution.stderr_ref,
+            policy_violations=execution.policy_violations,
+        )
+        return execution.result
 
-    def _append_audit_log(
+    async def _append_audit_log(
         self,
         *,
         plugin: PluginDescriptor,
         tool_name: str,
         arguments: dict[str, object],
+        run_id: str | None,
+        project_id: str | None,
         stdout: str,
         stderr: str,
-        returncode: int,
+        exit_status: int,
         status: str,
+        start_time: datetime,
+        end_time: datetime,
+        stdout_ref: str | None,
+        stderr_ref: str | None,
+        policy_violations: list[str],
     ) -> None:
-        self._plugin_audit_logs.append(
-            {
-                "plugin_name": plugin.name,
-                "plugin_module": plugin.module,
-                "tool_name": tool_name,
-                "execution_mode": plugin.execution_mode.value,
-                "isolation_strategy": plugin.isolation_strategy,
-                "status": status,
-                "returncode": returncode,
-                "stdout": stdout,
-                "stderr": stderr,
-                "argument_keys": sorted(arguments.keys()),
-            }
-        )
+        entry = {
+            "plugin_name": plugin.name,
+            "plugin_module": plugin.module,
+            "tool_name": tool_name,
+            "run_id": run_id,
+            "project_id": project_id,
+            "mode": plugin.execution_mode.value,
+            "execution_mode": plugin.execution_mode.value,
+            "isolation_strategy": plugin.isolation_strategy,
+            "start_time": start_time.isoformat(),
+            "end_time": end_time.isoformat(),
+            "status": status,
+            "exit_status": exit_status,
+            "stdout": stdout,
+            "stderr": stderr,
+            "stdout_ref": stdout_ref,
+            "stderr_ref": stderr_ref,
+            "policy_violations": list(policy_violations),
+            "argument_keys": sorted(arguments.keys()),
+        }
+        self._plugin_audit_logs.append(entry)
         if len(self._plugin_audit_logs) > 1000:
             self._plugin_audit_logs = self._plugin_audit_logs[-1000:]
+        if self.state_store is not None:
+            await self.state_store.store_audit_log(
+                str(uuid.uuid4()),
+                {
+                    "actor_id": plugin.name,
+                    "actor_type": "plugin",
+                    "action": "plugin.execution",
+                    "resource_type": "plugin",
+                    "resource_id": plugin.name,
+                    "project_id": project_id,
+                    "timestamp": end_time.isoformat(),
+                    "metadata": entry,
+                },
+            )
 
     @staticmethod
     def _default_isolation_strategy(mode: PluginExecutionMode) -> str:
         if mode == PluginExecutionMode.ISOLATED_HOSTED:
-            return "sandboxed_subprocess"
+            return "jailed_runner"
         return "in_process"
+
+    async def _project_id_for_run(self, run_id: str | None) -> str | None:
+        if run_id is None or self.state_store is None:
+            return None
+        run = await self.state_store.get_run(run_id)
+        if run is None:
+            return None
+        project_id = run.get("project_id")
+        return str(project_id) if isinstance(project_id, str) and project_id else None
+
+    @staticmethod
+    def _policy_violations_from_error(error: str) -> list[str]:
+        lowered = error.lower()
+        violations: list[str] = []
+        if "network" in lowered:
+            violations.append("network")
+        if "cannot read" in lowered or "cannot write" in lowered:
+            violations.append("filesystem")
+        if "subprocess" in lowered or "spawn" in lowered:
+            violations.append("process")
+        if "timeout" in lowered:
+            violations.append("timeout")
+        if "backend unavailable" in lowered:
+            violations.append("backend_unavailable")
+        return violations

@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     plugin_modules: list[str] = Field(default_factory=list)
     plugin_execution_mode: PluginExecutionMode = PluginExecutionMode.TRUSTED_LOCAL
     plugin_execution_timeout_seconds: float = 10.0
+    hosted_plugin_isolation_backend: str = "auto"
+    hosted_plugin_allow_untrusted_external: bool = False
+    hosted_plugin_network_allowlist: list[str] = Field(default_factory=list)
+    hosted_plugin_memory_limit_mb: int = 256
+    hosted_plugin_cpu_limit_seconds: int = 2
     agent_limits_config_path: str = "config/agent_limits.yaml"
     agent_limits: AgentExecutionLimits = Field(default_factory=AgentExecutionLimits)
     llm_provider: str | None = None

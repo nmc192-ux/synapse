@@ -74,6 +74,7 @@ def build_sandbox_env(base_env: dict[str, str], config: PluginSandboxConfig) -> 
     env.update(config.to_env())
     env["PYTHONNOUSERSITE"] = "1"
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["SYNAPSE_PLUGIN_DEFENSE_IN_DEPTH"] = "1"
     return env
 
 
@@ -82,12 +83,13 @@ def sandbox_workdir() -> str:
 
 
 def configure_process_sandbox() -> None:
+    if os.environ.get("SYNAPSE_PLUGIN_DEFENSE_IN_DEPTH") != "1":
+        return
     config = PluginSandboxConfig.from_env()
     if config is None:
         return
-    # This is a policy-enforcement runner, not a sufficient trust boundary for
-    # untrusted hosted plugins. Hosted admission control must reject those at a
-    # higher layer unless a stronger isolation backend exists.
+    # Defense in depth for isolated runners. The primary hosted boundary must
+    # come from an OS-backed isolation backend.
     _apply_memory_limit(config.memory_limit_mb)
     _apply_cpu_limit(config.cpu_limit_seconds)
     _install_network_guard(config.allowed_network_hosts)

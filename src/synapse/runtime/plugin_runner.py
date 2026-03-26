@@ -20,17 +20,14 @@ async def _run(module_name: str, tool_name: str, payload: str) -> int:
     captured_stderr = io.StringIO()
     with contextlib.redirect_stdout(captured_stdout), contextlib.redirect_stderr(captured_stderr):
         result = await registry.call(tool_name, arguments)
-    sys.stdout.write(
-        json.dumps(
-            {
-                "plugin_module": module_name,
-                "tool_name": tool_name,
-                "result": result,
-                "stdout": captured_stdout.getvalue(),
-                "stderr": captured_stderr.getvalue(),
-            }
-        )
-    )
+    envelope = {
+        "plugin_module": module_name,
+        "tool_name": tool_name,
+        "result": result,
+        "stdout": captured_stdout.getvalue(),
+        "stderr": captured_stderr.getvalue(),
+    }
+    sys.stdout.write(json.dumps(envelope))
     sys.stdout.flush()
     return 0
 

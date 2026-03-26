@@ -394,16 +394,23 @@ agent or run security policy. Supported values are:
 - `retry_with_profile`
 # Plugin execution modes
 
-Hosted environments should use `SYNAPSE_PLUGIN_EXECUTION_MODE=isolated_hosted`. In this mode, Synapse only allows `trusted_internal` plugins and explicitly allowlisted `trusted_partner` plugins. `untrusted_external` plugins are denied by policy for hosted alpha deployments.
+Hosted environments should use `SYNAPSE_PLUGIN_EXECUTION_MODE=isolated_hosted`. In this mode, Synapse requires a real hosted isolation backend and fails closed when none is available.
 
 Modes:
 - `trusted_local`: current development default, plugin handlers run in-process.
-- `isolated_hosted`: plugin handlers run in a restricted runner and report execution telemetry, but are still policy-gated.
+- `isolated_hosted`: plugin handlers run behind a real OS-backed isolation backend when available (`sandbox-exec` on macOS, `bwrap` on Linux in this phase) with defense-in-depth runner guards.
+
+Hosted isolation config:
+- `SYNAPSE_HOSTED_PLUGIN_ISOLATION_BACKEND=auto|sandbox_exec|bubblewrap`
+- `SYNAPSE_HOSTED_PLUGIN_MEMORY_LIMIT_MB`
+- `SYNAPSE_HOSTED_PLUGIN_CPU_LIMIT_SECONDS`
+- `SYNAPSE_HOSTED_PLUGIN_NETWORK_ALLOWLIST`
+- `SYNAPSE_HOSTED_PLUGIN_ALLOW_UNTRUSTED_EXTERNAL=true|false`
 
 Hosted plugin policy:
 - `trusted_internal`: allowed
 - `trusted_partner`: allowed only when present in `SYNAPSE_HOSTED_PLUGIN_PARTNER_ALLOWLIST`
-- `untrusted_external`: denied
+- `untrusted_external`: denied unless a real hosted isolation backend is available and `SYNAPSE_HOSTED_PLUGIN_ALLOW_UNTRUSTED_EXTERNAL=true`
 
 Telemetry:
 - `plugin.execution.started`
@@ -411,11 +418,11 @@ Telemetry:
 - `plugin.execution.failed`
 
 Limitations:
-- The hosted runner is still not a full container, VM, or syscall sandbox.
-- Because of that, hosted alpha must fail closed for untrusted third-party plugins.
+- Hosted isolation is stronger than the prior policy-only path, but this phase still relies on platform-specific OS isolation backends rather than a dedicated container fleet.
+- Network access is deny-by-default in hosted isolation for this phase.
 - Stateful in-memory plugin behavior does not persist across isolated executions.
 
 Migration path:
 - Keep existing plugins unchanged for local development.
 - For hosted deployments, prefer stateless plugins and externalize durable state behind APIs.
-- Future hardening can replace the subprocess runner with containerized or remote plugin workers without changing the tool service API.
+- Future hardening can replace the current OS-level backends with containerized or remote plugin workers without changing the tool service API.

@@ -38,8 +38,14 @@ class ToolRegistry:
         self.execution_mode = execution_mode
         self.execution_timeout_seconds = execution_timeout_seconds
         self.state_store = state_store
-        self.isolation_backend = isolation_backend or HostedPluginIsolationBackend()
+        self.isolation_backend = isolation_backend or HostedPluginIsolationBackend(
+            backend_name=settings.hosted_plugin_isolation_backend,
+            memory_limit_mb=settings.hosted_plugin_memory_limit_mb,
+            cpu_limit_seconds=settings.hosted_plugin_cpu_limit_seconds,
+            network_allowlist=settings.hosted_plugin_network_allowlist,
+        )
         self.hosted_partner_allowlist = set(hosted_partner_allowlist or settings.hosted_plugin_partner_allowlist)
+        self._hosted_isolation_strategy = self.isolation_backend.isolation_strategy
 
     def set_state_store(self, state_store: RuntimeStateStore | None) -> None:
         self.state_store = state_store
@@ -215,8 +221,10 @@ class ToolRegistry:
                 status="denied",
                 start_time=now,
                 end_time=now,
+                isolation_mode=self.isolation_backend.isolation_strategy,
                 stdout_ref=None,
                 stderr_ref=None,
+                timeout=False,
                 policy_violations=["hosted_policy_denied", plugin.trust_level.value],
             )
             raise PermissionError(
@@ -235,8 +243,10 @@ class ToolRegistry:
                 status="rejected",
                 start_time=datetime.now(timezone.utc),
                 end_time=datetime.now(timezone.utc),
+                isolation_mode=self.isolation_backend.isolation_strategy,
                 stdout_ref=None,
                 stderr_ref=None,
+                timeout=False,
                 policy_violations=["backend_unavailable"],
             )
             raise HostedPluginIsolationUnavailableError(
@@ -267,8 +277,10 @@ class ToolRegistry:
                 status="failed",
                 start_time=started_at,
                 end_time=ended_at,
+                isolation_mode=self.isolation_backend.isolation_strategy,
                 stdout_ref=None,
                 stderr_ref=None,
+                timeout=isinstance(exc, TimeoutError),
                 policy_violations=self._policy_violations_from_error(str(exc)),
             )
             raise
@@ -284,8 +296,10 @@ class ToolRegistry:
             status="ok",
             start_time=execution.start_time,
             end_time=execution.end_time,
+            isolation_mode=execution.isolation_strategy,
             stdout_ref=execution.stdout_ref,
             stderr_ref=execution.stderr_ref,
+            timeout=execution.timeout,
             policy_violations=execution.policy_violations,
         )
         return execution.result
@@ -304,8 +318,10 @@ class ToolRegistry:
         status: str,
         start_time: datetime,
         end_time: datetime,
+        isolation_mode: str,
         stdout_ref: str | None,
         stderr_ref: str | None,
+        timeout: bool,
         policy_violations: list[str],
     ) -> None:
         entry = {
@@ -316,12 +332,14 @@ class ToolRegistry:
             "project_id": project_id,
             "mode": plugin.execution_mode.value,
             "execution_mode": plugin.execution_mode.value,
-            "isolation_strategy": plugin.isolation_strategy,
+            "isolation_mode": isolation_mode,
+            "isolation_strategy": isolation_mode,
             "trust_level": plugin.trust_level.value,
             "start_time": start_time.isoformat(),
             "end_time": end_time.isoformat(),
             "status": status,
             "exit_status": exit_status,
+            "timeout": timeout,
             "stdout": stdout,
             "stderr": stderr,
             "stdout_ref": stdout_ref,
@@ -347,10 +365,9 @@ class ToolRegistry:
                 },
             )
 
-    @staticmethod
-    def _default_isolation_strategy(mode: PluginExecutionMode) -> str:
+    def _default_isolation_strategy(self, mode: PluginExecutionMode) -> str:
         if mode == PluginExecutionMode.ISOLATED_HOSTED:
-            return "jailed_runner"
+            return self._hosted_isolation_strategy
         return "in_process"
 
     def _classify_plugin(self, name: str, module: str) -> PluginTrustLevel:
@@ -361,12 +378,16 @@ class ToolRegistry:
             return PluginTrustLevel.TRUSTED_INTERNAL
         return PluginTrustLevel.UNTRUSTED_EXTERNAL
 
-    @staticmethod
-    def _hosted_execution_allowed(plugin: PluginDescriptor) -> bool:
-        return plugin.trust_level in {
+    def _hosted_execution_allowed(self, plugin: PluginDescriptor) -> bool:
+        if plugin.trust_level in {
             PluginTrustLevel.TRUSTED_INTERNAL,
             PluginTrustLevel.TRUSTED_PARTNER,
-        }
+        }:
+            return True
+        return (
+            settings.hosted_plugin_allow_untrusted_external
+            and self.isolation_backend.supports_untrusted_plugins()
+        )
 
     async def _project_id_for_run(self, run_id: str | None) -> str | None:
         if run_id is None or self.state_store is None:

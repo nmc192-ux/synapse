@@ -4,6 +4,7 @@ import uuid
 
 from synapse.models.a2a import A2AEnvelope, A2AMessageType, AgentDelegateRequest, AgentPresence, AgentRegistrationRequest, AgentWireMessage
 from synapse.models.agent import AgentBudgetUsage, AgentCheckpoint, AgentDefinition, AgentDiscoveryEntry
+from synapse.models.benchmark import BenchmarkReport, BenchmarkRunScore, BenchmarkScenario
 from synapse.models.browser import (
     BrowserState,
     ClickRequest,
@@ -35,6 +36,7 @@ from synapse.models.run import RunState
 from synapse.models.runtime_state import BrowserNetworkEntry, BrowserSessionState, BrowserTraceEntry, ConnectionState, RuntimeCheckpoint
 from synapse.models.task import ExtractionRequest, NavigationRequest, TaskClaimRequest, TaskCreateRequest, TaskRecord, TaskRequest, TaskResult, TaskUpdateRequest
 from synapse.runtime.a2a import A2AHub
+from synapse.runtime.benchmarking import BenchmarkSuite
 from synapse.runtime.budget import AgentBudgetManager
 from synapse.runtime.budget_service import BudgetService
 from synapse.runtime.browser_service import BrowserService
@@ -99,6 +101,7 @@ class RuntimeController:
         if hasattr(browser, "set_event_publisher"):
             browser.set_event_publisher(self.event_bus.publish)
         self.run_store = RunStore(state_store)
+        self.benchmarks = BenchmarkSuite(self.run_store, state_store)
         self.scheduler = RunScheduler(self.run_store, browser, self.event_bus)
         self.budget_service = BudgetService(budget_manager, agents, self.event_bus, self.run_store)
         self.browser_service = BrowserService(browser, sandbox, safety, self.event_bus, self.budget_service, state_store)
@@ -142,6 +145,8 @@ class RuntimeController:
     def state_store(self, state_store: RuntimeStateStore | None) -> None:
         self._state_store = state_store
         self.run_store.set_state_store(state_store) if hasattr(self, "run_store") else None
+        if hasattr(self, "benchmarks"):
+            self.benchmarks.state_store = state_store
         self.session_profiles.set_state_store(state_store) if hasattr(self, "session_profiles") else None
         self.browser_service.set_state_store(state_store) if hasattr(self, "browser_service") else None
         self.checkpoint_service.set_state_store(state_store) if hasattr(self, "checkpoint_service") else None
@@ -352,6 +357,43 @@ class RuntimeController:
 
     async def get_run_network(self, run_id: str, limit: int = 500) -> list[BrowserNetworkEntry]:
         return await self.run_store.get_network(run_id, limit=limit)
+
+    def get_benchmark_scenarios(
+        self,
+        fixture_base_url: str,
+        *,
+        agent_id: str = "benchmark-agent",
+        delegate_agent_id: str = "analysis-agent",
+    ) -> list[BenchmarkScenario]:
+        return self.benchmarks.default_fixture_scenarios(
+            fixture_base_url,
+            agent_id=agent_id,
+            delegate_agent_id=delegate_agent_id,
+        )
+
+    async def score_run_benchmark(
+        self,
+        run_id: str,
+        *,
+        scenarios: list[BenchmarkScenario] | None = None,
+    ) -> BenchmarkRunScore:
+        scenario_map = {scenario.scenario_id: scenario for scenario in scenarios or []}
+        return await self.benchmarks.score_run(run_id, scenario_map=scenario_map)
+
+    async def build_benchmark_report(
+        self,
+        run_ids: list[str],
+        *,
+        suite_name: str = "synapse-fixture-benchmarks",
+        fixture_base_url: str | None = None,
+        scenarios: list[BenchmarkScenario] | None = None,
+    ) -> BenchmarkReport:
+        return await self.benchmarks.build_report(
+            run_ids,
+            suite_name=suite_name,
+            fixture_base_url=fixture_base_url,
+            scenarios=scenarios,
+        )
 
     async def get_run_checkpoints(self, run_id: str) -> list[RuntimeCheckpoint]:
         return await self.checkpoint_service.list_checkpoints(run_id=run_id)

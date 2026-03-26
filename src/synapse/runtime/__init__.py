@@ -6,6 +6,7 @@ from synapse.runtime.control_plane import ControlPlane
 from synapse.runtime.event_bus import EventBus
 from synapse.runtime.browser_service import BrowserService
 from synapse.runtime.browser_workers import BrowserWorkerPool
+from synapse.runtime.benchmarking import BenchmarkSuite
 from synapse.runtime.budget_service import BudgetService
 from synapse.runtime.checkpoint_service import CheckpointService
 from synapse.runtime.execution_plane import ExecutionPlaneRuntime
@@ -26,6 +27,7 @@ __all__ = [
     "AnthropicProvider",
     "BrowserService",
     "BudgetService",
+    "BenchmarkSuite",
     "CheckpointService",
     "CompressionProvider",
     "ControlPlane",

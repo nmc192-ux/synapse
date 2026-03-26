@@ -186,6 +186,29 @@ Fixture docs:
 
 - [`/Users/jahanzebhussain/Synapse/docs/fixture-web.md`](/Users/jahanzebhussain/Synapse/docs/fixture-web.md)
 
+## Benchmark Suite
+
+Synapse includes a benchmark scenario catalog and run-scoped scoring layer in
+[`/Users/jahanzebhussain/Synapse/src/synapse/runtime/benchmarking.py`](/Users/jahanzebhussain/Synapse/src/synapse/runtime/benchmarking.py).
+
+The default fixture benchmark suite covers:
+
+- extraction
+- form completion
+- SPA navigation
+- popups
+- session continuation
+- A2A delegated browsing tasks
+
+Scoring aggregates:
+
+- success and failure
+- latency
+- token usage
+- compression savings
+- retries
+- operator intervention
+
 ## Task Execution API
 
 Synapse now includes a PostgreSQL-backed task manager for task creation, claiming,

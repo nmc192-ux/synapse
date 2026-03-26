@@ -138,6 +138,19 @@ export const initialState: DashboardState = {
       ],
     },
   ],
+  interventions: [
+    {
+      id: "intervention-1",
+      runId: "run-301",
+      projectId: "development",
+      reason: "Sensitive upload requires approval",
+      state: "pending",
+      category: "upload",
+      contextPreview: "Run run-301 is paused before uploading a file on behalf of codex-example.",
+      createdAt: new Date().toISOString(),
+      resolvedAt: null,
+    },
+  ],
   page: {
     url: "https://example.com",
     title: "Example Domain",

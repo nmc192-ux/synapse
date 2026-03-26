@@ -175,8 +175,8 @@ class TaskRuntime:
             await self.scheduler.release_run(run.run_id)
         return final_result
 
-    async def resume_task(self, checkpoint_id: str) -> TaskResult:
-        checkpoint, request = await self.checkpoint_service.resume_context(checkpoint_id)
+    async def resume_task(self, checkpoint_id: str, *, operator_context: dict[str, object] | None = None) -> TaskResult:
+        checkpoint, request = await self.checkpoint_service.resume_context(checkpoint_id, operator_context=operator_context)
         result = await self.execute_task(request)
         await self.checkpoint_service.emit_resumed(checkpoint, result)
         return result
@@ -205,13 +205,16 @@ class TaskRuntime:
             run = await self.run_store.update_status(run_id, RunStatus.PAUSED, checkpoint_id=checkpoint.checkpoint_id)
         return run
 
-    async def resume_run(self, run_id: str) -> TaskResult:
+    async def resume_run(self, run_id: str, *, operator_context: dict[str, object] | None = None) -> TaskResult:
         run = await self.run_store.get(run_id)
         if run.checkpoint_id is None:
             raise KeyError(f"Run has no checkpoint to resume: {run_id}")
         await self.run_store.update_status(run_id, RunStatus.RESUMED, current_phase="resumed")
-        checkpoint, request = await self.checkpoint_service.resume_context(run.checkpoint_id)
-        request = request.model_copy(update={"run_id": run_id})
+        checkpoint, request = await self.checkpoint_service.resume_context(run.checkpoint_id, operator_context=operator_context)
+        constraints = dict(request.constraints)
+        if operator_context:
+            constraints["operator_context"] = operator_context
+        request = request.model_copy(update={"run_id": run_id, "constraints": constraints})
         result = await self.execute_task(request)
         await self.checkpoint_service.emit_resumed(checkpoint, result)
         return result

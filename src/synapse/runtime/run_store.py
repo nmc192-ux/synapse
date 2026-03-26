@@ -7,6 +7,8 @@ from synapse.models.run import RunGraph, RunGraphEdge, RunGraphNode, RunState, R
 from synapse.models.runtime_event import RunReplayView, RunTimeline, RunTimelineEntry, infer_event_phase
 from synapse.models.runtime_state import (
     BrowserNetworkEntry,
+    OperatorInterventionRecord,
+    OperatorInterventionState,
     BrowserTaskRequestRecord,
     BrowserTaskResultRecord,
     BrowserTraceEntry,
@@ -125,26 +127,114 @@ class RunStore:
         self,
         run_id: str,
         *,
-        intervention: dict[str, object],
+        intervention: dict[str, object] | OperatorInterventionRecord,
         status: RunStatus = RunStatus.WAITING_FOR_OPERATOR,
         checkpoint_id: str | None = None,
     ) -> RunState:
         run = await self.get(run_id)
+        intervention_record = (
+            intervention
+            if isinstance(intervention, OperatorInterventionRecord)
+            else OperatorInterventionRecord.model_validate(
+                {
+                    "run_id": run_id,
+                    "project_id": run.project_id,
+                    "agent_id": run.agent_id,
+                    "task_id": run.task_id,
+                    **intervention,
+                }
+            )
+        )
+        await self.save_intervention(intervention_record)
         history = run.metadata.get("operator_intervention_history")
         if not isinstance(history, list):
             history = []
-        history = [*history, intervention]
+        metadata_payload = intervention_record.model_dump(mode="json")
+        payload_ui = intervention_record.payload.get("ui")
+        if isinstance(payload_ui, dict):
+            metadata_payload["ui"] = payload_ui
+        history = [*history, metadata_payload]
         metadata = {
-            "operator_intervention": intervention,
+            "operator_intervention": metadata_payload,
             "operator_intervention_history": history,
+            "operator_intervention_id": intervention_record.intervention_id,
         }
         return await self.update_status(
             run_id,
             status,
-            checkpoint_id=checkpoint_id,
+            checkpoint_id=checkpoint_id or intervention_record.checkpoint_id,
             current_phase="operator_intervention",
             metadata=metadata,
         )
+
+    async def save_intervention(self, intervention: OperatorInterventionRecord) -> OperatorInterventionRecord:
+        if self.state_store is not None:
+            await self.state_store.store_intervention(
+                intervention.intervention_id,
+                intervention.model_dump(mode="json"),
+            )
+        return intervention
+
+    async def get_intervention(self, intervention_id: str) -> OperatorInterventionRecord:
+        if self.state_store is not None:
+            payload = await self.state_store.get_intervention(intervention_id)
+            if payload is not None:
+                return OperatorInterventionRecord.model_validate(payload)
+        for run in self._in_memory_runs.values():
+            payload = run.metadata.get("operator_intervention")
+            if isinstance(payload, dict) and payload.get("intervention_id") == intervention_id:
+                return OperatorInterventionRecord.model_validate(payload)
+        raise KeyError(f"Intervention not found: {intervention_id}")
+
+    async def list_interventions(
+        self,
+        *,
+        project_id: str | None = None,
+        run_id: str | None = None,
+        state: OperatorInterventionState | str | None = None,
+    ) -> list[OperatorInterventionRecord]:
+        state_value = state.value if isinstance(state, OperatorInterventionState) else state
+        if self.state_store is not None:
+            rows = await self.state_store.list_interventions(project_id=project_id, run_id=run_id, state=state_value)
+            return [OperatorInterventionRecord.model_validate(row) for row in rows]
+        interventions: list[OperatorInterventionRecord] = []
+        for run in self._in_memory_runs.values():
+            payload = run.metadata.get("operator_intervention")
+            if not isinstance(payload, dict):
+                continue
+            record = OperatorInterventionRecord.model_validate(payload)
+            if project_id is not None and record.project_id != project_id:
+                continue
+            if run_id is not None and record.run_id != run_id:
+                continue
+            if state_value is not None and record.state.value != state_value:
+                continue
+            interventions.append(record)
+        interventions.sort(key=lambda item: item.created_at, reverse=True)
+        return interventions
+
+    async def update_intervention(
+        self,
+        intervention_id: str,
+        *,
+        state: OperatorInterventionState | None = None,
+        payload: dict[str, object] | None = None,
+        resolved: bool = False,
+    ) -> OperatorInterventionRecord:
+        intervention = await self.get_intervention(intervention_id)
+        updates: dict[str, object] = {}
+        if state is not None:
+            updates["state"] = state
+        if payload:
+            updates["payload"] = {**intervention.payload, **payload}
+        if resolved:
+            updates["resolved_at"] = datetime.now(timezone.utc)
+        intervention = intervention.model_copy(update=updates)
+        return await self.save_intervention(intervention)
+
+    async def latest_intervention_for_run(self, run_id: str) -> OperatorInterventionRecord | None:
+        interventions = await self.list_interventions(run_id=run_id)
+        return interventions[0] if interventions else None
 
     async def save_lease(self, lease: RunLeaseRecord) -> RunLeaseRecord:
         if self.state_store is not None:

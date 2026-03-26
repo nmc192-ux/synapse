@@ -90,7 +90,12 @@ class CheckpointService:
             return
         await self.state_store.delete_checkpoint(checkpoint_id)
 
-    async def resume_context(self, checkpoint_id: str) -> tuple[RuntimeCheckpoint, TaskRequest]:
+    async def resume_context(
+        self,
+        checkpoint_id: str,
+        *,
+        operator_context: dict[str, object] | None = None,
+    ) -> tuple[RuntimeCheckpoint, TaskRequest]:
         checkpoint = await self.get_checkpoint(checkpoint_id)
         if checkpoint.browser_session_reference:
             await self.browser_service.restore_session_state(
@@ -105,6 +110,8 @@ class CheckpointService:
             constraints["action_plan"] = checkpoint.pending_actions
         if checkpoint.planner_state:
             constraints["planner_state"] = checkpoint.planner_state
+        if operator_context:
+            constraints["operator_context"] = operator_context
 
         request = TaskRequest(
             task_id=checkpoint.task_id,

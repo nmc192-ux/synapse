@@ -92,6 +92,18 @@ export type AgentBudgetItem = {
   toolCostEstimate: number;
 };
 
+export type InterventionItem = {
+  id: string;
+  runId: string;
+  projectId?: string | null;
+  reason: string;
+  state: string;
+  category?: string;
+  contextPreview: string;
+  createdAt?: string;
+  resolvedAt?: string | null;
+};
+
 export type DashboardState = {
   events: SynapseEvent[];
   activity: ActivityItem[];
@@ -101,5 +113,6 @@ export type DashboardState = {
   messages: MessageItem[];
   tasks: TaskItem[];
   budgets: AgentBudgetItem[];
+  interventions: InterventionItem[];
   page: PageState;
 };

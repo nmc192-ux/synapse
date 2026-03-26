@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { useSynapseFeed } from "@/hooks/use-synapse-feed";
 
 function Panel({
@@ -29,6 +29,7 @@ function Panel({
 
 export function Dashboard() {
   const state = useSynapseFeed();
+  const [interventionInputs, setInterventionInputs] = useState<Record<string, string>>({});
   const liveEvents = state.events.length;
   const activeAgents = new Set([
     ...state.activity.map((item) => item.label),
@@ -189,6 +190,64 @@ export function Dashboard() {
                     <p className="mono">
                       {task.id} · {task.assignedAgent}
                     </p>
+                  </article>
+                ))}
+              </div>
+            </Panel>
+
+            <Panel title="Operator Queue" badge={`${state.interventions.length} pending`}>
+              <div className="task-list">
+                {state.interventions.map((intervention) => (
+                  <article className={`task-card task-${intervention.state}`.trim()} key={intervention.id}>
+                    <span>{intervention.state}</span>
+                    <strong>{intervention.reason}</strong>
+                    <p>{intervention.contextPreview}</p>
+                    <p className="mono">
+                      {intervention.runId}
+                      {intervention.category ? ` · ${intervention.category}` : ""}
+                    </p>
+                    <div style={{ display: "grid", gap: 8 }}>
+                      <input
+                        value={interventionInputs[intervention.id] ?? ""}
+                        onChange={(event) =>
+                          setInterventionInputs((current) => ({
+                            ...current,
+                            [intervention.id]: event.target.value,
+                          }))
+                        }
+                        placeholder="Operator input / hint"
+                        style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.12)" }}
+                      />
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        <button
+                          type="button"
+                          onClick={() => state.approveIntervention(intervention.id)}
+                        >
+                          Approve
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            state.rejectIntervention(
+                              intervention.id,
+                              interventionInputs[intervention.id] || "Operator rejected run",
+                            )
+                          }
+                        >
+                          Reject
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            state.provideInterventionInput(intervention.id, {
+                              note: interventionInputs[intervention.id] || "Operator input provided",
+                            })
+                          }
+                        >
+                          Provide Input
+                        </button>
+                      </div>
+                    </div>
                   </article>
                 ))}
               </div>

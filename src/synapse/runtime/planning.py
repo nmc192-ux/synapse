@@ -132,6 +132,7 @@ class NavigationPlanner:
             }
             for action in completed_actions
         ]
+        operator_context = task.constraints.get("operator_context", {})
         raw_context = {
             "goal": task.goal,
             "page_state": page_context,
@@ -140,6 +141,7 @@ class NavigationPlanner:
             "recent_memory": recent_memories,
             "memory_summary": memory_summary or "No memory available.",
             "recent_runtime_events": recent_events,
+            "operator_context": operator_context,
             "previous_actions": previous_actions,
             "constraints": task.constraints,
         }
@@ -159,6 +161,10 @@ class NavigationPlanner:
             "recent_runtime_events": await self.compression.summarize_events(
                 recent_events,
                 context={"task_id": task.task_id, "field": "events", "channel": "planner"},
+            ),
+            "operator_context": await self.compression.compress_json(
+                operator_context if isinstance(operator_context, dict) else {"value": operator_context},
+                context={"task_id": task.task_id, "field": "operator_context", "channel": "planner"},
             ),
             "previous_actions": await self.compression.compress_json(
                 {"actions": previous_actions},

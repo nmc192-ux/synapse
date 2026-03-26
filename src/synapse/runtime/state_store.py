@@ -169,6 +169,23 @@ class RuntimeStateStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def store_intervention(self, intervention_id: str, intervention_data: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_intervention(self, intervention_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def list_interventions(
+        self,
+        project_id: str | None = None,
+        run_id: str | None = None,
+        state: str | None = None,
+    ) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
     async def store_runtime_event(self, event_id: str, event_data: dict[str, Any]) -> None:
         raise NotImplementedError
 
@@ -246,6 +263,7 @@ class InMemoryRuntimeStateStore(RuntimeStateStore):
         self._workers: dict[str, dict[str, Any]] = {}
         self._worker_requests: dict[tuple[str | None, str], dict[str, Any]] = {}
         self._worker_results: dict[tuple[str | None, str], dict[str, Any]] = {}
+        self._interventions: dict[str, dict[str, Any]] = {}
         self._organizations: dict[str, dict[str, Any]] = {}
         self._projects: dict[str, dict[str, Any]] = {}
         self._users: dict[str, dict[str, Any]] = {}
@@ -413,6 +431,29 @@ class InMemoryRuntimeStateStore(RuntimeStateStore):
     async def get_worker_result(self, run_id: str | None, action_id: str) -> dict[str, Any] | None:
         record = self._worker_results.get((run_id, action_id))
         return dict(record) if record is not None else None
+
+    async def store_intervention(self, intervention_id: str, intervention_data: dict[str, Any]) -> None:
+        self._interventions[intervention_id] = dict(intervention_data)
+
+    async def get_intervention(self, intervention_id: str) -> dict[str, Any] | None:
+        record = self._interventions.get(intervention_id)
+        return dict(record) if record is not None else None
+
+    async def list_interventions(
+        self,
+        project_id: str | None = None,
+        run_id: str | None = None,
+        state: str | None = None,
+    ) -> list[dict[str, Any]]:
+        rows = [dict(value) for value in self._interventions.values()]
+        if project_id is not None:
+            rows = [row for row in rows if row.get("project_id") == project_id]
+        if run_id is not None:
+            rows = [row for row in rows if row.get("run_id") == run_id]
+        if state is not None:
+            rows = [row for row in rows if row.get("state") == state]
+        rows.sort(key=lambda row: str(row.get("created_at", "")), reverse=True)
+        return rows
 
     async def store_runtime_event(self, event_id: str, event_data: dict[str, Any]) -> None:
         self._events[event_id] = dict(event_data)
@@ -779,6 +820,54 @@ class RedisRuntimeStateStore(RuntimeStateStore):
         payload = await redis.get(self._worker_result_key(run_id, action_id))
         return self._decode(payload)
 
+    async def store_intervention(self, intervention_id: str, intervention_data: dict[str, Any]) -> None:
+        redis = self._require_redis()
+        previous = await self.get_intervention(intervention_id)
+        await redis.set(self._intervention_key(intervention_id), json.dumps(intervention_data))
+        await redis.sadd("synapse:interventions:index", intervention_id)
+        if previous is not None:
+            if isinstance(previous.get("project_id"), str):
+                await redis.srem(f"synapse:interventions:project:{previous['project_id']}", intervention_id)
+            if isinstance(previous.get("run_id"), str):
+                await redis.srem(f"synapse:interventions:run:{previous['run_id']}", intervention_id)
+            if isinstance(previous.get("state"), str):
+                await redis.srem(f"synapse:interventions:state:{previous['state']}", intervention_id)
+        if isinstance(intervention_data.get("project_id"), str):
+            await redis.sadd(f"synapse:interventions:project:{intervention_data['project_id']}", intervention_id)
+        if isinstance(intervention_data.get("run_id"), str):
+            await redis.sadd(f"synapse:interventions:run:{intervention_data['run_id']}", intervention_id)
+        if isinstance(intervention_data.get("state"), str):
+            await redis.sadd(f"synapse:interventions:state:{intervention_data['state']}", intervention_id)
+
+    async def get_intervention(self, intervention_id: str) -> dict[str, Any] | None:
+        redis = self._require_redis()
+        payload = await redis.get(self._intervention_key(intervention_id))
+        return self._decode(payload)
+
+    async def list_interventions(
+        self,
+        project_id: str | None = None,
+        run_id: str | None = None,
+        state: str | None = None,
+    ) -> list[dict[str, Any]]:
+        redis = self._require_redis()
+        if project_id is not None:
+            ids = await redis.smembers(f"synapse:interventions:project:{project_id}")
+        elif run_id is not None:
+            ids = await redis.smembers(f"synapse:interventions:run:{run_id}")
+        elif state is not None:
+            ids = await redis.smembers(f"synapse:interventions:state:{state}")
+        else:
+            ids = await redis.smembers("synapse:interventions:index")
+        keys = [self._intervention_key(intervention_id) for intervention_id in ids]
+        rows = await self._mget_json(keys)
+        if run_id is not None:
+            rows = [row for row in rows if row.get("run_id") == run_id]
+        if state is not None:
+            rows = [row for row in rows if row.get("state") == state]
+        rows.sort(key=lambda row: str(row.get("created_at", "")), reverse=True)
+        return rows
+
     async def store_runtime_event(self, event_id: str, event_data: dict[str, Any]) -> None:
         redis = self._require_redis()
         await redis.set(self._event_key(event_id), json.dumps(event_data))
@@ -962,6 +1051,10 @@ class RedisRuntimeStateStore(RuntimeStateStore):
     def _worker_result_index_key(run_id: str | None) -> str:
         run_part = run_id or "global"
         return f"synapse:worker-results:index:{run_part}"
+
+    @staticmethod
+    def _intervention_key(intervention_id: str) -> str:
+        return f"synapse:interventions:{intervention_id}"
 
     @staticmethod
     def _event_key(event_id: str) -> str:

@@ -5,6 +5,7 @@ import { initialState } from "@/lib/mock-data";
 import {
   ActionItem,
   ActivityItem,
+  InterventionItem,
   DashboardState,
   MemoryItem,
   MessageItem,
@@ -17,7 +18,14 @@ import {
 const defaultSocketUrl =
   process.env.NEXT_PUBLIC_SYNAPSE_WS_URL ?? "ws://127.0.0.1:8000/api/ws";
 
-export function useSynapseFeed(): DashboardState {
+type DashboardFeed = DashboardState & {
+  refreshInterventions: () => Promise<void>;
+  approveIntervention: (interventionId: string) => Promise<void>;
+  rejectIntervention: (interventionId: string, reason?: string) => Promise<void>;
+  provideInterventionInput: (interventionId: string, payload: Record<string, unknown>) => Promise<void>;
+};
+
+export function useSynapseFeed(): DashboardFeed {
   const [state, setState] = useState<DashboardState>(initialState);
 
   useEffect(() => {
@@ -37,7 +45,56 @@ export function useSynapseFeed(): DashboardState {
     };
   }, []);
 
-  return state;
+  useEffect(() => {
+    void refreshInterventions();
+  }, []);
+
+  async function refreshInterventions() {
+    try {
+      const response = await fetch("/api/interventions");
+      if (!response.ok) {
+        return;
+      }
+      const interventions = (await response.json()) as Record<string, unknown>[];
+      setState((current) => ({
+        ...current,
+        interventions: interventions.map(toInterventionItem).filter(Boolean) as InterventionItem[],
+      }));
+    } catch {
+      return;
+    }
+  }
+
+  async function approveIntervention(interventionId: string) {
+    await fetch(`/api/interventions/${interventionId}/approve`, { method: "POST" });
+    await refreshInterventions();
+  }
+
+  async function rejectIntervention(interventionId: string, reason?: string) {
+    await fetch(`/api/interventions/${interventionId}/reject`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(reason ? { reason } : {}),
+    });
+    await refreshInterventions();
+  }
+
+  async function provideInterventionInput(interventionId: string, payload: Record<string, unknown>) {
+    await fetch(`/api/interventions/${interventionId}/provide_input`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    await refreshInterventions();
+  }
+
+  return {
+    ...state,
+    refreshInterventions,
+    approveIntervention,
+    rejectIntervention,
+    provideInterventionInput,
+  };
 }
 
 function applyEvent(current: DashboardState, event: SynapseEvent): DashboardState {
@@ -49,6 +106,7 @@ function applyEvent(current: DashboardState, event: SynapseEvent): DashboardStat
   const memory = buildMemory(event, payload);
   const task = buildTask(event, payload);
   const budget = buildBudget(event, payload);
+  const intervention = buildIntervention(event, payload);
 
   return {
     ...current,
@@ -60,6 +118,7 @@ function applyEvent(current: DashboardState, event: SynapseEvent): DashboardStat
     messages: message ? [message, ...current.messages].slice(0, 8) : current.messages,
     tasks: task ? mergeTask(current.tasks, task).slice(0, 8) : current.tasks,
     budgets: budget ? mergeBudget(current.budgets, budget).slice(0, 6) : current.budgets,
+    interventions: intervention ? mergeIntervention(current.interventions, intervention).slice(0, 8) : current.interventions,
     page: derivePage(current.page, event, payload),
   };
 }
@@ -222,6 +281,23 @@ function buildBudget(
   };
 }
 
+function buildIntervention(
+  event: SynapseEvent,
+  payload: Record<string, unknown>,
+): InterventionItem | null {
+  if (
+    event.event_type !== "intervention.queued" &&
+    event.event_type !== "intervention.updated" &&
+    event.event_type !== "intervention.resolved"
+  ) {
+    return null;
+  }
+  const record = (payload.intervention && typeof payload.intervention === "object"
+    ? payload.intervention
+    : payload) as Record<string, unknown>;
+  return toInterventionItem(record);
+}
+
 function derivePage(
   current: DashboardState["page"],
   event: SynapseEvent,
@@ -355,6 +431,12 @@ function summarizeEvent(eventType: string, payload: Record<string, unknown>): st
       return `Navigation trace recorded for ${stringify(payload.url) ?? "current page"}.`;
     case "browser.popup.opened":
       return `Popup detected for ${stringify(payload.popup_url) ?? "new window"}.`;
+    case "intervention.queued":
+      return stringify(payload.reason) ?? "Run is waiting for operator review.";
+    case "intervention.updated":
+      return "Operator input was attached to a waiting run.";
+    case "intervention.resolved":
+      return "Operator resolved a waiting run.";
     case "browser.error":
       return stringify(payload.error) ?? "Browser interaction error captured.";
     default:
@@ -400,6 +482,11 @@ function mergeBudget(current: AgentBudgetItem[], next: AgentBudgetItem): AgentBu
   return [next, ...remaining];
 }
 
+function mergeIntervention(current: InterventionItem[], next: InterventionItem): InterventionItem[] {
+  const remaining = current.filter((item) => item.id !== next.id);
+  return [next, ...remaining];
+}
+
 function budgetMetric(label: string, used: unknown, limit: unknown) {
   const resolvedUsed = Number(used ?? 0);
   const resolvedLimit = Number(limit ?? 0);
@@ -417,4 +504,32 @@ function toStringArray(value: unknown): string[] {
     return [];
   }
   return value.filter((item): item is string => typeof item === "string");
+}
+
+function toInterventionItem(value: Record<string, unknown> | null | undefined): InterventionItem | null {
+  if (!value) {
+    return null;
+  }
+  const payload = value.payload && typeof value.payload === "object" ? (value.payload as Record<string, unknown>) : {};
+  const ui = payload.ui && typeof payload.ui === "object" ? (payload.ui as Record<string, unknown>) : {};
+  const runContext = ui.run_context && typeof ui.run_context === "object" ? (ui.run_context as Record<string, unknown>) : {};
+  const interventionId = stringify(value.intervention_id);
+  const runId = stringify(value.run_id);
+  if (!interventionId || !runId) {
+    return null;
+  }
+  return {
+    id: interventionId,
+    runId,
+    projectId: stringify(value.project_id),
+    reason: stringify(value.reason) ?? stringify(ui.reason) ?? "Operator review required",
+    state: stringify(value.state) ?? "pending",
+    category: stringify(payload.category) ?? undefined,
+    contextPreview:
+      stringify(runContext.goal) ??
+      stringify(payload.reason) ??
+      `Run ${runId} requires operator review.`,
+    createdAt: stringify(value.created_at) ?? undefined,
+    resolvedAt: stringify(value.resolved_at),
+  };
 }

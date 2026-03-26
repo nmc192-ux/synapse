@@ -119,6 +119,21 @@ class _StubAdapter:
         )
 
 
+class _CapturingAdapter:
+    def __init__(self) -> None:
+        self.requests: list[TaskRequest] = []
+
+    async def execute_task(self, request: TaskRequest) -> TaskResult:
+        self.requests.append(request)
+        return TaskResult(
+            task_id=request.task_id,
+            run_id=request.run_id,
+            status=TaskStatus.COMPLETED,
+            message="done",
+            artifacts={"constraints": request.constraints},
+        )
+
+
 def test_run_store_crud() -> None:
     async def scenario() -> None:
         store = InMemoryRuntimeStateStore()
@@ -433,7 +448,8 @@ def test_operator_intervention_transitions_run_and_resume() -> None:
         agents = AgentRegistry(state_store=store)
         agent = agents.register(AgentDefinition(agent_id="agent-1", kind=AgentKind.CUSTOM, name="Agent One"))
         await agents.save_to_store(agent)
-        agents.build_adapter = lambda *args, **kwargs: _StubAdapter()  # type: ignore[method-assign]
+        adapter = _CapturingAdapter()
+        agents.build_adapter = lambda *args, **kwargs: adapter  # type: ignore[method-assign]
 
         orchestrator = RuntimeOrchestrator(
             browser=_StubBrowserService(),
@@ -470,6 +486,9 @@ def test_operator_intervention_transitions_run_and_resume() -> None:
         assert waiting.status == RunStatus.WAITING_FOR_OPERATOR
         assert waiting.checkpoint_id is not None
         assert waiting.metadata["operator_intervention"]["ui"]["operator_required"] is True
+        interventions = await orchestrator.list_interventions(run_id=run.run_id)
+        assert len(interventions) == 1
+        assert interventions[0].state.value == "pending"
 
         with_input = await orchestrator.provide_run_input(
             run.run_id,
@@ -484,6 +503,10 @@ def test_operator_intervention_transitions_run_and_resume() -> None:
         completed = await orchestrator.get_run(run.run_id)
         assert completed.status == RunStatus.COMPLETED
         assert completed.metadata["operator_decision"] == "approved"
+        assert adapter.requests[-1].constraints["operator_context"]["input"]["note"] == "approved after review"
+        updated_intervention = await orchestrator.get_intervention(interventions[0].intervention_id)
+        assert updated_intervention.state.value == "approved"
+        assert updated_intervention.resolved_at is not None
 
     asyncio.run(scenario())
 
@@ -543,12 +566,20 @@ def test_operator_intervention_api_endpoints() -> None:
     headers = {"Authorization": f"Bearer {token}"}
 
     run_id = client.get("/api/runs", headers=headers).json()[0]["run_id"]
+    interventions = client.get("/api/interventions", headers=headers)
+    assert interventions.status_code == 200
+    assert len(interventions.json()) == 1
+    intervention_id = interventions.json()[0]["intervention_id"]
+
+    intervention_detail = client.get(f"/api/interventions/{intervention_id}", headers=headers)
+    assert intervention_detail.status_code == 200
+    assert intervention_detail.json()["run_id"] == run_id
 
     provide = client.post(f"/api/runs/{run_id}/provide_input", json={"captcha_note": "operator saw challenge"}, headers=headers)
     assert provide.status_code == 200
     assert provide.json()["metadata"]["operator_input"]["input"]["captcha_note"] == "operator saw challenge"
 
-    reject = client.post(f"/api/runs/{run_id}/reject", json={"reason": "Do not continue"}, headers=headers)
+    reject = client.post(f"/api/interventions/{intervention_id}/reject", json={"reason": "Do not continue"}, headers=headers)
     assert reject.status_code == 200
     assert reject.json()["status"] == "cancelled"
     assert reject.json()["metadata"]["operator_decision"] == "rejected"

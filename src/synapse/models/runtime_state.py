@@ -163,6 +163,29 @@ class RuntimeEventRecord(BaseModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class OperatorInterventionState(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    INPUT_PROVIDED = "input_provided"
+    EXPIRED = "expired"
+
+
+class OperatorInterventionRecord(BaseModel):
+    intervention_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    run_id: str
+    project_id: str | None = None
+    organization_id: str | None = None
+    agent_id: str | None = None
+    task_id: str | None = None
+    checkpoint_id: str | None = None
+    reason: str
+    state: OperatorInterventionState = OperatorInterventionState.PENDING
+    payload: dict[str, object] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    resolved_at: datetime | None = None
+
+
 class BrowserTraceEntry(BaseModel):
     event_id: str
     run_id: str

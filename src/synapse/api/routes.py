@@ -53,8 +53,15 @@ from synapse.models.platform import (
     UserCreateRequest,
 )
 from synapse.models.run import RunGraph, RunState
-from synapse.models.runtime_state import BrowserNetworkEntry, BrowserSessionState, BrowserTraceEntry, ConnectionState, RuntimeCheckpoint
-from synapse.models.runtime_state import BrowserWorkerState
+from synapse.models.runtime_state import (
+    BrowserNetworkEntry,
+    BrowserSessionState,
+    BrowserTraceEntry,
+    BrowserWorkerState,
+    ConnectionState,
+    OperatorInterventionRecord,
+    RuntimeCheckpoint,
+)
 from synapse.models.task import (
     ExtractionRequest,
     NavigationRequest,
@@ -157,6 +164,16 @@ async def _require_checkpoint_project(
     checkpoint = await orchestrator.get_checkpoint(checkpoint_id)
     _ensure_resource_project(principal, checkpoint.project_id, "Checkpoint")
     return checkpoint
+
+
+async def _require_intervention_project(
+    principal: AuthPrincipal,
+    orchestrator: RuntimeOrchestrator,
+    intervention_id: str,
+) -> OperatorInterventionRecord:
+    intervention = await orchestrator.get_intervention(intervention_id)
+    _ensure_resource_project(principal, intervention.project_id, "Intervention")
+    return intervention
 
 
 async def _require_connection_project(
@@ -1168,6 +1185,29 @@ async def list_runs(
     return [run for run in runs if run.project_id == _principal.project_id]
 
 
+@router.get("/interventions", response_model=list[OperatorInterventionRecord])
+async def list_interventions(
+    principal: TasksReadPrincipal,
+    run_id: str | None = None,
+    state: str | None = None,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> list[OperatorInterventionRecord]:
+    interventions = await orchestrator.list_interventions(project_id=principal.project_id, run_id=run_id, state=state)
+    return [intervention for intervention in interventions if intervention.project_id == principal.project_id]
+
+
+@router.get("/interventions/{intervention_id}", response_model=OperatorInterventionRecord)
+async def get_intervention(
+    intervention_id: str,
+    principal: TasksReadPrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> OperatorInterventionRecord:
+    try:
+        return await _require_intervention_project(principal, orchestrator, intervention_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.get("/runs/{run_id}", response_model=RunState)
 async def get_run(
     run_id: str,
@@ -1315,6 +1355,19 @@ async def approve_run(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.post("/interventions/{intervention_id}/approve")
+async def approve_intervention(
+    intervention_id: str,
+    principal: TasksWritePrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+):
+    try:
+        await _require_intervention_project(principal, orchestrator, intervention_id)
+        return await orchestrator.approve_intervention(intervention_id, operator_id=principal.subject)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.post("/runs/{run_id}/reject", response_model=RunState)
 async def reject_run(
     run_id: str,
@@ -1332,16 +1385,51 @@ async def reject_run(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.post("/interventions/{intervention_id}/reject", response_model=RunState)
+async def reject_intervention(
+    intervention_id: str,
+    principal: TasksWritePrincipal,
+    payload: dict[str, object] | None = None,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> RunState:
+    try:
+        await _require_intervention_project(principal, orchestrator, intervention_id)
+        reason = None
+        if isinstance(payload, dict) and isinstance(payload.get("reason"), str):
+            reason = str(payload["reason"])
+        return await orchestrator.reject_intervention(intervention_id, operator_id=principal.subject, reason=reason)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.post("/runs/{run_id}/provide_input", response_model=RunState)
 async def provide_run_input(
     run_id: str,
-    payload: dict[str, object],
     principal: TasksWritePrincipal,
+    payload: dict[str, object],
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> RunState:
     try:
         await _require_run_project(principal, orchestrator, run_id)
         return await orchestrator.provide_run_input(run_id, operator_id=principal.subject, input_payload=payload)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/interventions/{intervention_id}/provide_input", response_model=RunState)
+async def provide_intervention_input(
+    intervention_id: str,
+    principal: TasksWritePrincipal,
+    payload: dict[str, object],
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> RunState:
+    try:
+        await _require_intervention_project(principal, orchestrator, intervention_id)
+        return await orchestrator.provide_intervention_input(
+            intervention_id,
+            operator_id=principal.subject,
+            input_payload=payload,
+        )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

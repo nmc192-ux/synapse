@@ -22,6 +22,7 @@ from synapse.runtime.run_store import RunStore
 from synapse.runtime.state_store import InMemoryRuntimeStateStore
 from synapse.runtime.task_runtime import TaskRuntime
 from synapse.security.auth import Authenticator
+from synapse.security.policies import PrincipalType, Scope
 from synapse.transports.websocket_manager import WebSocketManager
 
 
@@ -70,6 +71,27 @@ class _StubTaskManager:
 class _StubSafety:
     def validate_task(self, request):
         return None
+
+    def build_operator_intervention_payload(
+        self,
+        *,
+        event_type: str,
+        run_id: str | None,
+        agent_id: str | None,
+        task_id: str | None,
+        payload: dict[str, object] | None = None,
+        source: str,
+    ) -> dict[str, object]:
+        return {
+            "event_type": event_type,
+            "run_id": run_id,
+            "agent_id": agent_id,
+            "task_id": task_id,
+            "source": source,
+            "reason": (payload or {}).get("reason", event_type),
+            "category": (payload or {}).get("challenge_type", event_type),
+            "details": payload or {},
+        }
 
 
 class _StubMemoryManager:
@@ -170,7 +192,12 @@ def test_run_api_endpoints() -> None:
             state_store=store,
             llm=None,
         )
-        run = await orchestrator.run_store.create_run(task_id="task-2", agent_id="agent-1", correlation_id="task-2")
+        run = await orchestrator.run_store.create_run(
+            task_id="task-2",
+            agent_id="agent-1",
+            project_id="development",
+            correlation_id="task-2",
+        )
         await orchestrator.event_bus.emit(EventType.TASK_UPDATED, run_id=run.run_id, agent_id="agent-1", task_id="task-2", payload={"ok": True})
         return orchestrator
 
@@ -178,41 +205,50 @@ def test_run_api_endpoints() -> None:
     app = FastAPI()
     app.include_router(router, prefix="/api")
     app.dependency_overrides[get_orchestrator] = lambda: orchestrator
-    app.dependency_overrides[get_authenticator] = lambda: Authenticator(Settings(auth_required=False))
+    authenticator = Authenticator(Settings(auth_required=True, jwt_secret="test-secret", jwt_issuer="synapse-test", jwt_audience="synapse-test-api"))
+    app.dependency_overrides[get_authenticator] = lambda: authenticator
     client = TestClient(app)
+    token = authenticator.issue_token(
+        subject="operator-1",
+        principal_type=PrincipalType.OPERATOR,
+        scopes=[Scope.TASKS_READ.value, Scope.TASKS_WRITE.value],
+        organization_id="development",
+        project_id="development",
+    )
+    headers = {"Authorization": f"Bearer {token}"}
 
-    list_response = client.get("/api/runs")
+    list_response = client.get("/api/runs", headers=headers)
     assert list_response.status_code == 200
     run_id = list_response.json()[0]["run_id"]
 
-    get_response = client.get(f"/api/runs/{run_id}")
+    get_response = client.get(f"/api/runs/{run_id}", headers=headers)
     assert get_response.status_code == 200
 
-    events_response = client.get(f"/api/runs/{run_id}/events")
+    events_response = client.get(f"/api/runs/{run_id}/events", headers=headers)
     assert events_response.status_code == 200
     assert any(event["run_id"] == run_id for event in events_response.json())
 
-    timeline_response = client.get(f"/api/runs/{run_id}/timeline")
+    timeline_response = client.get(f"/api/runs/{run_id}/timeline", headers=headers)
     assert timeline_response.status_code == 200
     assert timeline_response.json()["run_id"] == run_id
     assert timeline_response.json()["event_count"] >= 1
     assert "task" in timeline_response.json()["phases"]
 
-    replay_response = client.get(f"/api/runs/{run_id}/replay")
+    replay_response = client.get(f"/api/runs/{run_id}/replay", headers=headers)
     assert replay_response.status_code == 200
     assert replay_response.json()["run_id"] == run_id
     assert len(replay_response.json()["timeline"]) >= 1
 
-    graph_response = client.get(f"/api/runs/{run_id}/graph")
+    graph_response = client.get(f"/api/runs/{run_id}/graph", headers=headers)
     assert graph_response.status_code == 200
     assert graph_response.json()["root_run_id"] == run_id
     assert graph_response.json()["nodes"][0]["run_id"] == run_id
 
-    children_response = client.get(f"/api/runs/{run_id}/children")
+    children_response = client.get(f"/api/runs/{run_id}/children", headers=headers)
     assert children_response.status_code == 200
     assert children_response.json() == []
 
-    cancel_response = client.post(f"/api/runs/{run_id}/cancel")
+    cancel_response = client.post(f"/api/runs/{run_id}/cancel", headers=headers)
     assert cancel_response.status_code == 200
     assert cancel_response.json()["status"] == "cancelled"
 
@@ -389,3 +425,130 @@ def test_run_store_builds_multi_agent_graph() -> None:
         assert {node.run_id for node in graph.nodes} == {parent.run_id, child.run_id}
 
     asyncio.run(scenario())
+
+
+def test_operator_intervention_transitions_run_and_resume() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        agents = AgentRegistry(state_store=store)
+        agent = agents.register(AgentDefinition(agent_id="agent-1", kind=AgentKind.CUSTOM, name="Agent One"))
+        await agents.save_to_store(agent)
+        agents.build_adapter = lambda *args, **kwargs: _StubAdapter()  # type: ignore[method-assign]
+
+        orchestrator = RuntimeOrchestrator(
+            browser=_StubBrowserService(),
+            agents=agents,
+            tools=SimpleNamespace(),
+            messages=SimpleNamespace(),
+            a2a=SimpleNamespace(),
+            memory_manager=_StubMemoryManager(),
+            task_manager=_StubTaskManager(),
+            sockets=WebSocketManager(state_store=store),
+            sandbox=SimpleNamespace(),
+            safety=_StubSafety(),
+            budget_manager=AgentBudgetManager(),
+            state_store=store,
+            llm=None,
+        )
+        run = await orchestrator.run_store.create_run(
+            task_id="task-operator",
+            agent_id="agent-1",
+            correlation_id="task-operator",
+            metadata={"goal": "Continue after approval"},
+        )
+
+        await orchestrator.event_bus.emit(
+            EventType.APPROVAL_REQUIRED,
+            run_id=run.run_id,
+            agent_id=run.agent_id,
+            task_id=run.task_id,
+            source="browser_service",
+            payload={"action": "upload", "reason": "Sensitive action", "operator_handoff": True},
+        )
+
+        waiting = await orchestrator.get_run(run.run_id)
+        assert waiting.status == RunStatus.WAITING_FOR_OPERATOR
+        assert waiting.checkpoint_id is not None
+        assert waiting.metadata["operator_intervention"]["ui"]["operator_required"] is True
+
+        with_input = await orchestrator.provide_run_input(
+            run.run_id,
+            operator_id="operator-1",
+            input_payload={"note": "approved after review"},
+        )
+        assert with_input.metadata["operator_input"]["input"]["note"] == "approved after review"
+
+        orchestrator.task_runtime.scheduler = None
+        resumed = await orchestrator.approve_run(run.run_id, operator_id="operator-1")
+        assert resumed.run_id == run.run_id
+        completed = await orchestrator.get_run(run.run_id)
+        assert completed.status == RunStatus.COMPLETED
+        assert completed.metadata["operator_decision"] == "approved"
+
+    asyncio.run(scenario())
+
+
+def test_operator_intervention_api_endpoints() -> None:
+    async def scenario() -> RuntimeOrchestrator:
+        store = InMemoryRuntimeStateStore()
+        agents = AgentRegistry(state_store=store)
+        agent = agents.register(AgentDefinition(agent_id="agent-1", kind=AgentKind.CUSTOM, name="Agent One"))
+        await agents.save_to_store(agent)
+        orchestrator = RuntimeOrchestrator(
+            browser=_StubBrowserService(),
+            agents=agents,
+            tools=SimpleNamespace(),
+            messages=SimpleNamespace(),
+            a2a=SimpleNamespace(),
+            memory_manager=_StubMemoryManager(),
+            task_manager=_StubTaskManager(),
+            sockets=WebSocketManager(state_store=store),
+            sandbox=SimpleNamespace(),
+            safety=_StubSafety(),
+            budget_manager=AgentBudgetManager(),
+            state_store=store,
+            llm=None,
+        )
+        run = await orchestrator.run_store.create_run(
+            task_id="task-api-operator",
+            agent_id="agent-1",
+            project_id="development",
+            correlation_id="task-api-operator",
+            metadata={"goal": "Need operator"},
+        )
+        await orchestrator.event_bus.emit(
+            EventType.BROWSER_CAPTCHA_DETECTED,
+            run_id=run.run_id,
+            agent_id=run.agent_id,
+            task_id=run.task_id,
+            source="browser_service",
+            payload={"reason": "Likely CAPTCHA", "challenge_type": "captcha", "operator_handoff": True},
+        )
+        return orchestrator
+
+    orchestrator = asyncio.run(scenario())
+    app = FastAPI()
+    app.include_router(router, prefix="/api")
+    app.dependency_overrides[get_orchestrator] = lambda: orchestrator
+    authenticator = Authenticator(Settings(auth_required=True, jwt_secret="test-secret", jwt_issuer="synapse-test", jwt_audience="synapse-test-api"))
+    app.dependency_overrides[get_authenticator] = lambda: authenticator
+    client = TestClient(app)
+    token = authenticator.issue_token(
+        subject="operator-1",
+        principal_type=PrincipalType.OPERATOR,
+        scopes=[Scope.TASKS_READ.value, Scope.TASKS_WRITE.value],
+        organization_id="development",
+        project_id="development",
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+
+    run_id = client.get("/api/runs", headers=headers).json()[0]["run_id"]
+
+    provide = client.post(f"/api/runs/{run_id}/provide_input", json={"captcha_note": "operator saw challenge"}, headers=headers)
+    assert provide.status_code == 200
+    assert provide.json()["metadata"]["operator_input"]["input"]["captcha_note"] == "operator saw challenge"
+
+    reject = client.post(f"/api/runs/{run_id}/reject", json={"reason": "Do not continue"}, headers=headers)
+    assert reject.status_code == 200
+    assert reject.json()["status"] == "cancelled"
+    assert reject.json()["metadata"]["operator_decision"] == "rejected"

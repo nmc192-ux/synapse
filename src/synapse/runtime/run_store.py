@@ -113,6 +113,31 @@ class RunStore:
         run.metadata.update(metadata)
         return await self.save(run)
 
+    async def set_operator_intervention(
+        self,
+        run_id: str,
+        *,
+        intervention: dict[str, object],
+        status: RunStatus = RunStatus.WAITING_FOR_OPERATOR,
+        checkpoint_id: str | None = None,
+    ) -> RunState:
+        run = await self.get(run_id)
+        history = run.metadata.get("operator_intervention_history")
+        if not isinstance(history, list):
+            history = []
+        history = [*history, intervention]
+        metadata = {
+            "operator_intervention": intervention,
+            "operator_intervention_history": history,
+        }
+        return await self.update_status(
+            run_id,
+            status,
+            checkpoint_id=checkpoint_id,
+            current_phase="operator_intervention",
+            metadata=metadata,
+        )
+
     async def save_lease(self, lease: RunLeaseRecord) -> RunLeaseRecord:
         if self.state_store is not None:
             await self.state_store.store_run_lease(lease.run_id, lease.model_dump(mode="json"))
@@ -259,7 +284,17 @@ class RunStore:
 
         completed_runs = sum(1 for run in ordered_runs if run.status == RunStatus.COMPLETED)
         failed_runs = sum(1 for run in ordered_runs if run.status == RunStatus.FAILED)
-        active_runs = sum(1 for run in ordered_runs if run.status in {RunStatus.PENDING, RunStatus.RUNNING, RunStatus.RESUMED, RunStatus.PAUSED})
+        active_runs = sum(
+            1
+            for run in ordered_runs
+            if run.status in {
+                RunStatus.PENDING,
+                RunStatus.RUNNING,
+                RunStatus.RESUMED,
+                RunStatus.PAUSED,
+                RunStatus.WAITING_FOR_OPERATOR,
+            }
+        )
 
         return RunGraph(
             root_run_id=root.run_id,

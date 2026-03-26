@@ -86,6 +86,32 @@ class SecurityAlertError(RuntimeError):
 
 
 class AgentSafetyLayer:
+    def build_operator_intervention_payload(
+        self,
+        *,
+        event_type: str,
+        run_id: str | None,
+        agent_id: str | None,
+        task_id: str | None,
+        payload: dict[str, object] | None = None,
+        source: str,
+    ) -> dict[str, object]:
+        data = payload or {}
+        reason = str(data.get("reason") or data.get("action") or event_type)
+        category = str(data.get("challenge_type") or data.get("action") or event_type)
+        return {
+            "event_type": event_type,
+            "run_id": run_id,
+            "agent_id": agent_id,
+            "task_id": task_id,
+            "source": source,
+            "reason": reason,
+            "category": category,
+            "action": data.get("action"),
+            "operator_handoff": bool(data.get("operator_handoff", False)),
+            "details": data,
+        }
+
     def inspect_page(self, page: StructuredPageModel, action: str) -> SecurityFinding | None:
         for snippet in self._page_snippets(page):
             if self._matches(snippet, INJECTION_PATTERNS):

@@ -47,7 +47,7 @@ from synapse.models.platform import (
     UserCreateRequest,
 )
 from synapse.models.plugin import PluginDescriptor, PluginReloadRequest, ToolDescriptor
-from synapse.models.run import RunGraph, RunState
+from synapse.models.run import RunGraph, RunState, RunStatus
 from synapse.models.runtime_state import BrowserNetworkEntry, BrowserSessionState, BrowserTraceEntry, BrowserWorkerState, ConnectionState, RuntimeCheckpoint
 from synapse.models.task import ExtractionRequest, NavigationRequest, TaskClaimRequest, TaskCreateRequest, TaskRecord, TaskRequest, TaskResult, TaskUpdateRequest
 from synapse.runtime.a2a import A2AHub
@@ -117,6 +117,7 @@ class RuntimeController:
         self.authenticator = authenticator
 
         self.event_bus = EventBus(sockets, compression_provider=compression_provider)
+        self.event_bus.add_listener(self._handle_runtime_event)
         self.session_profiles.set_event_publisher(self.event_bus.publish)
         if hasattr(browser, "set_event_publisher"):
             browser.set_event_publisher(self.event_bus.publish)
@@ -511,6 +512,130 @@ class RuntimeController:
     async def cancel_run(self, run_id: str) -> RunState:
         return await self.task_runtime.cancel_run(run_id)
 
+    async def approve_run(
+        self,
+        run_id: str,
+        *,
+        operator_id: str | None = None,
+    ):
+        run = await self.run_store.get(run_id)
+        intervention = self._operator_intervention(run)
+        metadata = {
+            "operator_decision": "approved",
+            "operator_decision_at": run.updated_at.isoformat(),
+            "operator_id": operator_id,
+            "operator_intervention": {
+                **intervention,
+                "status": "approved",
+                "operator_id": operator_id,
+            },
+        }
+        await self.run_store.update_status(run_id, RunStatus.RESUMED, current_phase="operator_approved", metadata=metadata)
+        await self.event_bus.emit(
+            EventType.TASK_UPDATED,
+            run_id=run_id,
+            agent_id=run.agent_id,
+            task_id=run.task_id,
+            source="runtime_controller",
+            payload={
+                "event": "operator.approved",
+                "operator_id": operator_id,
+                "operator_intervention": metadata["operator_intervention"],
+                "ui": {"status": "approved", "resume_requested": True},
+            },
+            correlation_id=run.correlation_id,
+        )
+        if run.checkpoint_id is not None:
+            return await self.task_runtime.resume_run(run_id)
+        return await self.run_store.get(run_id)
+
+    async def reject_run(
+        self,
+        run_id: str,
+        *,
+        operator_id: str | None = None,
+        reason: str | None = None,
+    ) -> RunState:
+        run = await self.run_store.get(run_id)
+        intervention = self._operator_intervention(run)
+        rejected = await self.run_store.update_status(
+            run_id,
+            RunStatus.CANCELLED,
+            current_phase="operator_rejected",
+            metadata={
+                "operator_decision": "rejected",
+                "operator_decision_reason": reason,
+                "operator_id": operator_id,
+                "operator_intervention": {
+                    **intervention,
+                    "status": "rejected",
+                    "operator_id": operator_id,
+                    "reason": reason,
+                },
+            },
+        )
+        await self.event_bus.emit(
+            EventType.TASK_UPDATED,
+            run_id=run_id,
+            agent_id=rejected.agent_id,
+            task_id=rejected.task_id,
+            source="runtime_controller",
+            payload={
+                "event": "operator.rejected",
+                "operator_id": operator_id,
+                "reason": reason,
+                "operator_intervention": rejected.metadata.get("operator_intervention", {}),
+                "ui": {"status": "rejected", "resume_requested": False},
+            },
+            correlation_id=rejected.correlation_id,
+        )
+        return rejected
+
+    async def provide_run_input(
+        self,
+        run_id: str,
+        *,
+        operator_id: str | None = None,
+        input_payload: dict[str, object] | None = None,
+    ) -> RunState:
+        run = await self.run_store.get(run_id)
+        existing = self._operator_intervention(run)
+        operator_input_history = run.metadata.get("operator_input_history")
+        if not isinstance(operator_input_history, list):
+            operator_input_history = []
+        entry = {
+            "operator_id": operator_id,
+            "input": input_payload or {},
+            "timestamp": run.updated_at.isoformat(),
+        }
+        updated = await self.run_store.update_metadata(
+            run_id,
+            {
+                "operator_input": entry,
+                "operator_input_history": [*operator_input_history, entry],
+                "operator_intervention": {
+                    **existing,
+                    "operator_input": entry,
+                    "status": "input_provided",
+                },
+            },
+        )
+        await self.event_bus.emit(
+            EventType.TASK_UPDATED,
+            run_id=run_id,
+            agent_id=updated.agent_id,
+            task_id=updated.task_id,
+            source="runtime_controller",
+            payload={
+                "event": "operator.input.provided",
+                "operator_id": operator_id,
+                "input": input_payload or {},
+                "ui": {"status": "input_provided"},
+            },
+            correlation_id=updated.correlation_id,
+        )
+        return updated
+
     async def get_checkpoint(self, checkpoint_id: str) -> RuntimeCheckpoint:
         return await self.checkpoint_service.get_checkpoint(checkpoint_id)
 
@@ -525,6 +650,60 @@ class RuntimeController:
 
     async def find_agents(self, capability: str) -> list[AgentDiscoveryEntry]:
         return await self.capabilities.find(capability)
+
+    async def _handle_runtime_event(self, event) -> None:
+        intervention_events = {
+            EventType.APPROVAL_REQUIRED,
+            EventType.BROWSER_CAPTCHA_DETECTED,
+            EventType.BROWSER_CHALLENGE_DETECTED,
+            EventType.BROWSER_HUMAN_INTERVENTION_REQUIRED,
+        }
+        if event.run_id is None or event.event_type not in intervention_events:
+            return
+        try:
+            run = await self.run_store.get(event.run_id)
+        except KeyError:
+            return
+        if run.status == RunStatus.CANCELLED:
+            return
+        checkpoint_id = run.checkpoint_id
+        if checkpoint_id is None:
+            checkpoint = await self.checkpoint_service.save_checkpoint(
+                run.task_id,
+                {
+                    "agent_id": run.agent_id,
+                    "run_id": run.run_id,
+                    "current_goal": str(run.metadata.get("goal", "")),
+                    "memory_snapshot_reference": str(run.metadata.get("memory_snapshot_reference", "")) or None,
+                },
+            )
+            checkpoint_id = checkpoint.checkpoint_id
+        intervention = self.safety.build_operator_intervention_payload(
+            event_type=event.event_type.value,
+            run_id=event.run_id,
+            agent_id=event.agent_id,
+            task_id=event.task_id,
+            payload=event.payload,
+            source=event.source,
+        )
+        intervention["status"] = "waiting"
+        intervention["checkpoint_id"] = checkpoint_id
+        intervention["ui"] = {
+            "operator_required": True,
+            "action_label": "Review Run",
+            "reason": intervention["reason"],
+            "category": intervention["category"],
+        }
+        await self.run_store.set_operator_intervention(
+            event.run_id,
+            intervention=intervention,
+            checkpoint_id=checkpoint_id,
+        )
+
+    @staticmethod
+    def _operator_intervention(run: RunState) -> dict[str, object]:
+        payload = run.metadata.get("operator_intervention")
+        return dict(payload) if isinstance(payload, dict) else {}
 
     async def send_a2a(self, envelope: A2AEnvelope) -> A2AEnvelope:
         response = await self.a2a.handle_message(envelope.sender_agent_id, envelope.model_dump(mode="json"))

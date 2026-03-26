@@ -9,6 +9,7 @@ class RunStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
     PAUSED = "paused"
+    WAITING_FOR_OPERATOR = "waiting_for_operator"
     COMPLETED = "completed"
     FAILED = "failed"
     RESUMED = "resumed"

@@ -1286,6 +1286,50 @@ async def resume_run(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.post("/runs/{run_id}/approve")
+async def approve_run(
+    run_id: str,
+    principal: TasksWritePrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+):
+    try:
+        await _require_run_project(principal, orchestrator, run_id)
+        return await orchestrator.approve_run(run_id, operator_id=principal.subject)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/runs/{run_id}/reject", response_model=RunState)
+async def reject_run(
+    run_id: str,
+    payload: dict[str, object] | None = None,
+    principal: AuthPrincipal = Depends(require_scopes(Scope.TASKS_WRITE.value)),
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> RunState:
+    try:
+        await _require_run_project(principal, orchestrator, run_id)
+        reason = None
+        if isinstance(payload, dict) and isinstance(payload.get("reason"), str):
+            reason = str(payload["reason"])
+        return await orchestrator.reject_run(run_id, operator_id=principal.subject, reason=reason)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/runs/{run_id}/provide_input", response_model=RunState)
+async def provide_run_input(
+    run_id: str,
+    payload: dict[str, object],
+    principal: TasksWritePrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> RunState:
+    try:
+        await _require_run_project(principal, orchestrator, run_id)
+        return await orchestrator.provide_run_input(run_id, operator_id=principal.subject, input_payload=payload)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.post("/runs/{run_id}/cancel", response_model=RunState)
 async def cancel_run(
     run_id: str,

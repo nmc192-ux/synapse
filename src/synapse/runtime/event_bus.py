@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from collections import defaultdict
 from typing import Any
@@ -34,6 +34,7 @@ class EventBus:
             EventType.NAVIGATION_ROUTE_CHANGED,
             EventType.A2A_MESSAGE,
         }
+        self._listeners: list[Callable[[RuntimeEvent], Awaitable[None]]] = []
 
     def set_state_store(self, state_store: RuntimeStateStore) -> None:
         self.sockets.set_state_store(state_store)
@@ -56,7 +57,12 @@ class EventBus:
     async def publish(self, event: RuntimeEvent) -> None:
         normalized = self._normalize_event(event)
         await self.sockets.broadcast(normalized)
+        for listener in list(self._listeners):
+            await listener(normalized)
         await self._maybe_publish_compressed_summary(normalized)
+
+    def add_listener(self, listener: Callable[[RuntimeEvent], Awaitable[None]]) -> None:
+        self._listeners.append(listener)
 
     async def emit(
         self,

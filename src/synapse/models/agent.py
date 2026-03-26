@@ -26,9 +26,30 @@ class AgentRateLimits(BaseModel):
 
 class AgentSecurityPolicy(BaseModel):
     allowed_domains: list[str] = Field(default_factory=list)
+    blocked_domains: list[str] = Field(default_factory=list)
     allowed_tools: list[str] = Field(default_factory=list)
+    blocked_tools: list[str] = Field(default_factory=list)
+    uploads_allowed: bool = True
+    downloads_allowed: bool = True
+    screenshot_allowed: bool = True
+    dangerous_action_requires_approval: bool = False
+    max_cross_domain_jumps: int = 10
     rate_limits: AgentRateLimits = Field(default_factory=AgentRateLimits)
     block_unsafe_actions: bool = True
+
+    def merged(
+        self,
+        override: "AgentSecurityPolicy | dict[str, object] | None",
+    ) -> "AgentSecurityPolicy":
+        if override is None:
+            return self.model_copy(deep=True)
+        if isinstance(override, AgentSecurityPolicy):
+            data = override.model_dump(exclude_unset=False)
+        else:
+            data = dict(override)
+        if "rate_limits" in data and isinstance(data["rate_limits"], dict):
+            data["rate_limits"] = self.rate_limits.model_copy(update=data["rate_limits"])
+        return self.model_copy(update={key: value for key, value in data.items() if value is not None})
 
 
 class AgentExecutionLimits(BaseModel):

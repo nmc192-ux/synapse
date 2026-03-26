@@ -101,7 +101,14 @@ class RuntimeController:
             events=self.event_bus,
             compression_provider=compression_provider,
         )
-        self.tool_service = ToolService(tools, sandbox, safety, self.event_bus, self.budget_service)
+        self.tool_service = ToolService(
+            tools,
+            sandbox,
+            safety,
+            self.event_bus,
+            self.budget_service,
+            state_store=state_store,
+        )
         self.checkpoint_service = CheckpointService(state_store, self.browser_service, self.event_bus)
         self.task_runtime = TaskRuntime(
             agents=agents,
@@ -128,6 +135,8 @@ class RuntimeController:
         self.browser_service.set_state_store(state_store) if hasattr(self, "browser_service") else None
         self.checkpoint_service.set_state_store(state_store) if hasattr(self, "checkpoint_service") else None
         self.memory_service.set_state_store(state_store) if hasattr(self, "memory_service") else None
+        self.tool_service.set_state_store(state_store) if hasattr(self, "tool_service") else None
+        self.sandbox.set_state_store(state_store) if hasattr(self, "sandbox") else None
         if state_store is not None and hasattr(self, "event_bus"):
             self.event_bus.set_state_store(state_store)
 
@@ -203,7 +212,8 @@ class RuntimeController:
         return agent
 
     async def call_tool(self, tool_name: str, arguments: dict[str, object], agent_id: str | None) -> dict[str, object]:
-        return await self.tool_service.call_tool(tool_name, arguments, agent_id)
+        run_id = arguments.get("run_id") if isinstance(arguments.get("run_id"), str) else None
+        return await self.tool_service.call_tool(tool_name, arguments, agent_id, run_id=run_id)
 
     async def list_tools(self) -> list[ToolDescriptor]:
         return self.tool_service.list_tools()

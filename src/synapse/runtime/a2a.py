@@ -13,6 +13,7 @@ from synapse.runtime.compression.noop import NoOpCompressionProvider
 from synapse.models.runtime_state import AgentRuntimeStatus, ConnectionState
 from synapse.models.task import TaskRequest, TaskResult
 from synapse.runtime.registry import AgentRegistry
+from synapse.runtime.security import AgentSecuritySandbox, SandboxApprovalRequiredError
 from synapse.runtime.state_store import RuntimeStateStore
 from synapse.security.identity import AgentIdentityManager
 from synapse.security.signing import MessageExpiredError, MessageReplayError, MessageSigner, SignatureValidationError
@@ -29,6 +30,7 @@ class A2AHub:
         state_store: RuntimeStateStore | None = None,
         sockets: WebSocketManager | None = None,
         compression_provider: CompressionProvider | None = None,
+        sandbox: AgentSecuritySandbox | None = None,
     ) -> None:
         self.agents = agents
         self._connections: dict[str, WebSocket] = {}
@@ -37,6 +39,7 @@ class A2AHub:
         self._state_store = state_store
         self._sockets = sockets
         self._compression_provider = compression_provider or NoOpCompressionProvider()
+        self._sandbox = sandbox
         self._signer = MessageSigner()
         self._identity_manager = AgentIdentityManager("synapse-agent-identity")
         self._seen_nonces: dict[str, set[str]] = {}
@@ -46,6 +49,9 @@ class A2AHub:
 
     def set_sockets(self, sockets: WebSocketManager) -> None:
         self._sockets = sockets
+
+    def set_sandbox(self, sandbox: AgentSecuritySandbox | None) -> None:
+        self._sandbox = sandbox
 
     def set_compression_provider(self, compression_provider: CompressionProvider | None) -> None:
         self._compression_provider = compression_provider or NoOpCompressionProvider()
@@ -151,6 +157,11 @@ class A2AHub:
                 return error
 
             task = TaskRequest.model_validate(envelope.payload["task"])
+            try:
+                await self._authorize_delegation(sender_agent_id, envelope.recipient_agent_id, task.run_id)
+            except SandboxApprovalRequiredError as exc:
+                await self._emit_approval_required(sender_agent_id, task.run_id, exc, envelope)
+                raise ValueError(exc.reason) from exc
             delegated_task = task.model_copy(update={"agent_id": envelope.recipient_agent_id or task.agent_id})
             task_result = await self._task_executor(delegated_task)
             response = A2AEnvelope(
@@ -302,6 +313,32 @@ class A2AHub:
             )
         )
 
+    async def _emit_approval_required(
+        self,
+        agent_id: str,
+        run_id: str | None,
+        exc: SandboxApprovalRequiredError,
+        envelope: A2AEnvelope,
+    ) -> None:
+        if self._sockets is None:
+            return
+        await self._sockets.broadcast(
+            RuntimeEvent(
+                event_type=EventType.APPROVAL_REQUIRED,
+                run_id=run_id,
+                agent_id=agent_id,
+                source="a2a_runtime",
+                payload={
+                    "action": exc.action,
+                    "reason": exc.reason,
+                    "recipient_agent_id": envelope.recipient_agent_id,
+                    "message_id": envelope.message_id,
+                    **exc.metadata,
+                },
+                correlation_id=envelope.correlation_id or envelope.message_id,
+            )
+        )
+
     async def _build_compact_payload(self, envelope: A2AEnvelope) -> dict[str, Any]:
         payload = dict(envelope.payload)
         if envelope.type in {A2AMessageType.DELEGATE, A2AMessageType.REQUEST_TASK}:
@@ -396,6 +433,24 @@ class A2AHub:
             max_age_seconds=300,
             seen_nonces=seen,
         )
+
+    async def _authorize_delegation(
+        self,
+        sender_agent_id: str,
+        recipient_agent_id: str | None,
+        run_id: str | None,
+    ) -> None:
+        if self._sandbox is None:
+            return
+        if run_id is not None and self._state_store is not None:
+            payload = await self._state_store.get_run(run_id)
+            if isinstance(payload, dict):
+                metadata = payload.get("metadata")
+                if isinstance(metadata, dict):
+                    override = metadata.get("security_policy") or metadata.get("execution_policy")
+                    if isinstance(override, dict):
+                        self._sandbox.set_run_policy(run_id, override)
+        self._sandbox.authorize_delegation(sender_agent_id, recipient_agent_id, run_id=run_id)
 
     async def register_connection(self, agent_id: str, metadata: dict[str, object]) -> ConnectionState:
         if agent_id not in {agent.agent_id for agent in self.agents.list()}:

@@ -30,15 +30,16 @@ agent_registry = AgentRegistry(state_store=runtime_state_store)
 tool_registry = ToolRegistry()
 message_bus = AgentMessageBus()
 websocket_manager = WebSocketManager(state_store=runtime_state_store, compression_provider=compression_provider)
+sandbox = AgentSecuritySandbox(agent_registry, state_store=runtime_state_store)
 a2a_hub = A2AHub(
     agent_registry,
     state_store=runtime_state_store,
     sockets=websocket_manager,
     compression_provider=compression_provider,
+    sandbox=sandbox,
 )
 memory_manager = AgentMemoryManager()
 task_manager = TaskExecutionManager()
-sandbox = AgentSecuritySandbox(agent_registry)
 safety = AgentSafetyLayer()
 budget_manager = AgentBudgetManager()
 llm_provider = create_llm_provider(settings)
@@ -85,7 +86,9 @@ async def lifespan(_: FastAPI):
     browser_runtime.set_state_store(store)
     agent_registry.set_state_store(store)
     a2a_hub.set_state_store(store)
+    a2a_hub.set_sandbox(sandbox)
     orchestrator.state_store = store
+    sandbox.set_state_store(store)
     await agent_registry.load_from_store()
     await a2a_hub.cleanup_stale_connections()
     await browser_runtime.start()

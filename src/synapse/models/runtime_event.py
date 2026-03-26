@@ -42,6 +42,7 @@ class EventType(str, Enum):
     MEMORY_COMPRESSED = "memory.compressed"
     RUNTIME_EVENTS_COMPRESSED = "runtime.events.compressed"
     A2A_MESSAGE_COMPRESSED = "a2a.message.compressed"
+    APPROVAL_REQUIRED = "approval.required"
 
 
 class EventSeverity(str, Enum):

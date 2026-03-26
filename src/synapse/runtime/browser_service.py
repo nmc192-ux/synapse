@@ -29,7 +29,7 @@ from synapse.models.task import ExtractionRequest, NavigationRequest
 from synapse.runtime.budget_service import BudgetService
 from synapse.runtime.event_bus import EventBus
 from synapse.runtime.safety import AgentSafetyLayer, SecurityAlertError, SecurityFinding
-from synapse.runtime.security import AgentSecuritySandbox
+from synapse.runtime.security import AgentSecuritySandbox, SandboxApprovalRequiredError
 from synapse.runtime.session import BrowserSession
 from synapse.runtime.state_store import RuntimeStateStore
 
@@ -66,20 +66,39 @@ class BrowserService:
         return session
 
     async def navigate(self, request: NavigationRequest) -> BrowserSession:
-        self.sandbox.authorize_domain(request.agent_id, str(request.url))
-        self.sandbox.consume_browser_action(request.agent_id)
-        if request.agent_id:
-            await self.budget_service.increment_page(request.agent_id)
-        session = await self.browser.navigate(request.session_id, str(request.url))
-        await self._enforce_page_safety(request.agent_id, session.session_id, "browser.navigate", session.page)
-        await self.events.emit(
-            EventType.PAGE_NAVIGATED,
-            session_id=session.session_id,
-            agent_id=request.agent_id,
-            source="browser_service",
-            payload={"url": session.current_url},
-        )
-        return session
+        run_id = await self._resolve_run_id(agent_id=request.agent_id, session_id=request.session_id)
+        current_url = self._current_url_or_none(request.session_id)
+        try:
+            await self._hydrate_run_policy(run_id)
+            self.sandbox.authorize_navigation(
+                request.agent_id,
+                str(request.url),
+                run_id=run_id,
+                current_url=current_url,
+            )
+            self.sandbox.consume_browser_action(request.agent_id)
+            if request.agent_id:
+                await self.budget_service.increment_page(request.agent_id, run_id=run_id)
+            session = await self.browser.navigate(request.session_id, str(request.url))
+            self.sandbox.record_navigation(
+                request.agent_id,
+                run_id=run_id,
+                previous_url=current_url,
+                current_url=session.current_url,
+            )
+            await self._enforce_page_safety(request.agent_id, session.session_id, "browser.navigate", session.page)
+            await self.events.emit(
+                EventType.PAGE_NAVIGATED,
+                run_id=run_id,
+                session_id=session.session_id,
+                agent_id=request.agent_id,
+                source="browser_service",
+                payload={"url": session.current_url},
+            )
+            return session
+        except SandboxApprovalRequiredError as exc:
+            await self._emit_approval_required(request.agent_id, request.session_id, run_id, exc)
+            raise
 
     async def open(self, request: OpenRequest) -> BrowserState:
         return await self._run_state_action(
@@ -127,20 +146,28 @@ class BrowserService:
         return payload
 
     async def screenshot(self, request: ScreenshotRequest) -> ScreenshotResult:
-        await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.screenshot")
-        self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
-        self.sandbox.consume_browser_action(request.agent_id)
-        result = await self.browser.screenshot(request.session_id)
-        await self._enforce_page_safety(request.agent_id, request.session_id, "browser.screenshot", result.page)
-        await self._emit_spm_compressed(request.agent_id, request.session_id, result.page)
-        await self.events.emit(
-            EventType.SCREENSHOT_CAPTURED,
-            session_id=request.session_id,
-            agent_id=request.agent_id,
-            source="browser_service",
-            payload={"action": "screenshot", **result.model_dump(mode="json")},
-        )
-        return result
+        run_id = await self._resolve_run_id(agent_id=request.agent_id, session_id=request.session_id)
+        try:
+            await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.screenshot")
+            await self._hydrate_run_policy(run_id)
+            self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
+            self.sandbox.authorize_screenshot(request.agent_id, run_id=run_id)
+            self.sandbox.consume_browser_action(request.agent_id)
+            result = await self.browser.screenshot(request.session_id)
+            await self._enforce_page_safety(request.agent_id, request.session_id, "browser.screenshot", result.page)
+            await self._emit_spm_compressed(request.agent_id, request.session_id, result.page)
+            await self.events.emit(
+                EventType.SCREENSHOT_CAPTURED,
+                run_id=run_id,
+                session_id=request.session_id,
+                agent_id=request.agent_id,
+                source="browser_service",
+                payload={"action": "screenshot", **result.model_dump(mode="json")},
+            )
+            return result
+        except SandboxApprovalRequiredError as exc:
+            await self._emit_approval_required(request.agent_id, request.session_id, run_id, exc)
+            raise
 
     async def get_layout(self, request: LayoutRequest) -> StructuredPageModel:
         await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.get_layout")
@@ -178,34 +205,50 @@ class BrowserService:
         return state
 
     async def upload(self, request: UploadRequest) -> UploadResult:
-        await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.upload")
-        self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
-        self.sandbox.consume_browser_action(request.agent_id)
-        result = await self.browser.upload(request.session_id, request.selector, request.file_paths)
-        await self._emit_spm_compressed(request.agent_id, request.session_id, result.page)
-        await self.events.emit(
-            EventType.UPLOAD_COMPLETED,
-            session_id=request.session_id,
-            agent_id=request.agent_id,
-            source="browser_service",
-            payload=result.model_dump(mode="json"),
-        )
-        return result
+        run_id = await self._resolve_run_id(agent_id=request.agent_id, session_id=request.session_id)
+        try:
+            await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.upload")
+            await self._hydrate_run_policy(run_id)
+            self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
+            self.sandbox.authorize_upload(request.agent_id, run_id=run_id)
+            self.sandbox.consume_browser_action(request.agent_id)
+            result = await self.browser.upload(request.session_id, request.selector, request.file_paths)
+            await self._emit_spm_compressed(request.agent_id, request.session_id, result.page)
+            await self.events.emit(
+                EventType.UPLOAD_COMPLETED,
+                run_id=run_id,
+                session_id=request.session_id,
+                agent_id=request.agent_id,
+                source="browser_service",
+                payload=result.model_dump(mode="json"),
+            )
+            return result
+        except SandboxApprovalRequiredError as exc:
+            await self._emit_approval_required(request.agent_id, request.session_id, run_id, exc)
+            raise
 
     async def download(self, request: DownloadRequest) -> DownloadResult:
-        await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.download")
-        self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
-        self.sandbox.consume_browser_action(request.agent_id)
-        result = await self.browser.download(request.session_id, request.trigger_selector, request.timeout_ms)
-        await self._emit_spm_compressed(request.agent_id, request.session_id, result.page)
-        await self.events.emit(
-            EventType.DOWNLOAD_COMPLETED,
-            session_id=request.session_id,
-            agent_id=request.agent_id,
-            source="browser_service",
-            payload=result.model_dump(mode="json"),
-        )
-        return result
+        run_id = await self._resolve_run_id(agent_id=request.agent_id, session_id=request.session_id)
+        try:
+            await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.download")
+            await self._hydrate_run_policy(run_id)
+            self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
+            self.sandbox.authorize_download(request.agent_id, run_id=run_id)
+            self.sandbox.consume_browser_action(request.agent_id)
+            result = await self.browser.download(request.session_id, request.trigger_selector, request.timeout_ms)
+            await self._emit_spm_compressed(request.agent_id, request.session_id, result.page)
+            await self.events.emit(
+                EventType.DOWNLOAD_COMPLETED,
+                run_id=run_id,
+                session_id=request.session_id,
+                agent_id=request.agent_id,
+                source="browser_service",
+                payload=result.model_dump(mode="json"),
+            )
+            return result
+        except SandboxApprovalRequiredError as exc:
+            await self._emit_approval_required(request.agent_id, request.session_id, run_id, exc)
+            raise
 
     async def scroll_extract(self, request: ScrollExtractRequest) -> ScrollExtractResult:
         await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.scroll_extract")
@@ -289,18 +332,34 @@ class BrowserService:
         payload: dict[str, object] | None = None,
     ) -> BrowserState:
         try:
+            run_id = await self._resolve_run_id(agent_id=agent_id, session_id=session_id)
+            current_url = self._current_url_or_none(session_id)
+            await self._hydrate_run_policy(run_id)
             if precheck_url is None:
                 await self._ensure_current_page_safe(agent_id, session_id, f"browser.{action}")
                 self.sandbox.authorize_domain(agent_id, self.browser.current_url(session_id))
             else:
-                self.sandbox.authorize_domain(agent_id, precheck_url)
+                self.sandbox.authorize_navigation(
+                    agent_id,
+                    precheck_url,
+                    run_id=run_id,
+                    current_url=current_url,
+                )
             self.sandbox.consume_browser_action(agent_id)
             if increment_page and agent_id:
-                await self.budget_service.increment_page(agent_id)
+                await self.budget_service.increment_page(agent_id, run_id=run_id)
             state = await executor()
+            if precheck_url is not None:
+                self.sandbox.record_navigation(
+                    agent_id,
+                    run_id=run_id,
+                    previous_url=current_url,
+                    current_url=getattr(state.page, "url", precheck_url),
+                )
             await self._enforce_page_safety(agent_id, state.session_id, f"browser.{action}", state.page)
             await self.events.emit(
                 EventType.PAGE_NAVIGATED,
+                run_id=run_id,
                 session_id=state.session_id,
                 agent_id=agent_id,
                 source="browser_service",
@@ -309,6 +368,9 @@ class BrowserService:
             await self._emit_spm_compressed(agent_id, state.session_id, state.page)
             await self._emit_browser_metadata_events(agent_id, state.session_id, state.metadata)
             return state
+        except SandboxApprovalRequiredError as exc:
+            await self._emit_approval_required(agent_id, session_id, run_id, exc)
+            raise
         except Exception as exc:
             await self._emit_browser_error(action, agent_id, session_id, exc)
             raise
@@ -425,3 +487,52 @@ class BrowserService:
             payload={"action": action, "error": str(exc)},
             severity=EventSeverity.ERROR,
         )
+
+    async def _emit_approval_required(
+        self,
+        agent_id: str | None,
+        session_id: str | None,
+        run_id: str | None,
+        exc: SandboxApprovalRequiredError,
+    ) -> None:
+        await self.events.emit(
+            EventType.APPROVAL_REQUIRED,
+            run_id=run_id,
+            agent_id=agent_id,
+            session_id=session_id,
+            source="browser_service",
+            payload={
+                "action": exc.action,
+                "reason": exc.reason,
+                **exc.metadata,
+            },
+            severity=EventSeverity.WARNING,
+        )
+
+    async def _resolve_run_id(self, *, agent_id: str | None, session_id: str | None) -> str | None:
+        if session_id is not None and self.state_store is not None:
+            payload = await self.state_store.get_session(session_id)
+            if isinstance(payload, dict) and isinstance(payload.get("run_id"), str):
+                return str(payload["run_id"])
+        return None
+
+    async def _hydrate_run_policy(self, run_id: str | None) -> None:
+        if run_id is None or self.state_store is None:
+            return
+        payload = await self.state_store.get_run(run_id)
+        if payload is None:
+            return
+        metadata = payload.get("metadata")
+        if not isinstance(metadata, dict):
+            return
+        for key in ("security_policy", "execution_policy"):
+            override = metadata.get(key)
+            if isinstance(override, dict):
+                self.sandbox.set_run_policy(run_id, override)
+                return
+
+    def _current_url_or_none(self, session_id: str) -> str | None:
+        try:
+            return self.browser.current_url(session_id)
+        except Exception:
+            return None

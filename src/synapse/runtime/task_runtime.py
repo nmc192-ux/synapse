@@ -60,6 +60,9 @@ class TaskRuntime:
     async def execute_task(self, request: TaskRequest) -> TaskResult:
         run = await self._ensure_run(request)
         request = request.model_copy(update={"run_id": run.run_id})
+        sandbox = getattr(self.browser_service, "sandbox", None)
+        if hasattr(sandbox, "set_run_policy"):
+            sandbox.set_run_policy(run.run_id, run.metadata.get("security_policy"))
         if hasattr(self.browser_service.budget_service, "ensure_run_budget"):
             await self.browser_service.budget_service.ensure_run_budget(request.agent_id, run.run_id)
         await self._enforce_task_safety(request)
@@ -70,7 +73,12 @@ class TaskRuntime:
             self.checkpoint_service.remember_task_context(request)
 
         for tool_call in request.tool_calls:
-            await self.tool_service.call_tool(tool_call.tool_name, tool_call.arguments, agent_id=request.agent_id)
+            await self.tool_service.call_tool(
+                tool_call.tool_name,
+                tool_call.arguments,
+                agent_id=request.agent_id,
+                run_id=run.run_id,
+            )
 
         adapter = self.agents.build_adapter(
             request.agent_id,

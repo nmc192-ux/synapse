@@ -14,7 +14,7 @@ from synapse.runtime.compression.noop import NoOpCompressionProvider
 from synapse.runtime.llm import LLMProvider
 from synapse.runtime.memory_service import MemoryService
 from synapse.runtime.planning import NavigationEvaluator, NavigationPlanner, NavigationReflector
-from synapse.runtime.security import AgentSecuritySandbox
+from synapse.runtime.security import AgentSecuritySandbox, SandboxApprovalRequiredError
 from synapse.runtime.safety import AgentSafetyLayer, SecurityAlertError
 from synapse.transports.websocket_manager import WebSocketManager
 
@@ -204,11 +204,27 @@ class EventDrivenAgentLoop:
         if action.type == AgentActionType.OPEN:
             if not action.url:
                 raise ValueError("open action requires url")
-            self.sandbox.authorize_domain(task.agent_id, action.url)
-            self.sandbox.consume_browser_action(task.agent_id)
-            result = await self.browser.open(task.session_id, action.url)
-            await self._ensure_page_safe(task, result.page, "browser.open")
-            return result.model_dump(mode="json")
+            try:
+                current_url = self._current_url_or_none(task.session_id)
+                self.sandbox.authorize_navigation(
+                    task.agent_id,
+                    action.url,
+                    run_id=task.run_id,
+                    current_url=current_url,
+                )
+                self.sandbox.consume_browser_action(task.agent_id)
+                result = await self.browser.open(task.session_id, action.url)
+                self.sandbox.record_navigation(
+                    task.agent_id,
+                    run_id=task.run_id,
+                    previous_url=current_url,
+                    current_url=getattr(result.page, "url", action.url),
+                )
+                await self._ensure_page_safe(task, result.page, "browser.open")
+                return result.model_dump(mode="json")
+            except SandboxApprovalRequiredError as exc:
+                await self._emit_approval_required(task, exc)
+                raise
 
         if action.type == AgentActionType.CLICK:
             if not action.selector:
@@ -241,12 +257,17 @@ class EventDrivenAgentLoop:
             return result.model_dump(mode="json")
 
         if action.type == AgentActionType.SCREENSHOT:
-            self.sandbox.authorize_domain(task.agent_id, self.browser.current_url(task.session_id))
-            self.sandbox.consume_browser_action(task.agent_id)
-            await self._ensure_current_page_safe(task, "browser.screenshot")
-            result = await self.browser.screenshot(task.session_id)
-            await self._ensure_page_safe(task, result.page, "browser.screenshot")
-            return result.model_dump(mode="json")
+            try:
+                self.sandbox.authorize_domain(task.agent_id, self.browser.current_url(task.session_id))
+                self.sandbox.authorize_screenshot(task.agent_id, run_id=task.run_id)
+                self.sandbox.consume_browser_action(task.agent_id)
+                await self._ensure_current_page_safe(task, "browser.screenshot")
+                result = await self.browser.screenshot(task.session_id)
+                await self._ensure_page_safe(task, result.page, "browser.screenshot")
+                return result.model_dump(mode="json")
+            except SandboxApprovalRequiredError as exc:
+                await self._emit_approval_required(task, exc)
+                raise
 
         raise ValueError(f"Unsupported action type: {action.type}")
 
@@ -271,6 +292,29 @@ class EventDrivenAgentLoop:
                 )
             )
             raise SecurityAlertError(finding)
+
+    async def _emit_approval_required(self, task: TaskRequest, exc: SandboxApprovalRequiredError) -> None:
+        await self.sockets.broadcast(
+            RuntimeEvent(
+                event_type=EventType.APPROVAL_REQUIRED,
+                run_id=task.run_id,
+                session_id=task.session_id,
+                agent_id=task.agent_id,
+                task_id=task.task_id,
+                source="agent_loop",
+                payload={"action": exc.action, "reason": exc.reason, **exc.metadata},
+                severity=EventSeverity.WARNING,
+                correlation_id=task.task_id,
+            )
+        )
+
+    def _current_url_or_none(self, session_id: str | None) -> str | None:
+        if session_id is None:
+            return None
+        try:
+            return self.browser.current_url(session_id)
+        except Exception:
+            return None
 
     async def _broadcast_plan(self, task: TaskRequest, actions: list[AgentAction]) -> None:
         telemetry = self.planner.get_last_context_telemetry()

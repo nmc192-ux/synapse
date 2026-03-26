@@ -111,6 +111,27 @@ class AgentSafetyLayer:
             return invalid_payload
         return None
 
+    def build_policy_finding(
+        self,
+        *,
+        category: str,
+        reason: str,
+        source: str,
+        metadata: dict[str, object] | None = None,
+    ) -> SecurityFinding:
+        return SecurityFinding(
+            category=category,
+            reason=reason,
+            source=source,
+            metadata=metadata or {},
+        )
+
+    def find_external_request_url(self, arguments: dict[str, object]) -> str | None:
+        for key, value in arguments.items():
+            if isinstance(value, str) and any(token in key.lower() for token in ("url", "endpoint", "uri")):
+                return value
+        return None
+
     def _find_invalid_payload(
         self,
         arguments: dict[str, object],

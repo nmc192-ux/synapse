@@ -84,6 +84,22 @@ class RuntimeStateStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def store_profile(self, profile_id: str, profile_data: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_profile(self, profile_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def list_profiles(self, agent_id: str | None = None) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def delete_profile(self, profile_id: str) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
     async def store_run(self, run_id: str, run_data: dict[str, Any]) -> None:
         raise NotImplementedError
 
@@ -120,6 +136,7 @@ class InMemoryRuntimeStateStore(RuntimeStateStore):
         self._sessions: dict[str, dict[str, Any]] = {}
         self._connections: dict[str, dict[str, Any]] = {}
         self._checkpoints: dict[str, dict[str, Any]] = {}
+        self._profiles: dict[str, dict[str, Any]] = {}
         self._runs: dict[str, dict[str, Any]] = {}
         self._events: dict[str, dict[str, Any]] = {}
         self._event_ids: list[str] = []
@@ -180,6 +197,22 @@ class InMemoryRuntimeStateStore(RuntimeStateStore):
 
     async def delete_checkpoint(self, checkpoint_id: str) -> None:
         self._checkpoints.pop(checkpoint_id, None)
+
+    async def store_profile(self, profile_id: str, profile_data: dict[str, Any]) -> None:
+        self._profiles[profile_id] = dict(profile_data)
+
+    async def get_profile(self, profile_id: str) -> dict[str, Any] | None:
+        record = self._profiles.get(profile_id)
+        return dict(record) if record is not None else None
+
+    async def list_profiles(self, agent_id: str | None = None) -> list[dict[str, Any]]:
+        rows = [dict(value) for value in self._profiles.values()]
+        if agent_id is not None:
+            rows = [row for row in rows if row.get("agent_id") == agent_id]
+        return rows
+
+    async def delete_profile(self, profile_id: str) -> None:
+        self._profiles.pop(profile_id, None)
 
     async def store_run(self, run_id: str, run_data: dict[str, Any]) -> None:
         self._runs[run_id] = dict(run_data)
@@ -355,6 +388,36 @@ class RedisRuntimeStateStore(RuntimeStateStore):
             if isinstance(checkpoint.get("task_id"), str):
                 await redis.srem(f"synapse:checkpoints:task:{checkpoint['task_id']}", checkpoint_id)
 
+    async def store_profile(self, profile_id: str, profile_data: dict[str, Any]) -> None:
+        redis = self._require_redis()
+        await redis.set(self._profile_key(profile_id), json.dumps(profile_data))
+        await redis.sadd("synapse:profiles:index", profile_id)
+        agent_id = profile_data.get("agent_id")
+        if isinstance(agent_id, str) and agent_id:
+            await redis.sadd(f"synapse:profiles:agent:{agent_id}", profile_id)
+
+    async def get_profile(self, profile_id: str) -> dict[str, Any] | None:
+        redis = self._require_redis()
+        payload = await redis.get(self._profile_key(profile_id))
+        return self._decode(payload)
+
+    async def list_profiles(self, agent_id: str | None = None) -> list[dict[str, Any]]:
+        redis = self._require_redis()
+        if agent_id is None:
+            ids = await redis.smembers("synapse:profiles:index")
+        else:
+            ids = await redis.smembers(f"synapse:profiles:agent:{agent_id}")
+        keys = [self._profile_key(profile_id) for profile_id in ids]
+        return await self._mget_json(keys)
+
+    async def delete_profile(self, profile_id: str) -> None:
+        redis = self._require_redis()
+        profile = await self.get_profile(profile_id)
+        await redis.delete(self._profile_key(profile_id))
+        await redis.srem("synapse:profiles:index", profile_id)
+        if profile is not None and isinstance(profile.get("agent_id"), str):
+            await redis.srem(f"synapse:profiles:agent:{profile['agent_id']}", profile_id)
+
     async def store_run(self, run_id: str, run_data: dict[str, Any]) -> None:
         redis = self._require_redis()
         await redis.set(self._run_key(run_id), json.dumps(run_data))
@@ -466,6 +529,10 @@ class RedisRuntimeStateStore(RuntimeStateStore):
     @staticmethod
     def _checkpoint_key(checkpoint_id: str) -> str:
         return f"synapse:checkpoints:{checkpoint_id}"
+
+    @staticmethod
+    def _profile_key(profile_id: str) -> str:
+        return f"synapse:profiles:{profile_id}"
 
     @staticmethod
     def _run_key(run_id: str) -> str:

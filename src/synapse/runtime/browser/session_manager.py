@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class SessionManager:
-    def __init__(self, settings: Any, state_store: RuntimeStateStore | None = None) -> None:
+    def __init__(self, settings: Any, state_store: RuntimeStateStore | None = None, profile_manager=None) -> None:
         self.settings = settings
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
@@ -33,11 +33,14 @@ class SessionManager:
         self._session_agents: dict[str, str | None] = {}
         self._session_runs: dict[str, str | None] = {}
         self._state_store = state_store
+        self._profile_manager = profile_manager
         self._downloads: dict[str, list[dict[str, object]]] = {}
         self._last_urls: dict[str, str | None] = {}
 
     def set_state_store(self, state_store: RuntimeStateStore) -> None:
         self._state_store = state_store
+        if hasattr(self._profile_manager, "set_state_store"):
+            self._profile_manager.set_state_store(state_store)
 
     async def start(self) -> None:
         if self._browser is not None:
@@ -77,6 +80,8 @@ class SessionManager:
         self._session_runs[session_id] = run_id
         self._downloads.setdefault(session_id, [])
         self._last_urls[session_id] = None
+        if run_id is not None and self._profile_manager is not None:
+            await self._profile_manager.apply_profile_to_browser(run_id, context, page)
         await self.save_session_state(session_id, extractor, run_id=run_id)
         return BrowserSession(session_id=session_id, page=await extractor.snapshot_page(page))
 

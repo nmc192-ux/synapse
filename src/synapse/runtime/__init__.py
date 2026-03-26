@@ -12,6 +12,7 @@ from synapse.runtime.execution_plane import ExecutionPlaneRuntime
 from synapse.runtime.memory_service import MemoryService
 from synapse.runtime.runtime_controller import RuntimeController
 from synapse.runtime.scheduler import RunScheduler
+from synapse.runtime.session_profiles import SessionProfileManager
 from synapse.runtime.state_store import (
     InMemoryRuntimeStateStore,
     RedisRuntimeStateStore,
@@ -40,6 +41,7 @@ __all__ = [
     "RuntimeController",
     "RuntimeStateStore",
     "RunScheduler",
+    "SessionProfileManager",
     "TaskRuntime",
     "ToolService",
     "create_compression_provider",

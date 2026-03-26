@@ -49,6 +49,7 @@ from synapse.runtime.registry import AgentRegistry
 from synapse.runtime.run_store import RunStore
 from synapse.runtime.scheduler import RunScheduler
 from synapse.runtime.security import AgentSecuritySandbox
+from synapse.runtime.session_profiles import SessionProfile, SessionProfileCreateRequest, SessionProfileLoadRequest, SessionProfileManager
 from synapse.runtime.safety import AgentSafetyLayer
 from synapse.runtime.state_store import RuntimeStateStore
 from synapse.runtime.task_manager import TaskExecutionManager
@@ -73,6 +74,7 @@ class RuntimeController:
         safety: AgentSafetyLayer,
         budget_manager: AgentBudgetManager,
         state_store: RuntimeStateStore | None = None,
+        session_profiles: SessionProfileManager | None = None,
         llm: LLMProvider | None = None,
         compression_provider: CompressionProvider | None = None,
     ) -> None:
@@ -88,10 +90,12 @@ class RuntimeController:
         self.safety = safety
         self.budget_manager = budget_manager
         self._state_store = state_store
+        self.session_profiles = session_profiles or SessionProfileManager(state_store=state_store)
         self.llm = llm
         self.compression_provider = compression_provider
 
         self.event_bus = EventBus(sockets, compression_provider=compression_provider)
+        self.session_profiles.set_event_publisher(self.event_bus.publish)
         if hasattr(browser, "set_event_publisher"):
             browser.set_event_publisher(self.event_bus.publish)
         self.run_store = RunStore(state_store)
@@ -138,6 +142,7 @@ class RuntimeController:
     def state_store(self, state_store: RuntimeStateStore | None) -> None:
         self._state_store = state_store
         self.run_store.set_state_store(state_store) if hasattr(self, "run_store") else None
+        self.session_profiles.set_state_store(state_store) if hasattr(self, "session_profiles") else None
         self.browser_service.set_state_store(state_store) if hasattr(self, "browser_service") else None
         self.checkpoint_service.set_state_store(state_store) if hasattr(self, "checkpoint_service") else None
         self.memory_service.set_state_store(state_store) if hasattr(self, "memory_service") else None
@@ -293,6 +298,18 @@ class RuntimeController:
 
     async def get_session(self, session_id: str) -> BrowserSessionState:
         return await self.browser_service.get_session(session_id)
+
+    async def create_session_profile(self, request: SessionProfileCreateRequest) -> SessionProfile:
+        return await self.session_profiles.create_profile(request)
+
+    async def load_session_profile(self, profile_id: str, request: SessionProfileLoadRequest) -> SessionProfile:
+        return await self.session_profiles.load_profile(profile_id, run_id=request.run_id)
+
+    async def list_session_profiles(self, agent_id: str | None = None) -> list[SessionProfile]:
+        return await self.session_profiles.list_profiles(agent_id=agent_id)
+
+    async def delete_session_profile(self, profile_id: str) -> None:
+        await self.session_profiles.delete_profile(profile_id)
 
     async def list_connections(self) -> list[ConnectionState]:
         return await self.a2a.list_persisted_connections()

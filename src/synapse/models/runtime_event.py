@@ -50,6 +50,7 @@ class EventType(str, Enum):
     RUN_ASSIGNED = "run.assigned"
     RUN_REQUEUED = "run.requeued"
     WORKER_UNAVAILABLE = "worker.unavailable"
+    SESSION_PROFILE_EXPIRED = "session.profile.expired"
 
 
 class EventSeverity(str, Enum):

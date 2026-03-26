@@ -16,6 +16,7 @@ from synapse.runtime.memory import AgentMemoryManager
 from synapse.runtime.messaging import AgentMessageBus
 from synapse.runtime.registry import AgentRegistry
 from synapse.runtime.security import AgentSecuritySandbox
+from synapse.runtime.session_profiles import SessionProfileManager
 from synapse.runtime.safety import AgentSafetyLayer
 from synapse.runtime.state_store import InMemoryRuntimeStateStore, create_runtime_state_store
 from synapse.runtime.task_manager import TaskExecutionManager
@@ -31,10 +32,11 @@ agent_registry = AgentRegistry(state_store=runtime_state_store)
 tool_registry = ToolRegistry()
 message_bus = AgentMessageBus()
 websocket_manager = WebSocketManager(state_store=runtime_state_store, compression_provider=compression_provider)
+session_profile_manager = SessionProfileManager(state_store=runtime_state_store)
 browser_runtime = BrowserWorkerPool(
     state_store=runtime_state_store,
     runtime_factory=lambda: ExecutionPlaneRuntime(
-        browser_runtime=BrowserRuntime(state_store=runtime_state_store),
+        browser_runtime=BrowserRuntime(state_store=runtime_state_store, profile_manager=session_profile_manager),
         tool_registry=tool_registry,
     ),
 )
@@ -64,6 +66,7 @@ orchestrator = ControlPlane(
     safety=safety,
     budget_manager=budget_manager,
     state_store=runtime_state_store,
+    session_profiles=session_profile_manager,
     llm=llm_provider,
     compression_provider=compression_provider,
 )

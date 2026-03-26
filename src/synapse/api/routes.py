@@ -50,6 +50,7 @@ from synapse.models.task import (
     ToolCallRequest,
 )
 from synapse.runtime.orchestrator import RuntimeOrchestrator
+from synapse.runtime.session_profiles import SessionProfile, SessionProfileCreateRequest, SessionProfileLoadRequest
 from synapse.runtime.budget import AgentBudgetLimitExceeded
 from synapse.runtime.security import SandboxPermissionError, SandboxRateLimitError
 from synapse.runtime.safety import SecurityAlertError
@@ -618,6 +619,54 @@ async def get_session(
 ) -> BrowserSessionState:
     try:
         return await orchestrator.get_session(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/profiles/create", response_model=SessionProfile)
+async def create_session_profile(
+    request: SessionProfileCreateRequest,
+    _principal: BrowserControlPrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> SessionProfile:
+    try:
+        return await orchestrator.create_session_profile(request)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/profiles/{profile_id}/load", response_model=SessionProfile)
+async def load_session_profile(
+    profile_id: str,
+    request: SessionProfileLoadRequest,
+    _principal: BrowserControlPrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> SessionProfile:
+    try:
+        return await orchestrator.load_session_profile(profile_id, request)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/profiles", response_model=list[SessionProfile])
+async def list_session_profiles(
+    _principal: TasksReadPrincipal,
+    agent_id: str | None = None,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> list[SessionProfile]:
+    return await orchestrator.list_session_profiles(agent_id=agent_id)
+
+
+@router.delete("/profiles/{profile_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_session_profile(
+    profile_id: str,
+    _principal: BrowserControlPrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> None:
+    try:
+        await orchestrator.delete_session_profile(profile_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

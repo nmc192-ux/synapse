@@ -210,12 +210,35 @@ Synapse now persists runtime state to Redis with namespace keys:
 
 - `synapse:agents:{agent_id}`
 - `synapse:sessions:{session_id}`
+- `synapse:profiles:{profile_id}`
 - `synapse:connections:{agent_id}`
 - `synapse:checkpoints:{checkpoint_id}`
 - `synapse:events:{event_id}`
 
 Connection heartbeats update agent liveness. If an A2A connection misses heartbeat
 TTL (default `60s`), it is marked stale/offline and emits `connection.stale`.
+
+## Session Profiles
+
+Synapse supports durable authenticated session profiles for restoring browsing state
+ across runs.
+
+- `POST /api/profiles/create`
+- `POST /api/profiles/{profile_id}/load`
+- `GET /api/profiles`
+- `DELETE /api/profiles/{profile_id}`
+
+Profiles persist:
+
+- cookies
+- local storage snapshots by origin
+- session storage metadata by origin
+- domain-specific auth state
+- expiration metadata
+
+Loading a profile with a `run_id` attaches that profile to the run so the browser
+session bootstrap can restore it automatically. Expired profiles emit
+`session.profile.expired`.
 
 ## Control Plane / Execution Plane
 

@@ -36,8 +36,8 @@ from synapse.runtime.state_store import RuntimeStateStore
 class BrowserRuntime:
     """Thin facade that composes the focused browser runtime services."""
 
-    def __init__(self, state_store: RuntimeStateStore | None = None) -> None:
-        self.session_manager = SessionManager(settings=settings, state_store=state_store)
+    def __init__(self, state_store: RuntimeStateStore | None = None, profile_manager=None) -> None:
+        self.session_manager = SessionManager(settings=settings, state_store=state_store, profile_manager=profile_manager)
         self.spm_extractor = SPMExtractor()
         self.recovery_engine = RecoveryEngine()
         self.download_manager = DownloadManager()

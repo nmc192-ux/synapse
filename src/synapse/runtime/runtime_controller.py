@@ -4,6 +4,7 @@ import uuid
 
 from synapse.models.a2a import A2AEnvelope, A2AMessageType, AgentDelegateRequest, AgentPresence, AgentRegistrationRequest, AgentWireMessage
 from synapse.models.agent import AgentBudgetUsage, AgentCheckpoint, AgentDefinition, AgentDiscoveryEntry
+from synapse.models.capability import CapabilityAdvertisementRequest, CapabilityRecord
 from synapse.models.benchmark import BenchmarkReport, BenchmarkRunScore, BenchmarkScenario
 from synapse.models.browser import (
     BrowserState,
@@ -39,6 +40,7 @@ from synapse.runtime.a2a import A2AHub
 from synapse.runtime.benchmarking import BenchmarkSuite
 from synapse.runtime.budget import AgentBudgetManager
 from synapse.runtime.budget_service import BudgetService
+from synapse.runtime.capabilities import CapabilityRegistry
 from synapse.runtime.browser_service import BrowserService
 from synapse.runtime.checkpoint_service import CheckpointService
 from synapse.runtime.compression.base import CompressionProvider
@@ -101,6 +103,7 @@ class RuntimeController:
         if hasattr(browser, "set_event_publisher"):
             browser.set_event_publisher(self.event_bus.publish)
         self.run_store = RunStore(state_store)
+        self.capabilities = CapabilityRegistry(agents)
         self.benchmarks = BenchmarkSuite(self.run_store, state_store)
         self.scheduler = RunScheduler(self.run_store, browser, self.event_bus)
         self.budget_service = BudgetService(budget_manager, agents, self.event_bus, self.run_store)
@@ -227,6 +230,19 @@ class RuntimeController:
             payload={"agent_id": agent.agent_id, "status": "idle"},
         )
         return agent
+
+    async def advertise_capabilities(self, request: CapabilityAdvertisementRequest) -> CapabilityRecord:
+        record = await self.capabilities.advertise(request)
+        await self.event_bus.emit(
+            EventType.AGENT_REGISTERED,
+            agent_id=record.agent_id,
+            source="runtime_controller",
+            payload=record.model_dump(mode="json"),
+        )
+        return record
+
+    async def list_capabilities(self) -> list[CapabilityRecord]:
+        return await self.capabilities.list_capabilities()
 
     async def call_tool(self, tool_name: str, arguments: dict[str, object], agent_id: str | None) -> dict[str, object]:
         run_id = arguments.get("run_id") if isinstance(arguments.get("run_id"), str) else None
@@ -420,7 +436,7 @@ class RuntimeController:
         return result
 
     async def find_agents(self, capability: str) -> list[AgentDiscoveryEntry]:
-        return self.a2a.find_agents(capability)
+        return await self.capabilities.find(capability)
 
     async def send_a2a(self, envelope: A2AEnvelope) -> A2AEnvelope:
         response = await self.a2a.handle_message(envelope.sender_agent_id, envelope.model_dump(mode="json"))

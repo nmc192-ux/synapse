@@ -189,8 +189,8 @@ class AgentRegistry:
             availability = definition.agent_id in available_agent_ids
             score = (
                 definition.reputation * 100
-                + (25 if availability else 0)
                 - definition.latency
+                + (1 if availability else 0)
             )
             entries.append(
                 AgentDiscoveryEntry(
@@ -204,7 +204,7 @@ class AgentRegistry:
                 )
             )
 
-        return sorted(entries, key=lambda entry: (-entry.score, -entry.reputation, entry.latency, entry.id))
+        return sorted(entries, key=lambda entry: (-entry.reputation, entry.latency, not entry.availability, entry.id))
 
     def build_adapter(
         self,

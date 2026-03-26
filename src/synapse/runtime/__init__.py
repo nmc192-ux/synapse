@@ -8,6 +8,7 @@ from synapse.runtime.browser_service import BrowserService
 from synapse.runtime.browser_workers import BrowserWorkerPool
 from synapse.runtime.benchmarking import BenchmarkSuite
 from synapse.runtime.budget_service import BudgetService
+from synapse.runtime.capabilities import CapabilityRegistry
 from synapse.runtime.checkpoint_service import CheckpointService
 from synapse.runtime.execution_plane import ExecutionPlaneRuntime
 from synapse.runtime.memory_service import MemoryService
@@ -28,6 +29,7 @@ __all__ = [
     "BrowserService",
     "BudgetService",
     "BenchmarkSuite",
+    "CapabilityRegistry",
     "CheckpointService",
     "CompressionProvider",
     "ControlPlane",

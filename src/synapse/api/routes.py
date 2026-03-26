@@ -10,6 +10,7 @@ from synapse.models.a2a import (
     AgentWireMessage,
 )
 from synapse.models.agent import AgentBudgetUsage, AgentCheckpoint, AgentDefinition, AgentDiscoveryEntry
+from synapse.models.capability import CapabilityAdvertisementRequest, CapabilityRecord
 from synapse.models.browser import (
     BrowserState,
     ClickRequest,
@@ -392,6 +393,23 @@ async def find_agents(
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[AgentDiscoveryEntry]:
     return await orchestrator.find_agents(capability)
+
+
+@router.post("/agents/capabilities", response_model=CapabilityRecord)
+async def advertise_agent_capabilities(
+    request: CapabilityAdvertisementRequest,
+    _principal: AdminPrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> CapabilityRecord:
+    return await orchestrator.advertise_capabilities(request)
+
+
+@router.get("/agents/capabilities", response_model=list[CapabilityRecord])
+async def list_agent_capabilities(
+    _principal: TasksReadPrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> list[CapabilityRecord]:
+    return await orchestrator.list_capabilities()
 
 
 @router.post("/agents/message", response_model=AgentWireMessage)

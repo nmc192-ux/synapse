@@ -207,9 +207,9 @@ def test_agent_registry_finds_and_ranks_agents() -> None:
 
     matches = registry.find("web_scraping", available_agent_ids={"fast-online"})
 
-    assert [match.id for match in matches] == ["fast-online", "high-reputation"]
-    assert matches[0].availability is True
-    assert matches[1].availability is False
+    assert [match.id for match in matches] == ["high-reputation", "fast-online"]
+    assert matches[0].availability is False
+    assert matches[1].availability is True
 
 
 def test_agent_security_sandbox_blocks_unapproved_domain_and_tool() -> None:

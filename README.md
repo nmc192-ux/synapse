@@ -259,6 +259,16 @@ Synapse now persists runtime state to Redis with namespace keys:
 Connection heartbeats update agent liveness. If an A2A connection misses heartbeat
 TTL (default `60s`), it is marked stale/offline and emits `connection.stale`.
 
+## Capability Discovery
+
+Synapse can persist agent capability advertisements and ranked discovery metadata.
+
+- `POST /api/agents/capabilities`
+- `GET /api/agents/capabilities`
+- `GET /api/agents/find?capability=web_scraping`
+
+Capability discovery ranks results by reputation, then lower latency, then availability.
+
 ## Session Profiles
 
 Synapse supports durable authenticated session profiles for restoring browsing state

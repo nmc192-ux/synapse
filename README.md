@@ -168,6 +168,24 @@ The UI renders a Synapse operator dashboard with agent activity, page view, thou
 actions log, memory, and agent communication. It listens to `NEXT_PUBLIC_SYNAPSE_WS_URL`
 and defaults to `ws://127.0.0.1:8000/api/ws`.
 
+## Fixture Web
+
+Synapse includes a controlled fixture web app for reproducible browsing benchmarks.
+
+Run it locally:
+
+```bash
+uvicorn synapse.fixtures.web:app --host 127.0.0.1 --port 8011 --reload
+```
+
+The fixture app includes deterministic pages for search/extraction, form filling,
+popup dismissal, SPA navigation, upload/download, iframe interaction, lazy loading,
+and login/session continuation.
+
+Fixture docs:
+
+- [`/Users/jahanzebhussain/Synapse/docs/fixture-web.md`](/Users/jahanzebhussain/Synapse/docs/fixture-web.md)
+
 ## Task Execution API
 
 Synapse now includes a PostgreSQL-backed task manager for task creation, claiming,

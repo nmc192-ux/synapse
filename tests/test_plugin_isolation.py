@@ -1,4 +1,7 @@
 import asyncio
+import os
+import tempfile
+from pathlib import Path
 
 from synapse.models.agent import AgentDefinition, AgentKind
 from synapse.models.plugin import PluginExecutionMode
@@ -28,7 +31,7 @@ def test_isolated_plugin_executes_in_subprocess() -> None:
         assert result == {"echo": "ok", "mode": "isolated"}
         descriptor = tools.describe("isolated.echo")
         assert descriptor.execution_mode == PluginExecutionMode.ISOLATED_HOSTED
-        assert descriptor.isolation_strategy == "subprocess"
+        assert descriptor.isolation_strategy == "sandboxed_subprocess"
 
     asyncio.run(scenario())
 
@@ -47,6 +50,59 @@ def test_isolated_plugin_timeout_is_enforced() -> None:
             assert "timed out" in str(exc)
         else:  # pragma: no cover - defensive
             raise AssertionError("expected timeout")
+
+    asyncio.run(scenario())
+
+
+def test_sandboxed_plugin_filters_environment_and_captures_audit_logs() -> None:
+    async def scenario() -> None:
+        os.environ["SECRET_TOKEN"] = "should-not-leak"
+        tools = ToolRegistry(
+            execution_mode=PluginExecutionMode.ISOLATED_HOSTED,
+            execution_timeout_seconds=1.0,
+        )
+        tools.load_module("synapse.testing.isolated_plugin")
+
+        result = await tools.call(
+            "isolated.echo",
+            {"env_key": "SECRET_TOKEN", "print_stdout": True, "print_stderr": True},
+        )
+
+        assert result == {"value": None}
+        audit = tools.list_plugin_audit_logs(limit=1)[0]
+        assert audit["status"] == "ok"
+        assert "plugin stdout message" in str(audit["stdout"])
+        assert "plugin stderr message" in str(audit["stderr"])
+
+    asyncio.run(scenario())
+
+
+def test_sandboxed_plugin_blocks_network_and_outside_filesystem_access() -> None:
+    async def scenario() -> None:
+        tools = ToolRegistry(
+            execution_mode=PluginExecutionMode.ISOLATED_HOSTED,
+            execution_timeout_seconds=1.0,
+        )
+        tools.load_module("synapse.testing.isolated_plugin")
+        outside = Path(tempfile.gettempdir()) / "synapse-outside-read.txt"
+        outside.write_text("forbidden")
+
+        try:
+            try:
+                await tools.call("isolated.echo", {"network": True})
+            except RuntimeError as exc:
+                assert "cannot open network connections" in str(exc)
+            else:
+                raise AssertionError("expected blocked network access")
+
+            try:
+                await tools.call("isolated.echo", {"read_path": str(outside)})
+            except RuntimeError as exc:
+                assert "cannot read" in str(exc).lower()
+            else:
+                raise AssertionError("expected blocked filesystem read")
+        finally:
+            outside.unlink(missing_ok=True)
 
     asyncio.run(scenario())
 

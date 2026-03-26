@@ -1,19 +1,34 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import io
 import json
 import sys
 
 from synapse.models.plugin import PluginExecutionMode
+from synapse.runtime.plugin_sandbox import configure_process_sandbox
 from synapse.runtime.tools import ToolRegistry
 
 
 async def _run(module_name: str, tool_name: str, payload: str) -> int:
+    configure_process_sandbox()
     registry = ToolRegistry(execution_mode=PluginExecutionMode.TRUSTED_LOCAL)
     registry.load_module(module_name)
     arguments = json.loads(payload)
-    result = await registry.call(tool_name, arguments)
-    sys.stdout.write(json.dumps(result))
+    captured_stdout = io.StringIO()
+    captured_stderr = io.StringIO()
+    with contextlib.redirect_stdout(captured_stdout), contextlib.redirect_stderr(captured_stderr):
+        result = await registry.call(tool_name, arguments)
+    sys.stdout.write(
+        json.dumps(
+            {
+                "result": result,
+                "stdout": captured_stdout.getvalue(),
+                "stderr": captured_stderr.getvalue(),
+            }
+        )
+    )
     sys.stdout.flush()
     return 0
 

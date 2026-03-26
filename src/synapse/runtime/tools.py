@@ -6,10 +6,15 @@ import json
 import os
 import pkgutil
 import sys
+import tempfile
 from pathlib import Path
 from collections.abc import Awaitable, Callable
 
 from synapse.models.plugin import PluginDescriptor, PluginExecutionMode, ToolDescriptor
+from synapse.runtime.plugin_sandbox import (
+    PluginSandboxConfig,
+    build_sandbox_env,
+)
 
 ToolHandler = Callable[[dict[str, object]], Awaitable[dict[str, object]]]
 
@@ -24,6 +29,7 @@ class ToolRegistry:
         self._tools: dict[str, ToolHandler] = {}
         self._tool_descriptors: dict[str, ToolDescriptor] = {}
         self._plugins: dict[str, PluginDescriptor] = {}
+        self._plugin_audit_logs: list[dict[str, object]] = []
         self.execution_mode = execution_mode
         self.execution_timeout_seconds = execution_timeout_seconds
 
@@ -102,6 +108,9 @@ class ToolRegistry:
     def list_plugins(self) -> list[PluginDescriptor]:
         return [self._plugins[name] for name in sorted(self._plugins)]
 
+    def list_plugin_audit_logs(self, limit: int = 100) -> list[dict[str, object]]:
+        return [dict(item) for item in self._plugin_audit_logs[-limit:]]
+
     def load_package(self, package_name: str) -> list[str]:
         package = importlib.import_module(package_name)
         loaded: list[str] = []
@@ -165,9 +174,19 @@ class ToolRegistry:
         arguments: dict[str, object],
         plugin: PluginDescriptor,
     ) -> dict[str, object]:
-        env = dict(os.environ)
         src_path = str(Path(__file__).resolve().parents[2])
-        existing_pythonpath = env.get("PYTHONPATH", "")
+        repo_root = Path(__file__).resolve().parents[3]
+        existing_pythonpath = os.environ.get("PYTHONPATH", "")
+        sandbox_root = tempfile.mkdtemp(prefix="synapse-plugin-", dir=str(repo_root))
+        allowed_roots = (sandbox_root, src_path, str(repo_root))
+        config = PluginSandboxConfig(
+            plugin_module=plugin.module,
+            tool_name=name,
+            timeout_seconds=plugin.timeout_seconds,
+            allowed_read_roots=allowed_roots,
+            allowed_write_roots=(sandbox_root,),
+        )
+        env = build_sandbox_env(dict(os.environ), config)
         env["PYTHONPATH"] = src_path if not existing_pythonpath else f"{src_path}:{existing_pythonpath}"
         process = await asyncio.create_subprocess_exec(
             sys.executable,
@@ -178,7 +197,7 @@ class ToolRegistry:
             json.dumps(arguments),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=str(Path(__file__).resolve().parents[3]),
+            cwd=str(repo_root),
             env=env,
         )
         try:
@@ -189,23 +208,83 @@ class ToolRegistry:
         except asyncio.TimeoutError:
             process.kill()
             await process.communicate()
+            self._append_audit_log(
+                plugin=plugin,
+                tool_name=name,
+                arguments=arguments,
+                stdout="",
+                stderr="timeout",
+                returncode=-9,
+                status="timeout",
+            )
             raise TimeoutError(
                 f"Plugin tool timed out after {plugin.timeout_seconds:.1f}s: {name}"
             ) from None
 
+        stdout_text = stdout.decode("utf-8", errors="replace")
+        stderr_text = stderr.decode("utf-8", errors="replace")
         if process.returncode != 0:
-            detail = stderr.decode("utf-8", errors="replace").strip() or "plugin subprocess failed"
+            self._append_audit_log(
+                plugin=plugin,
+                tool_name=name,
+                arguments=arguments,
+                stdout=stdout_text,
+                stderr=stderr_text,
+                returncode=process.returncode or 0,
+                status="failed",
+            )
+            detail = stderr_text.strip() or "plugin subprocess failed"
             raise RuntimeError(f"Plugin tool failed: {name}: {detail}")
-        payload = stdout.decode("utf-8", errors="replace").strip()
+        payload = stdout_text.strip()
         if not payload:
             return {}
-        result = json.loads(payload)
+        envelope = json.loads(payload)
+        if not isinstance(envelope, dict):
+            raise TypeError(f"Plugin tool returned non-object payload: {name}")
+        result = envelope.get("result", {})
         if not isinstance(result, dict):
             raise TypeError(f"Plugin tool returned non-object payload: {name}")
+        self._append_audit_log(
+            plugin=plugin,
+            tool_name=name,
+            arguments=arguments,
+            stdout=str(envelope.get("stdout", "")),
+            stderr=str(envelope.get("stderr", "")),
+            returncode=process.returncode or 0,
+            status="ok",
+        )
         return result
+
+    def _append_audit_log(
+        self,
+        *,
+        plugin: PluginDescriptor,
+        tool_name: str,
+        arguments: dict[str, object],
+        stdout: str,
+        stderr: str,
+        returncode: int,
+        status: str,
+    ) -> None:
+        self._plugin_audit_logs.append(
+            {
+                "plugin_name": plugin.name,
+                "plugin_module": plugin.module,
+                "tool_name": tool_name,
+                "execution_mode": plugin.execution_mode.value,
+                "isolation_strategy": plugin.isolation_strategy,
+                "status": status,
+                "returncode": returncode,
+                "stdout": stdout,
+                "stderr": stderr,
+                "argument_keys": sorted(arguments.keys()),
+            }
+        )
+        if len(self._plugin_audit_logs) > 1000:
+            self._plugin_audit_logs = self._plugin_audit_logs[-1000:]
 
     @staticmethod
     def _default_isolation_strategy(mode: PluginExecutionMode) -> str:
         if mode == PluginExecutionMode.ISOLATED_HOSTED:
-            return "subprocess"
+            return "sandboxed_subprocess"
         return "in_process"

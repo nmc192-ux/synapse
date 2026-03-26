@@ -274,3 +274,14 @@ New browser observability events:
 - `navigation.route_changed`
 - `browser.error`
 - `session.expired`
+- `browser.challenge.detected`
+- `browser.captcha.detected`
+- `browser.human_intervention.required`
+
+CAPTCHA and anti-bot policy behavior is controlled by `challenge_policy` on the
+agent or run security policy. Supported values are:
+
+- `fail`
+- `pause`
+- `escalate_to_operator`
+- `retry_with_profile`

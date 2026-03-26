@@ -161,6 +161,17 @@ class SessionManager:
         await self.save_session_state(session_id, extractor, run_id=state.run_id)
         return BrowserSession(session_id=session_id, current_url=snapshot.url, page=snapshot)
 
+    async def apply_attached_profile(self, session_id: str) -> bool:
+        if self._profile_manager is None:
+            return False
+        run_id = self._session_runs.get(session_id)
+        if not isinstance(run_id, str) or not run_id:
+            return False
+        page = self.require_page(session_id)
+        context = self.require_context(session_id)
+        profile = await self._profile_manager.apply_profile_to_browser(run_id, context, page)
+        return profile is not None
+
     async def list_sessions(self, extractor, agent_id: str | None = None) -> list[BrowserSessionState]:
         if self._state_store is None:
             rows: list[BrowserSessionState] = []

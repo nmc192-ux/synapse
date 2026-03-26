@@ -36,6 +36,40 @@ UNSAFE_INSTRUCTION_PATTERNS = [
     )
 ]
 
+CAPTCHA_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bcaptcha\b",
+        r"recaptcha",
+        r"hcaptcha",
+        r"cloudflare turnstile",
+        r"turnstile challenge",
+        r"verify you are human",
+        r"prove you are human",
+        r"i am human",
+        r"robot check",
+    )
+]
+
+CHALLENGE_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"checking your browser",
+        r"attention required",
+        r"access denied",
+        r"security check",
+        r"unusual traffic",
+        r"suspicious traffic",
+        r"challenge page",
+        r"bot detection",
+        r"are you a robot",
+        r"press and hold",
+        r"verify your identity",
+        r"challenge-platform",
+        r"cf-challenge",
+    )
+]
+
 
 class SecurityFinding(BaseModel):
     category: str
@@ -111,6 +145,37 @@ class AgentSafetyLayer:
             return invalid_payload
         return None
 
+    def inspect_browser_barrier(self, page: StructuredPageModel, action: str) -> SecurityFinding | None:
+        snippets = self._page_snippets(page)
+        combined = " ".join(snippets)
+        if self._matches(combined, CAPTCHA_PATTERNS):
+            return SecurityFinding(
+                category="captcha",
+                reason="Likely CAPTCHA challenge detected on the page.",
+                source=action,
+                excerpt=combined[:240],
+                metadata={
+                    "url": page.url,
+                    "title": page.title,
+                    "barrier_type": "captcha",
+                    "confidence": self._pattern_confidence(combined, CAPTCHA_PATTERNS),
+                },
+            )
+        if self._matches(combined, CHALLENGE_PATTERNS):
+            return SecurityFinding(
+                category="anti_bot_challenge",
+                reason="Likely anti-bot or human verification challenge detected on the page.",
+                source=action,
+                excerpt=combined[:240],
+                metadata={
+                    "url": page.url,
+                    "title": page.title,
+                    "barrier_type": "challenge",
+                    "confidence": self._pattern_confidence(combined, CHALLENGE_PATTERNS),
+                },
+            )
+        return None
+
     def build_policy_finding(
         self,
         *,
@@ -179,6 +244,13 @@ class AgentSafetyLayer:
     @staticmethod
     def _matches(value: str, patterns: list[re.Pattern[str]]) -> bool:
         return any(pattern.search(value) for pattern in patterns)
+
+    @staticmethod
+    def _pattern_confidence(value: str, patterns: list[re.Pattern[str]]) -> float:
+        matches = sum(1 for pattern in patterns if pattern.search(value))
+        if matches <= 0:
+            return 0.0
+        return min(1.0, 0.45 + (0.15 * matches))
 
     @staticmethod
     def _action_strings(action: AgentAction) -> list[str]:

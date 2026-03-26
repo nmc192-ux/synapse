@@ -113,7 +113,10 @@ function buildAction(
     !event.event_type.includes("screenshot") &&
     !event.event_type.includes("upload") &&
     !event.event_type.includes("download") &&
-    !event.event_type.includes("popup")
+    !event.event_type.includes("popup") &&
+    !event.event_type.includes("challenge") &&
+    !event.event_type.includes("captcha") &&
+    !event.event_type.includes("human_intervention")
   ) {
     return null;
   }
@@ -336,6 +339,12 @@ function summarizeEvent(eventType: string, payload: Record<string, unknown>): st
       return `Detected route change to ${stringify(payload.to_url) ?? "new route"}.`;
     case "session.expired":
       return "Session expiration was detected while browsing.";
+    case "browser.challenge.detected":
+      return `Anti-bot challenge detected on ${stringify(payload.page_url) ?? "the current page"}.`;
+    case "browser.captcha.detected":
+      return "CAPTCHA challenge detected; autonomous execution should stop or hand off.";
+    case "browser.human_intervention.required":
+      return "Operator handoff required to continue past a browser challenge.";
     case "browser.error":
       return stringify(payload.error) ?? "Browser interaction error captured.";
     default:
@@ -344,6 +353,9 @@ function summarizeEvent(eventType: string, payload: Record<string, unknown>): st
 }
 
 function toneForEvent(eventType: string): ActivityItem["tone"] {
+  if (eventType.includes("challenge") || eventType.includes("captcha") || eventType.includes("human_intervention")) {
+    return "alert";
+  }
   if (eventType.includes("error")) return "alert";
   if (eventType.includes("tool") || eventType.includes("planned")) return "warm";
   return "normal";

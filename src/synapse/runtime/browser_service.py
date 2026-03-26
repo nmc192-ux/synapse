@@ -23,6 +23,7 @@ from synapse.models.browser import (
     UploadRequest,
     UploadResult,
 )
+from synapse.models.agent import AgentChallengePolicy
 from synapse.models.runtime_event import EventSeverity, EventType
 from synapse.models.runtime_state import BrowserSessionState
 from synapse.models.task import ExtractionRequest, NavigationRequest
@@ -50,6 +51,7 @@ class BrowserService:
         self.events = events
         self.budget_service = budget_service
         self.state_store = state_store
+        self._challenge_retries: set[tuple[str | None, str, str]] = set()
 
     def set_state_store(self, state_store: RuntimeStateStore) -> None:
         self.state_store = state_store
@@ -97,7 +99,14 @@ class BrowserService:
                 previous_url=current_url,
                 current_url=session.current_url,
             )
-            await self._enforce_page_safety(request.agent_id, session.session_id, "browser.navigate", session.page)
+            session = await self._enforce_result_barrier(
+                action="navigate",
+                agent_id=request.agent_id,
+                session_id=session.session_id,
+                result=session,
+                page_getter=lambda value: value.page,
+                rerun=lambda: self.browser.navigate(request.session_id, str(request.url)),
+            )
             await self.events.emit(
                 EventType.PAGE_NAVIGATED,
                 run_id=run_id,
@@ -108,7 +117,8 @@ class BrowserService:
             )
             return session
         except SandboxApprovalRequiredError as exc:
-            await self._emit_approval_required(request.agent_id, request.session_id, run_id, exc)
+            if not exc.metadata.get("_approval_emitted"):
+                await self._emit_approval_required(request.agent_id, request.session_id, run_id, exc)
             raise
 
     async def open(self, request: OpenRequest) -> BrowserState:
@@ -145,7 +155,14 @@ class BrowserService:
         self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
         self.sandbox.consume_browser_action(request.agent_id)
         payload = await self.browser.extract(request.session_id, request.selector, request.attribute)
-        await self._enforce_page_safety(request.agent_id, request.session_id, "browser.extract", payload.page)
+        payload = await self._enforce_result_barrier(
+            action="extract",
+            agent_id=request.agent_id,
+            session_id=request.session_id,
+            result=payload,
+            page_getter=lambda value: value.page,
+            rerun=lambda: self.browser.extract(request.session_id, request.selector, request.attribute),
+        )
         await self._emit_spm_compressed(request.agent_id, request.session_id, payload.page)
         await self.events.emit(
             EventType.DATA_EXTRACTED,
@@ -165,7 +182,14 @@ class BrowserService:
             self.sandbox.authorize_screenshot(request.agent_id, run_id=run_id)
             self.sandbox.consume_browser_action(request.agent_id)
             result = await self.browser.screenshot(request.session_id)
-            await self._enforce_page_safety(request.agent_id, request.session_id, "browser.screenshot", result.page)
+            result = await self._enforce_result_barrier(
+                action="screenshot",
+                agent_id=request.agent_id,
+                session_id=request.session_id,
+                result=result,
+                page_getter=lambda value: value.page,
+                rerun=lambda: self.browser.screenshot(request.session_id),
+            )
             await self._emit_spm_compressed(request.agent_id, request.session_id, result.page)
             await self.events.emit(
                 EventType.SCREENSHOT_CAPTURED,
@@ -177,7 +201,8 @@ class BrowserService:
             )
             return result
         except SandboxApprovalRequiredError as exc:
-            await self._emit_approval_required(request.agent_id, request.session_id, run_id, exc)
+            if not exc.metadata.get("_approval_emitted"):
+                await self._emit_approval_required(request.agent_id, request.session_id, run_id, exc)
             raise
 
     async def get_layout(self, request: LayoutRequest) -> StructuredPageModel:
@@ -185,6 +210,13 @@ class BrowserService:
         self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
         self.sandbox.consume_browser_action(request.agent_id)
         layout = await self.browser.get_layout(request.session_id)
+        layout = await self._handle_page_barrier(
+            action="get_layout",
+            agent_id=request.agent_id,
+            session_id=request.session_id,
+            page=layout,
+            rerun=lambda: self.browser.get_layout(request.session_id),
+        )
         await self._emit_spm_compressed(request.agent_id, request.session_id, layout)
         return layout
 
@@ -205,6 +237,14 @@ class BrowserService:
         self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
         self.sandbox.consume_browser_action(request.agent_id)
         state = await self.browser.dismiss_popups(request.session_id)
+        state = await self._enforce_result_barrier(
+            action="dismiss",
+            agent_id=request.agent_id,
+            session_id=request.session_id,
+            result=state,
+            page_getter=lambda value: value.page,
+            rerun=lambda: self.browser.dismiss_popups(request.session_id),
+        )
         await self._emit_spm_compressed(request.agent_id, request.session_id, state.page)
         await self.events.emit(
             EventType.POPUP_DISMISSED,
@@ -224,6 +264,14 @@ class BrowserService:
             self.sandbox.authorize_upload(request.agent_id, run_id=run_id)
             self.sandbox.consume_browser_action(request.agent_id)
             result = await self.browser.upload(request.session_id, request.selector, request.file_paths)
+            result = await self._enforce_result_barrier(
+                action="upload",
+                agent_id=request.agent_id,
+                session_id=request.session_id,
+                result=result,
+                page_getter=lambda value: value.page,
+                rerun=lambda: self.browser.upload(request.session_id, request.selector, request.file_paths),
+            )
             await self._emit_spm_compressed(request.agent_id, request.session_id, result.page)
             await self.events.emit(
                 EventType.UPLOAD_COMPLETED,
@@ -235,7 +283,8 @@ class BrowserService:
             )
             return result
         except SandboxApprovalRequiredError as exc:
-            await self._emit_approval_required(request.agent_id, request.session_id, run_id, exc)
+            if not exc.metadata.get("_approval_emitted"):
+                await self._emit_approval_required(request.agent_id, request.session_id, run_id, exc)
             raise
 
     async def download(self, request: DownloadRequest) -> DownloadResult:
@@ -247,6 +296,14 @@ class BrowserService:
             self.sandbox.authorize_download(request.agent_id, run_id=run_id)
             self.sandbox.consume_browser_action(request.agent_id)
             result = await self.browser.download(request.session_id, request.trigger_selector, request.timeout_ms)
+            result = await self._enforce_result_barrier(
+                action="download",
+                agent_id=request.agent_id,
+                session_id=request.session_id,
+                result=result,
+                page_getter=lambda value: value.page,
+                rerun=lambda: self.browser.download(request.session_id, request.trigger_selector, request.timeout_ms),
+            )
             await self._emit_spm_compressed(request.agent_id, request.session_id, result.page)
             await self.events.emit(
                 EventType.DOWNLOAD_COMPLETED,
@@ -258,7 +315,8 @@ class BrowserService:
             )
             return result
         except SandboxApprovalRequiredError as exc:
-            await self._emit_approval_required(request.agent_id, request.session_id, run_id, exc)
+            if not exc.metadata.get("_approval_emitted"):
+                await self._emit_approval_required(request.agent_id, request.session_id, run_id, exc)
             raise
 
     async def scroll_extract(self, request: ScrollExtractRequest) -> ScrollExtractResult:
@@ -271,6 +329,20 @@ class BrowserService:
             attribute=request.attribute,
             max_scrolls=request.max_scrolls,
             scroll_step=request.scroll_step,
+        )
+        result = await self._enforce_result_barrier(
+            action="scroll_extract",
+            agent_id=request.agent_id,
+            session_id=request.session_id,
+            result=result,
+            page_getter=lambda value: value.page,
+            rerun=lambda: self.browser.scroll_extract(
+                request.session_id,
+                selector=request.selector,
+                attribute=request.attribute,
+                max_scrolls=request.max_scrolls,
+                scroll_step=request.scroll_step,
+            ),
         )
         await self._emit_spm_compressed(request.agent_id, request.session_id, result.page)
         await self.events.emit(
@@ -371,7 +443,14 @@ class BrowserService:
                     previous_url=current_url,
                     current_url=getattr(state.page, "url", precheck_url),
                 )
-            await self._enforce_page_safety(agent_id, state.session_id, f"browser.{action}", state.page)
+            state = await self._enforce_result_barrier(
+                action=action,
+                agent_id=agent_id,
+                session_id=state.session_id,
+                result=state,
+                page_getter=lambda value: value.page,
+                rerun=executor,
+            )
             await self.events.emit(
                 EventType.PAGE_NAVIGATED,
                 run_id=run_id,
@@ -384,7 +463,8 @@ class BrowserService:
             await self._emit_browser_metadata_events(agent_id, state.session_id, state.metadata)
             return state
         except SandboxApprovalRequiredError as exc:
-            await self._emit_approval_required(agent_id, session_id, run_id, exc)
+            if not exc.metadata.get("_approval_emitted"):
+                await self._emit_approval_required(agent_id, session_id, run_id, exc)
             raise
         except Exception as exc:
             await self._emit_browser_error(action, agent_id, session_id, exc)
@@ -392,7 +472,18 @@ class BrowserService:
 
     async def _ensure_current_page_safe(self, agent_id: str | None, session_id: str, action: str) -> None:
         page = await self.browser.get_layout(session_id)
-        await self._enforce_page_safety(agent_id, session_id, action, page)
+        try:
+            await self._handle_page_barrier(
+                action=action.removeprefix("browser."),
+                agent_id=agent_id,
+                session_id=session_id,
+                page=page,
+                rerun=lambda: self.browser.get_layout(session_id),
+            )
+        except SandboxApprovalRequiredError as exc:
+            run_id = await self._resolve_run_id(agent_id=agent_id, session_id=session_id)
+            await self._emit_approval_required(agent_id, session_id, run_id, exc)
+            raise
 
     async def _enforce_page_safety(
         self,
@@ -406,6 +497,54 @@ class BrowserService:
         finding = self.safety.inspect_page(page, action)
         if finding is not None:
             await self._raise_security_alert(agent_id, session_id, finding)
+
+    async def _handle_page_barrier(
+        self,
+        *,
+        action: str,
+        agent_id: str | None,
+        session_id: str,
+        page: StructuredPageModel | None,
+        rerun,
+    ):
+        await self._enforce_page_safety(agent_id, session_id, f"browser.{action}", page)
+        if page is None:
+            return page
+        run_id = await self._resolve_run_id(agent_id=agent_id, session_id=session_id)
+        barrier = self.safety.inspect_browser_barrier(page, f"browser.{action}")
+        if barrier is None:
+            return page
+        return await self._apply_challenge_policy(
+            agent_id=agent_id,
+            session_id=session_id,
+            run_id=run_id,
+            action=action,
+            page=page,
+            finding=barrier,
+            rerun=rerun,
+        )
+
+    async def _enforce_result_barrier(
+        self,
+        *,
+        action: str,
+        agent_id: str | None,
+        session_id: str,
+        result,
+        page_getter,
+        rerun,
+    ):
+        page = page_getter(result)
+        replacement = await self._handle_page_barrier(
+            action=action,
+            agent_id=agent_id,
+            session_id=session_id,
+            page=page,
+            rerun=rerun,
+        )
+        if replacement is None or replacement is page:
+            return result
+        return replacement
 
     async def _raise_security_alert(
         self,
@@ -440,6 +579,15 @@ class BrowserService:
         if metadata.get("session_expired"):
             await self.events.emit(
                 EventType.SESSION_EXPIRED,
+                agent_id=agent_id,
+                session_id=session_id,
+                source="browser_service",
+                payload=metadata,
+                severity=EventSeverity.WARNING,
+            )
+        if metadata.get("human_intervention_required"):
+            await self.events.emit(
+                EventType.BROWSER_HUMAN_INTERVENTION_REQUIRED,
                 agent_id=agent_id,
                 session_id=session_id,
                 source="browser_service",
@@ -503,6 +651,121 @@ class BrowserService:
             severity=EventSeverity.ERROR,
         )
 
+    async def _apply_challenge_policy(
+        self,
+        *,
+        agent_id: str | None,
+        session_id: str,
+        run_id: str | None,
+        action: str,
+        page: StructuredPageModel,
+        finding: SecurityFinding,
+        rerun,
+    ):
+        policy = self.sandbox.resolve_policy(agent_id, run_id=run_id) if agent_id else None
+        challenge_policy = policy.challenge_policy if policy is not None else AgentChallengePolicy.FAIL
+        await self.events.emit(
+            EventType.BROWSER_CAPTCHA_DETECTED if finding.category == "captcha" else EventType.BROWSER_CHALLENGE_DETECTED,
+            run_id=run_id,
+            agent_id=agent_id,
+            session_id=session_id,
+            source="browser_service",
+            payload={
+                **finding.model_dump(mode="json"),
+                "policy": challenge_policy.value,
+                "action": action,
+                "page_url": page.url,
+                "page_title": page.title,
+            },
+            severity=EventSeverity.WARNING,
+            correlation_id=run_id or session_id,
+        )
+        if challenge_policy == AgentChallengePolicy.RETRY_WITH_PROFILE:
+            if await self._retry_with_profile(session_id=session_id, run_id=run_id, action=action):
+                retried = await rerun()
+                retried_page = getattr(retried, "page", retried)
+                repeat = self.safety.inspect_browser_barrier(retried_page, f"browser.{action}")
+                if repeat is None:
+                    return retried
+                finding = repeat
+        if challenge_policy == AgentChallengePolicy.FAIL:
+            await self._raise_security_alert(agent_id, session_id, finding)
+        await self._emit_human_intervention_required(
+            agent_id=agent_id,
+            session_id=session_id,
+            run_id=run_id,
+            action=action,
+            policy=challenge_policy,
+            finding=finding,
+            page=page,
+        )
+        raise SandboxApprovalRequiredError(
+            "Human intervention is required to continue past a CAPTCHA or anti-bot challenge.",
+            action="human_intervention",
+            metadata={
+                "challenge_type": finding.category,
+                "challenge_policy": challenge_policy.value,
+                "page_url": page.url,
+                "page_title": page.title,
+            },
+        )
+
+    async def _retry_with_profile(
+        self,
+        *,
+        session_id: str,
+        run_id: str | None,
+        action: str,
+    ) -> bool:
+        key = (run_id, session_id, action)
+        if key in self._challenge_retries:
+            return False
+        if not hasattr(self.browser, "apply_attached_profile"):
+            return False
+        self._challenge_retries.add(key)
+        applied = await self.browser.apply_attached_profile(session_id)
+        if not applied:
+            return False
+        await self.events.emit(
+            EventType.SESSION_RESTORED,
+            run_id=run_id,
+            session_id=session_id,
+            source="browser_service",
+            payload={"session_id": session_id, "recovery": "retry_with_profile", "action": action},
+            correlation_id=run_id or session_id,
+        )
+        return True
+
+    async def _emit_human_intervention_required(
+        self,
+        *,
+        agent_id: str | None,
+        session_id: str,
+        run_id: str | None,
+        action: str,
+        policy: AgentChallengePolicy,
+        finding: SecurityFinding,
+        page: StructuredPageModel,
+    ) -> None:
+        await self.events.emit(
+            EventType.BROWSER_HUMAN_INTERVENTION_REQUIRED,
+            run_id=run_id,
+            agent_id=agent_id,
+            session_id=session_id,
+            source="browser_service",
+            payload={
+                "action": action,
+                "policy": policy.value,
+                "challenge_type": finding.category,
+                "reason": finding.reason,
+                "page_url": page.url,
+                "page_title": page.title,
+                "operator_handoff": True,
+            },
+            severity=EventSeverity.WARNING,
+            correlation_id=run_id or session_id,
+        )
+
     async def _emit_approval_required(
         self,
         agent_id: str | None,
@@ -523,6 +786,7 @@ class BrowserService:
             },
             severity=EventSeverity.WARNING,
         )
+        exc.metadata["_approval_emitted"] = True
 
     async def _resolve_run_id(self, *, agent_id: str | None, session_id: str | None) -> str | None:
         if session_id is not None and self.state_store is not None:

@@ -4,7 +4,7 @@ import pytest
 
 from synapse.models.a2a import AgentRegistrationRequest
 from synapse.models.a2a import A2AMessageType, A2AEnvelope
-from synapse.models.agent import AgentDefinition, AgentKind
+from synapse.models.agent import AgentChallengePolicy, AgentDefinition, AgentKind
 from synapse.models.runtime_event import EventType
 from synapse.models.task import TaskRequest
 from synapse.runtime.a2a import A2AHub
@@ -43,6 +43,59 @@ class _PolicyBrowser:
 
     async def upload(self, session_id: str, selector: str, file_paths: list[str]):
         raise AssertionError("upload should not run when approval is required")
+
+
+class _ChallengeBrowser:
+    def __init__(self) -> None:
+        self.applied_profile = False
+        self.open_calls = 0
+
+    async def get_layout(self, session_id: str):
+        return self._page()
+
+    async def open(self, session_id: str, url: str):
+        self.open_calls += 1
+        page = self._page(url)
+        return type(
+            "State",
+            (),
+            {
+                "session_id": session_id,
+                "page": page,
+                "metadata": {},
+                "model_dump": lambda self, mode="json": {
+                    "session_id": session_id,
+                    "page": {"title": page.title, "url": page.url},
+                    "metadata": {},
+                },
+            },
+        )()
+
+    async def apply_attached_profile(self, session_id: str) -> bool:
+        self.applied_profile = True
+        return True
+
+    def current_url(self, session_id: str) -> str:
+        return "https://example.com/challenge"
+
+    def _page(self, url: str = "https://example.com/challenge"):
+        title = "Welcome back" if self.applied_profile else "Attention Required"
+        sections = [] if self.applied_profile else [type("Section", (), {"heading": "Verify you are human", "text": "Complete the CAPTCHA", "selector_hint": "main"})()]
+        buttons = [] if self.applied_profile else [type("Button", (), {"text": "I am human", "selector_hint": "button"})()]
+        return type(
+            "Page",
+            (),
+            {
+                "title": title,
+                "url": "https://example.com/app" if self.applied_profile else url,
+                "sections": sections,
+                "buttons": buttons,
+                "inputs": [],
+                "forms": [],
+                "tables": [],
+                "links": [],
+            },
+        )()
 
 
 def test_sandbox_enforces_cross_domain_jump_limit() -> None:
@@ -198,5 +251,89 @@ def test_a2a_delegation_emits_approval_required() -> None:
                 event = await queue.get()
             assert event.event_type == EventType.APPROVAL_REQUIRED
             assert event.payload["action"] == "delegate"
+
+    asyncio.run(scenario())
+
+
+def test_browser_service_emits_human_intervention_for_captcha_pause_policy() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        registry = AgentRegistry(state_store=store)
+        registry.register(
+            AgentDefinition(
+                agent_id="agent-1",
+                kind=AgentKind.CUSTOM,
+                name="Agent 1",
+                security={"allowed_domains": ["example.com"], "challenge_policy": AgentChallengePolicy.PAUSE},
+            )
+        )
+        sandbox = AgentSecuritySandbox(registry, state_store=store)
+        bus = EventBus(WebSocketManager(state_store=store))
+        budget = BudgetService(AgentBudgetManager(), registry, bus)
+        service = BrowserService(_ChallengeBrowser(), sandbox, AgentSafetyLayer(), bus, budget, state_store=store)
+        await store.store_session(
+            "session-1",
+            {"session_id": "session-1", "agent_id": "agent-1", "current_url": "https://example.com/challenge"},
+        )
+
+        async with bus.subscribe("captcha-test") as queue:
+            with pytest.raises(SandboxApprovalRequiredError):
+                await service.open(
+                    request=type(
+                        "OpenRequest",
+                        (),
+                        {"session_id": "session-1", "agent_id": "agent-1", "url": "https://example.com/challenge"},
+                    )()
+                )
+            seen = []
+            while len(seen) < 5:
+                event = await queue.get()
+                seen.append(event)
+                event_types = {item.event_type for item in seen}
+                if EventType.BROWSER_CAPTCHA_DETECTED in event_types and EventType.BROWSER_HUMAN_INTERVENTION_REQUIRED in event_types:
+                    break
+            event_types = {event.event_type for event in seen}
+            assert EventType.BROWSER_CAPTCHA_DETECTED in event_types
+            assert EventType.BROWSER_HUMAN_INTERVENTION_REQUIRED in event_types
+
+    asyncio.run(scenario())
+
+
+def test_browser_service_retries_with_profile_once_on_challenge() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        registry = AgentRegistry(state_store=store)
+        registry.register(
+            AgentDefinition(
+                agent_id="agent-1",
+                kind=AgentKind.CUSTOM,
+                name="Agent 1",
+                security={"allowed_domains": ["example.com"], "challenge_policy": AgentChallengePolicy.RETRY_WITH_PROFILE},
+            )
+        )
+        sandbox = AgentSecuritySandbox(registry, state_store=store)
+        bus = EventBus(WebSocketManager(state_store=store))
+        budget = BudgetService(AgentBudgetManager(), registry, bus)
+        browser = _ChallengeBrowser()
+        service = BrowserService(browser, sandbox, AgentSafetyLayer(), bus, budget, state_store=store)
+        await store.store_run(
+            "run-1",
+            {"run_id": "run-1", "task_id": "task-1", "agent_id": "agent-1", "status": "running", "metadata": {"session_profile_id": "profile-1"}},
+        )
+        await store.store_session(
+            "session-1",
+            {"session_id": "session-1", "agent_id": "agent-1", "run_id": "run-1", "current_url": "https://example.com/challenge"},
+        )
+
+        state = await service.open(
+            request=type(
+                "OpenRequest",
+                (),
+                {"session_id": "session-1", "agent_id": "agent-1", "url": "https://example.com/challenge"},
+            )()
+        )
+        assert browser.applied_profile is True
+        assert browser.open_calls == 2
+        assert state.page.title == "Welcome back"
 
     asyncio.run(scenario())

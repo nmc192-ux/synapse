@@ -24,6 +24,13 @@ class AgentRateLimits(BaseModel):
     tool_calls_per_minute: int = 15
 
 
+class AgentChallengePolicy(str, Enum):
+    FAIL = "fail"
+    PAUSE = "pause"
+    ESCALATE_TO_OPERATOR = "escalate_to_operator"
+    RETRY_WITH_PROFILE = "retry_with_profile"
+
+
 class AgentSecurityPolicy(BaseModel):
     allowed_domains: list[str] = Field(default_factory=list)
     blocked_domains: list[str] = Field(default_factory=list)
@@ -34,6 +41,7 @@ class AgentSecurityPolicy(BaseModel):
     screenshot_allowed: bool = True
     dangerous_action_requires_approval: bool = False
     max_cross_domain_jumps: int = 10
+    challenge_policy: AgentChallengePolicy = AgentChallengePolicy.FAIL
     rate_limits: AgentRateLimits = Field(default_factory=AgentRateLimits)
     block_unsafe_actions: bool = True
 

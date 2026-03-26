@@ -51,6 +51,9 @@ class EventType(str, Enum):
     RUN_REQUEUED = "run.requeued"
     WORKER_UNAVAILABLE = "worker.unavailable"
     SESSION_PROFILE_EXPIRED = "session.profile.expired"
+    BROWSER_CHALLENGE_DETECTED = "browser.challenge.detected"
+    BROWSER_CAPTCHA_DETECTED = "browser.captcha.detected"
+    BROWSER_HUMAN_INTERVENTION_REQUIRED = "browser.human_intervention.required"
 
 
 class EventSeverity(str, Enum):

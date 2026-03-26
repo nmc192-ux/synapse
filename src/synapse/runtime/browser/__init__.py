@@ -154,6 +154,9 @@ class BrowserRuntime:
     async def restore_session_state(self, session_id: str) -> BrowserSession | None:
         return await self.session_manager.restore_session_state(session_id, self._extractor_proxy())
 
+    async def apply_attached_profile(self, session_id: str) -> bool:
+        return await self.session_manager.apply_attached_profile(session_id)
+
     async def list_sessions(self, agent_id: str | None = None) -> list[BrowserSessionState]:
         return await self.session_manager.list_sessions(self._extractor_proxy(), agent_id=agent_id)
 

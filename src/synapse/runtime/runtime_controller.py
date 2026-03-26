@@ -117,6 +117,7 @@ class RuntimeController:
         self.authenticator = authenticator
 
         self.event_bus = EventBus(sockets, compression_provider=compression_provider)
+        self.event_bus.set_context_resolver(self._resolve_event_context)
         self.event_bus.add_listener(self._handle_runtime_event)
         self.session_profiles.set_event_publisher(self.event_bus.publish)
         if hasattr(browser, "set_event_publisher"):
@@ -443,6 +444,70 @@ class RuntimeController:
         if self.state_store is None:
             return []
         return await self.state_store.get_runtime_events(run_id=run_id, limit=200)
+
+    async def _resolve_event_context(self, event) -> dict[str, object]:
+        resolved: dict[str, object] = {}
+        run = None
+        session = None
+        agent = None
+
+        if event.run_id is not None:
+            try:
+                run = await self.run_store.get(event.run_id)
+            except KeyError:
+                run = None
+
+        if run is None and event.session_id is not None:
+            try:
+                session = await self.browser_service.get_session(event.session_id)
+            except KeyError:
+                session = None
+            else:
+                if event.run_id is None and session.run_id is not None:
+                    resolved["run_id"] = session.run_id
+                    try:
+                        run = await self.run_store.get(session.run_id)
+                    except KeyError:
+                        run = None
+                if event.agent_id is None and session.agent_id is not None:
+                    resolved["agent_id"] = session.agent_id
+                if event.project_id is None and session.project_id is not None:
+                    resolved["project_id"] = session.project_id
+
+        agent_id = resolved.get("agent_id") if isinstance(resolved.get("agent_id"), str) else event.agent_id
+        if run is not None:
+            if event.agent_id is None and "agent_id" not in resolved:
+                resolved["agent_id"] = run.agent_id
+                agent_id = run.agent_id
+            if event.task_id is None:
+                resolved["task_id"] = run.task_id
+            if event.project_id is None and run.project_id is not None and "project_id" not in resolved:
+                resolved["project_id"] = run.project_id
+            if event.correlation_id is None and run.correlation_id is not None:
+                resolved["correlation_id"] = run.correlation_id
+
+        if isinstance(agent_id, str):
+            try:
+                agent = self.agents.get(agent_id)
+            except KeyError:
+                agent = None
+            else:
+                if event.organization_id is None and agent.organization_id is not None:
+                    resolved["organization_id"] = agent.organization_id
+                if event.project_id is None and resolved.get("project_id") is None and agent.project_id is not None:
+                    resolved["project_id"] = agent.project_id
+
+        if event.organization_id is None and resolved.get("organization_id") is None:
+            project_id = resolved.get("project_id") if isinstance(resolved.get("project_id"), str) else event.project_id
+            if isinstance(project_id, str):
+                try:
+                    project = await self.platform.get_project(project_id)
+                except Exception:
+                    project = None
+                if project is not None:
+                    resolved["organization_id"] = project.organization_id
+
+        return resolved
 
     async def get_run_timeline(self, run_id: str, limit: int = 500) -> RunTimeline:
         return await self.run_store.get_timeline(run_id, limit=limit)

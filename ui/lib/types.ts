@@ -1,6 +1,8 @@
 export type SynapseEvent = {
   event_id?: string;
   event_type: string;
+  organization_id?: string | null;
+  project_id?: string | null;
   agent_id?: string | null;
   task_id?: string | null;
   session_id?: string | null;

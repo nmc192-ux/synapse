@@ -318,6 +318,8 @@ class RunStore:
         phase = event.get("phase")
         return RunTimelineEntry(
             event_id=str(event.get("event_id")),
+            organization_id=str(event.get("organization_id")) if event.get("organization_id") is not None else None,
+            project_id=str(event.get("project_id")) if event.get("project_id") is not None else None,
             run_id=run_id,
             timestamp=datetime.fromisoformat(str(timestamp)) if isinstance(timestamp, str) else datetime.now(timezone.utc),
             event_type=str(event.get("event_type")),

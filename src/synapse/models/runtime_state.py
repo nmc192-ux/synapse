@@ -100,6 +100,8 @@ class RuntimeCheckpoint(BaseModel):
 class RuntimeEventRecord(BaseModel):
     event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     event_type: str
+    organization_id: str | None = None
+    project_id: str | None = None
     run_id: str | None = None
     agent_id: str | None = None
     task_id: str | None = None

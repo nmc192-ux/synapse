@@ -1386,7 +1386,23 @@ async def websocket_events(
     except HTTPException:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
-    await orchestrator.sockets.connect(websocket, principal=principal)
+    run_id = websocket.query_params.get("run_id")
+    if run_id:
+        try:
+            await _require_run_project(principal, orchestrator, run_id)
+        except (HTTPException, KeyError):
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+    try:
+        await orchestrator.sockets.connect(
+            websocket,
+            principal=principal,
+            organization_id=principal.organization_id,
+            project_id=principal.project_id,
+            run_id=run_id,
+        )
+    except TypeError:
+        await orchestrator.sockets.connect(websocket, principal=principal)
     try:
         while True:
             await websocket.receive_text()
@@ -1402,13 +1418,18 @@ async def websocket_a2a(
     authenticator = Depends(get_authenticator),
 ) -> None:
     try:
-        authenticate_websocket(
+        principal = authenticate_websocket(
             websocket,
             authenticator,
             required_scopes=(Scope.A2A_RECEIVE.value,),
             agent_id=agent_id,
         )
     except HTTPException:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+    try:
+        await _require_agent_project(principal, orchestrator, agent_id)
+    except (HTTPException, KeyError):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
     await orchestrator.a2a.connect(agent_id, websocket)
@@ -1420,9 +1441,11 @@ async def websocket_a2a(
             response = await orchestrator.send_agent_wire_message(wire_message)
             await orchestrator.a2a.cleanup_stale_connections()
             if response is not None:
-                await orchestrator.sockets.broadcast(
+                await orchestrator.event_bus.publish(
                     RuntimeEvent(
                         event_type=EventType.A2A_MESSAGE,
+                        organization_id=principal.organization_id,
+                        project_id=principal.project_id,
                         agent_id=agent_id,
                         task_id=(response.payload.get("task", {}) or {}).get("task_id") if isinstance(response.payload, dict) and isinstance(response.payload.get("task"), dict) else None,
                         source="api.websocket",

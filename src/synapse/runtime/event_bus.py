@@ -23,7 +23,7 @@ class EventBus:
         self.sockets = sockets
         self.compression_provider = compression_provider or NoOpCompressionProvider()
         self._recent_event_groups: dict[
-            tuple[str, str | None, str | None, str | None, str],
+            tuple[str, str | None, str | None, str | None, str | None, str | None, str],
             list[RuntimeEvent],
         ] = defaultdict(list)
         self._compressible_event_types = {
@@ -35,6 +35,7 @@ class EventBus:
             EventType.A2A_MESSAGE,
         }
         self._listeners: list[Callable[[RuntimeEvent], Awaitable[None]]] = []
+        self._context_resolver: Callable[[RuntimeEvent], Awaitable[dict[str, object]]] | None = None
 
     def set_state_store(self, state_store: RuntimeStateStore) -> None:
         self.sockets.set_state_store(state_store)
@@ -42,6 +43,12 @@ class EventBus:
     def set_compression_provider(self, compression_provider: CompressionProvider | None) -> None:
         self.compression_provider = compression_provider or NoOpCompressionProvider()
         self.sockets.set_compression_provider(self.compression_provider)
+
+    def set_context_resolver(
+        self,
+        resolver: Callable[[RuntimeEvent], Awaitable[dict[str, object]]] | None,
+    ) -> None:
+        self._context_resolver = resolver
 
     async def connect(self, websocket: WebSocket) -> None:
         await self.sockets.connect(websocket)
@@ -55,7 +62,7 @@ class EventBus:
             yield queue
 
     async def publish(self, event: RuntimeEvent) -> None:
-        normalized = self._normalize_event(event)
+        normalized = await self._enrich_event(self._normalize_event(event))
         await self.sockets.broadcast(normalized)
         for listener in list(self._listeners):
             await listener(normalized)
@@ -68,6 +75,8 @@ class EventBus:
         self,
         event_type: EventType,
         *,
+        organization_id: str | None = None,
+        project_id: str | None = None,
         run_id: str | None = None,
         agent_id: str | None = None,
         task_id: str | None = None,
@@ -81,6 +90,8 @@ class EventBus:
         await self.publish(
             RuntimeEvent(
                 event_type=event_type,
+                organization_id=organization_id,
+                project_id=project_id,
                 run_id=run_id,
                 agent_id=agent_id,
                 task_id=task_id,
@@ -96,18 +107,29 @@ class EventBus:
     async def get_compact_history(
         self,
         *,
+        organization_id: str | None = None,
+        project_id: str | None = None,
         run_id: str | None = None,
         agent_id: str | None = None,
         task_id: str | None = None,
         limit: int = 100,
     ) -> dict[str, object]:
-        return await self.sockets.get_compact_event_history(run_id=run_id, agent_id=agent_id, task_id=task_id, limit=limit)
+        return await self.sockets.get_compact_event_history(
+            organization_id=organization_id,
+            project_id=project_id,
+            run_id=run_id,
+            agent_id=agent_id,
+            task_id=task_id,
+            limit=limit,
+        )
 
     async def _maybe_publish_compressed_summary(self, event: RuntimeEvent) -> None:
         if event.event_type not in self._compressible_event_types:
             return
         key = (
             event.event_type.value,
+            event.organization_id,
+            event.project_id,
             event.run_id,
             event.agent_id,
             event.task_id,
@@ -133,6 +155,8 @@ class EventBus:
         )
         compact_event = RuntimeEvent(
             event_type=EventType.RUNTIME_EVENTS_COMPRESSED,
+            organization_id=event.organization_id,
+            project_id=event.project_id,
             run_id=event.run_id,
             agent_id=event.agent_id,
             task_id=event.task_id,
@@ -146,7 +170,7 @@ class EventBus:
             },
             correlation_id=event.correlation_id,
         )
-        await self.sockets.broadcast(compact_event)
+        await self.sockets.broadcast(await self._enrich_event(compact_event))
         self._recent_event_groups[key] = bucket[-2:]
 
     @staticmethod
@@ -154,3 +178,16 @@ class EventBus:
         if event.phase is not None:
             return event
         return event.model_copy(update={"phase": infer_event_phase(event.event_type)})
+
+    async def _enrich_event(self, event: RuntimeEvent) -> RuntimeEvent:
+        updates: dict[str, object] = {}
+        if self._context_resolver is not None:
+            resolved = await self._context_resolver(event)
+            for key, value in resolved.items():
+                if getattr(event, key, None) is None and value is not None:
+                    updates[key] = value
+        if event.correlation_id is None and "correlation_id" not in updates:
+            updates["correlation_id"] = event.run_id or event.task_id or event.session_id or event.event_id
+        if updates:
+            return event.model_copy(update=updates)
+        return event

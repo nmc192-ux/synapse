@@ -6,12 +6,14 @@ from synapse.api.routes import router
 from synapse.config import settings
 from synapse.runtime.a2a import A2AHub
 from synapse.runtime.budget import AgentBudgetManager
+from synapse.runtime.browser import BrowserRuntime
 from synapse.runtime.browser_workers import BrowserWorkerPool
 from synapse.runtime.compression.base import create_compression_provider
+from synapse.runtime.control_plane import ControlPlane
+from synapse.runtime.execution_plane import ExecutionPlaneRuntime
 from synapse.runtime.llm import create_llm_provider
 from synapse.runtime.memory import AgentMemoryManager
 from synapse.runtime.messaging import AgentMessageBus
-from synapse.runtime.orchestrator import RuntimeOrchestrator
 from synapse.runtime.registry import AgentRegistry
 from synapse.runtime.security import AgentSecuritySandbox
 from synapse.runtime.safety import AgentSafetyLayer
@@ -25,14 +27,17 @@ from synapse.transports.websocket_manager import WebSocketManager
 runtime_state_store = InMemoryRuntimeStateStore()
 authenticator = Authenticator(settings)
 compression_provider = create_compression_provider(settings)
-browser_runtime = BrowserWorkerPool(
-    state_store=runtime_state_store,
-    sockets=websocket_manager,
-)
 agent_registry = AgentRegistry(state_store=runtime_state_store)
 tool_registry = ToolRegistry()
 message_bus = AgentMessageBus()
 websocket_manager = WebSocketManager(state_store=runtime_state_store, compression_provider=compression_provider)
+browser_runtime = BrowserWorkerPool(
+    state_store=runtime_state_store,
+    runtime_factory=lambda: ExecutionPlaneRuntime(
+        browser_runtime=BrowserRuntime(state_store=runtime_state_store),
+        tool_registry=tool_registry,
+    ),
+)
 sandbox = AgentSecuritySandbox(agent_registry, state_store=runtime_state_store)
 a2a_hub = A2AHub(
     agent_registry,
@@ -46,7 +51,7 @@ task_manager = TaskExecutionManager()
 safety = AgentSafetyLayer()
 budget_manager = AgentBudgetManager()
 llm_provider = create_llm_provider(settings)
-orchestrator = RuntimeOrchestrator(
+orchestrator = ControlPlane(
     browser=browser_runtime,
     agents=agent_registry,
     tools=tool_registry,

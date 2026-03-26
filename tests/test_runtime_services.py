@@ -143,6 +143,31 @@ class _StubCompressionProvider(CompressionProvider):
         }
 
 
+class _StubExecutionPlane:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, object],
+        *,
+        run_id: str | None = None,
+        session_id: str | None = None,
+        worker_id: str | None = None,
+    ) -> dict[str, object]:
+        self.calls.append(
+            {
+                "tool_name": tool_name,
+                "arguments": arguments,
+                "run_id": run_id,
+                "session_id": session_id,
+                "worker_id": worker_id,
+            }
+        )
+        return {"worker": worker_id, "ok": True}
+
+
 async def _capture_events(bus: EventBus, count: int = 1) -> list[RuntimeEvent]:
     events: list[RuntimeEvent] = []
     async with bus.subscribe("test-subscriber") as queue:
@@ -180,6 +205,53 @@ def test_tool_service_invokes_and_emits_event() -> None:
             assert event.event_type == EventType.BUDGET_UPDATED
             event = await queue.get()
             assert event.event_type == EventType.TOOL_CALLED
+
+    asyncio.run(scenario())
+
+
+def test_tool_service_routes_assigned_run_tools_to_execution_plane() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        await store.store_run(
+            "run-1",
+            {
+                "run_id": "run-1",
+                "task_id": "task-1",
+                "agent_id": "agent-1",
+                "status": "running",
+                "metadata": {"assigned_worker_id": "worker-1"},
+            },
+        )
+        registry = AgentRegistry()
+        registry.register(
+            AgentDefinition(
+                agent_id="agent-1",
+                kind=AgentKind.CUSTOM,
+                name="Agent 1",
+                security={"allowed_domains": ["example.com"], "allowed_tools": ["demo.tool"]},
+            )
+        )
+        bus = EventBus(WebSocketManager(state_store=store))
+        budget = BudgetService(AgentBudgetManager(), registry, bus)
+        tools = ToolRegistry()
+
+        async def handler(arguments: dict[str, object]) -> dict[str, object]:
+            return {"local": True}
+
+        tools.register("demo.tool", handler, plugin_name=None)
+        execution_plane = _StubExecutionPlane()
+        service = ToolService(
+            tools,
+            AgentSecuritySandbox(registry),
+            AgentSafetyLayer(),
+            bus,
+            budget,
+            state_store=store,
+            execution_plane=execution_plane,
+        )
+        result = await service.call_tool("demo.tool", {"value": 1}, agent_id="agent-1", run_id="run-1")
+        assert result["worker"] == "worker-1"
+        assert execution_plane.calls[0]["tool_name"] == "demo.tool"
 
     asyncio.run(scenario())
 

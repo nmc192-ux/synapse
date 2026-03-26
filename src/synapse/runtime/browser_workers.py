@@ -9,15 +9,14 @@ from typing import Any
 from synapse.config import settings
 from synapse.models.runtime_event import EventType, RuntimeEvent
 from synapse.models.runtime_state import BrowserSessionState, BrowserWorkerState
-from synapse.runtime.browser import BrowserRuntime
+from synapse.runtime.execution_plane import ExecutionPlaneRuntime, RuntimeEventPublisher
 from synapse.runtime.queues import BrowserTaskEnvelope, BrowserTaskQueue, BrowserTaskResult, create_browser_task_queue
 from synapse.runtime.session import BrowserSession
 from synapse.runtime.state_store import RuntimeStateStore
-from synapse.transports.websocket_manager import WebSocketManager
 from synapse.workers.browser_worker import BrowserWorker
 
 
-RuntimeFactory = Callable[[], BrowserRuntime]
+RuntimeFactory = Callable[[], ExecutionPlaneRuntime]
 
 
 class BrowserWorkerPool:
@@ -25,14 +24,13 @@ class BrowserWorkerPool:
         self,
         *,
         state_store: RuntimeStateStore | None = None,
-        sockets: WebSocketManager | None = None,
         worker_count: int | None = None,
         heartbeat_interval_seconds: float | None = None,
         runtime_factory: RuntimeFactory | None = None,
         queue_factory: Callable[[str], BrowserTaskQueue] | None = None,
     ) -> None:
         self.state_store = state_store
-        self.sockets = sockets
+        self._event_publisher: RuntimeEventPublisher | None = None
         self.worker_count = max(1, worker_count or settings.browser_worker_count)
         self.heartbeat_interval_seconds = (
             heartbeat_interval_seconds or settings.browser_worker_heartbeat_interval_seconds
@@ -47,6 +45,14 @@ class BrowserWorkerPool:
 
     def set_state_store(self, state_store: RuntimeStateStore) -> None:
         self.state_store = state_store
+        for worker in self._workers.values():
+            if hasattr(worker.runtime, "set_state_store") and worker.runtime is not None:
+                worker.runtime.set_state_store(state_store)
+
+    def set_event_publisher(self, publisher: RuntimeEventPublisher | None) -> None:
+        self._event_publisher = publisher
+        for worker in self._workers.values():
+            worker.set_event_publisher(publisher)
 
     async def start(self) -> None:
         if self._workers:
@@ -59,7 +65,7 @@ class BrowserWorkerPool:
                 queue=self._queue_factory(queue_name),
                 runtime_factory=self._runtime_factory,
                 result_handler=self._handle_result,
-                sockets=self.sockets,
+                event_publisher=self._event_publisher,
                 heartbeat_interval_seconds=self.heartbeat_interval_seconds,
             )
             self._workers[worker_id] = worker
@@ -242,6 +248,32 @@ class BrowserWorkerPool:
             sessions.extend(payload)
         return sessions
 
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, object],
+        *,
+        run_id: str | None = None,
+        session_id: str | None = None,
+        worker_id: str | None = None,
+    ) -> dict[str, object]:
+        target_worker_id = worker_id
+        if target_worker_id is None and session_id is not None:
+            target_worker_id = self._session_workers.get(session_id)
+        if target_worker_id is None and run_id is not None:
+            target_worker_id = await self._assigned_worker_for_run(run_id)
+        if target_worker_id is None:
+            target_worker_id = self._choose_worker_id()
+        return await self._dispatch(
+            target_worker_id,
+            BrowserTaskEnvelope(
+                action="call_tool",
+                session_id=session_id,
+                run_id=run_id,
+                arguments={"tool_name": tool_name, "arguments": arguments},
+            ),
+        )
+
     def current_url(self, session_id: str) -> str:
         url = self._session_urls.get(session_id)
         if url is not None:
@@ -270,8 +302,8 @@ class BrowserWorkerPool:
         future: asyncio.Future[BrowserTaskResult] = loop.create_future()
         self._pending[item.request_id] = future
         await worker.queue.put(item)
-        if self.sockets is not None:
-            await self.sockets.broadcast(
+        if self._event_publisher is not None:
+            await self._event_publisher(
                 RuntimeEvent(
                     event_type=EventType.BROWSER_TASK_DISPATCHED,
                     run_id=item.run_id,
@@ -329,5 +361,20 @@ class BrowserWorkerPool:
         if url is not None:
             self._session_urls[session_id] = url
 
-    def _default_runtime_factory(self) -> BrowserRuntime:
-        return BrowserRuntime(state_store=self.state_store)
+    async def _assigned_worker_for_run(self, run_id: str) -> str | None:
+        if self.state_store is None:
+            return None
+        payload = await self.state_store.get_run(run_id)
+        if payload is None:
+            return None
+        metadata = payload.get("metadata")
+        if not isinstance(metadata, dict):
+            return None
+        worker_id = metadata.get("assigned_worker_id")
+        return str(worker_id) if isinstance(worker_id, str) and worker_id else None
+
+    def _default_runtime_factory(self) -> ExecutionPlaneRuntime:
+        runtime = ExecutionPlaneRuntime()
+        if self.state_store is not None:
+            runtime.set_state_store(self.state_store)
+        return runtime

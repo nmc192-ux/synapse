@@ -60,11 +60,11 @@ def test_browser_worker_pool_dispatches_and_preserves_session_affinity() -> None
 
         pool = BrowserWorkerPool(
             state_store=store,
-            sockets=sockets,
             worker_count=2,
             heartbeat_interval_seconds=0.05,
             runtime_factory=runtime_factory,
         )
+        pool.set_event_publisher(sockets.broadcast)
         await pool.start()
 
         try:
@@ -95,11 +95,11 @@ def test_browser_worker_pool_emits_status_and_heartbeat_events() -> None:
 
         pool = BrowserWorkerPool(
             state_store=InMemoryRuntimeStateStore(),
-            sockets=sockets,
             worker_count=1,
             heartbeat_interval_seconds=0.01,
             runtime_factory=runtime_factory,
         )
+        pool.set_event_publisher(sockets.broadcast)
 
         async with sockets.subscribe("browser-worker-test") as queue:
             await pool.start()
@@ -120,7 +120,6 @@ def test_browser_worker_pool_lists_sessions_from_workers() -> None:
     async def scenario() -> None:
         pool = BrowserWorkerPool(
             state_store=InMemoryRuntimeStateStore(),
-            sockets=WebSocketManager(state_store=InMemoryRuntimeStateStore()),
             worker_count=1,
             runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
         )

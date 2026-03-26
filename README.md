@@ -69,6 +69,15 @@ export SYNAPSE_RUNTIME_STATE_FALLBACK_MEMORY=true
 If Redis is unavailable and fallback is enabled, Synapse logs a warning and uses
 in-memory runtime state.
 
+Worker and scheduler configuration:
+
+```bash
+export SYNAPSE_BROWSER_WORKER_COUNT=2
+export SYNAPSE_BROWSER_WORKER_HEARTBEAT_INTERVAL_SECONDS=15
+export SYNAPSE_SCHEDULER_LEASE_TIMEOUT_SECONDS=60
+export SYNAPSE_SCHEDULER_MAX_ASSIGNMENT_RETRIES=3
+```
+
 ## Project layout
 
 ```text
@@ -207,6 +216,18 @@ Synapse now persists runtime state to Redis with namespace keys:
 
 Connection heartbeats update agent liveness. If an A2A connection misses heartbeat
 TTL (default `60s`), it is marked stale/offline and emits `connection.stale`.
+
+## Control Plane / Execution Plane
+
+Synapse now splits orchestration from execution:
+
+- control plane: auth, APIs, run creation, scheduling, checkpoints, state persistence, event aggregation
+- execution plane: queued browser work, worker heartbeats, local session handling, assigned tool execution
+
+Architecture notes:
+
+- [`/Users/jahanzebhussain/Synapse/docs/architecture/control-plane-execution-plane.md`](/Users/jahanzebhussain/Synapse/docs/architecture/control-plane-execution-plane.md)
+- [`/Users/jahanzebhussain/Synapse/docs/migration/phase-24-3-control-plane-split.md`](/Users/jahanzebhussain/Synapse/docs/migration/phase-24-3-control-plane-split.md)
 
 ## Browser Hardening
 

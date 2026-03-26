@@ -92,6 +92,8 @@ class RuntimeController:
         self.compression_provider = compression_provider
 
         self.event_bus = EventBus(sockets, compression_provider=compression_provider)
+        if hasattr(browser, "set_event_publisher"):
+            browser.set_event_publisher(self.event_bus.publish)
         self.run_store = RunStore(state_store)
         self.scheduler = RunScheduler(self.run_store, browser, self.event_bus)
         self.budget_service = BudgetService(budget_manager, agents, self.event_bus, self.run_store)
@@ -110,6 +112,7 @@ class RuntimeController:
             self.event_bus,
             self.budget_service,
             state_store=state_store,
+            execution_plane=browser,
         )
         self.checkpoint_service = CheckpointService(state_store, self.browser_service, self.event_bus)
         self.task_runtime = TaskRuntime(
@@ -139,6 +142,7 @@ class RuntimeController:
         self.checkpoint_service.set_state_store(state_store) if hasattr(self, "checkpoint_service") else None
         self.memory_service.set_state_store(state_store) if hasattr(self, "memory_service") else None
         self.tool_service.set_state_store(state_store) if hasattr(self, "tool_service") else None
+        self.tool_service.set_execution_plane(self.browser) if hasattr(self, "tool_service") else None
         self.sandbox.set_state_store(state_store) if hasattr(self, "sandbox") else None
         if state_store is not None and hasattr(self, "event_bus"):
             self.event_bus.set_state_store(state_store)

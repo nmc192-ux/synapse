@@ -19,6 +19,7 @@ class ToolService:
         events: EventBus,
         budget_service: BudgetService,
         state_store: RuntimeStateStore | None = None,
+        execution_plane=None,
     ) -> None:
         self.tools = tools
         self.sandbox = sandbox
@@ -26,9 +27,13 @@ class ToolService:
         self.events = events
         self.budget_service = budget_service
         self.state_store = state_store
+        self.execution_plane = execution_plane
 
     def set_state_store(self, state_store: RuntimeStateStore | None) -> None:
         self.state_store = state_store
+
+    def set_execution_plane(self, execution_plane) -> None:
+        self.execution_plane = execution_plane
 
     async def call_tool(
         self,
@@ -54,7 +59,16 @@ class ToolService:
             self.sandbox.consume_tool_call(agent_id)
             if agent_id:
                 await self.budget_service.increment_tool_call(agent_id, run_id=effective_run_id)
-            result = await self.tools.call(tool_name, arguments)
+            assigned_worker_id = await self._assigned_worker_id(effective_run_id)
+            if assigned_worker_id is not None and self.execution_plane is not None:
+                result = await self.execution_plane.call_tool(
+                    tool_name,
+                    arguments,
+                    run_id=effective_run_id,
+                    worker_id=assigned_worker_id,
+                )
+            else:
+                result = await self.tools.call(tool_name, arguments)
             await self.events.emit(
                 EventType.TOOL_CALLED,
                 run_id=effective_run_id,
@@ -123,6 +137,18 @@ class ToolService:
             if isinstance(override, dict):
                 self.sandbox.set_run_policy(run_id, override)
                 return
+
+    async def _assigned_worker_id(self, run_id: str | None) -> str | None:
+        if run_id is None or self.state_store is None:
+            return None
+        payload = await self.state_store.get_run(run_id)
+        if payload is None:
+            return None
+        metadata = payload.get("metadata")
+        if not isinstance(metadata, dict):
+            return None
+        worker_id = metadata.get("assigned_worker_id")
+        return str(worker_id) if isinstance(worker_id, str) and worker_id else None
 
     @staticmethod
     def _run_id_from_arguments(arguments: dict[str, object]) -> str | None:

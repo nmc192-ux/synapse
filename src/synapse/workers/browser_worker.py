@@ -8,10 +8,10 @@ from typing import Any
 from synapse.models.runtime_event import EventSeverity, EventType, RuntimeEvent
 from synapse.models.runtime_state import BrowserWorkerState, WorkerRuntimeStatus
 from synapse.runtime.queues import BrowserTaskEnvelope, BrowserTaskQueue, BrowserTaskResult
-from synapse.transports.websocket_manager import WebSocketManager
 
 
 ResultHandler = Callable[[BrowserTaskResult], Awaitable[None]]
+EventPublisher = Callable[[RuntimeEvent], Awaitable[None]]
 
 
 class BrowserWorker:
@@ -21,14 +21,14 @@ class BrowserWorker:
         queue: BrowserTaskQueue,
         runtime_factory: Callable[[], Any],
         result_handler: ResultHandler,
-        sockets: WebSocketManager | None = None,
+        event_publisher: EventPublisher | None = None,
         heartbeat_interval_seconds: float = 15.0,
     ) -> None:
         self.worker_id = worker_id
         self.queue = queue
         self.runtime_factory = runtime_factory
         self.result_handler = result_handler
-        self.sockets = sockets
+        self.event_publisher = event_publisher
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self.runtime: Any | None = None
         self.state = BrowserWorkerState(worker_id=worker_id, queue_name=queue.name)
@@ -48,6 +48,9 @@ class BrowserWorker:
         await self._emit_status_event()
         self._loop_task = asyncio.create_task(self._run_loop())
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+
+    def set_event_publisher(self, event_publisher: EventPublisher | None) -> None:
+        self.event_publisher = event_publisher
 
     async def stop(self) -> None:
         self._running = False
@@ -111,8 +114,8 @@ class BrowserWorker:
         while self._running:
             await asyncio.sleep(self.heartbeat_interval_seconds)
             self.state.last_heartbeat = datetime.now(timezone.utc)
-            if self.sockets is not None:
-                await self.sockets.broadcast(
+            if self.event_publisher is not None:
+                await self.event_publisher(
                     RuntimeEvent(
                         event_type=EventType.BROWSER_WORKER_HEARTBEAT,
                         source="browser_worker",
@@ -127,9 +130,9 @@ class BrowserWorker:
                 )
 
     async def _emit_status_event(self) -> None:
-        if self.sockets is None:
+        if self.event_publisher is None:
             return
-        await self.sockets.broadcast(
+        await self.event_publisher(
             RuntimeEvent(
                 event_type=EventType.BROWSER_WORKER_STATUS_UPDATED,
                 source="browser_worker",
@@ -145,9 +148,9 @@ class BrowserWorker:
         success: bool,
         error: str | None = None,
     ) -> None:
-        if self.sockets is None:
+        if self.event_publisher is None:
             return
-        await self.sockets.broadcast(
+        await self.event_publisher(
             RuntimeEvent(
                 event_type=EventType.BROWSER_TASK_COMPLETED,
                 run_id=item.run_id,

@@ -5,6 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 import yaml
 
 from synapse.models.agent import AgentExecutionLimits
+from synapse.models.plugin import PluginExecutionMode
 
 
 def load_agent_limits(path: str) -> AgentExecutionLimits:
@@ -22,6 +23,8 @@ class Settings(BaseSettings):
     postgres_dsn: str = "postgresql://postgres:postgres@localhost:5432/synapse"
     plugin_packages: list[str] = Field(default_factory=lambda: ["synapse.plugins"])
     plugin_modules: list[str] = Field(default_factory=list)
+    plugin_execution_mode: PluginExecutionMode = PluginExecutionMode.TRUSTED_LOCAL
+    plugin_execution_timeout_seconds: float = 10.0
     agent_limits_config_path: str = "config/agent_limits.yaml"
     agent_limits: AgentExecutionLimits = Field(default_factory=AgentExecutionLimits)
     llm_provider: str | None = None

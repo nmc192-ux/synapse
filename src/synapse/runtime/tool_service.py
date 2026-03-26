@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from time import perf_counter
+
 from synapse.models.runtime_event import EventSeverity, EventType
 from synapse.models.plugin import PluginDescriptor, PluginReloadRequest, ToolDescriptor
 from synapse.runtime.budget_service import BudgetService
@@ -45,6 +47,8 @@ class ToolService:
     ) -> dict[str, object]:
         effective_run_id = run_id or self._run_id_from_arguments(arguments)
         await self._hydrate_run_policy(effective_run_id)
+        tool_descriptor = self.tools.describe(tool_name)
+        is_plugin_tool = tool_descriptor.plugin is not None
         try:
             await self._enforce_tool_safety(agent_id, tool_name, arguments)
             self.sandbox.authorize_tool(agent_id, tool_name, run_id=effective_run_id)
@@ -59,6 +63,15 @@ class ToolService:
             self.sandbox.consume_tool_call(agent_id)
             if agent_id:
                 await self.budget_service.increment_tool_call(agent_id, run_id=effective_run_id)
+            start = perf_counter()
+            if is_plugin_tool:
+                await self.events.emit(
+                    EventType.PLUGIN_EXECUTION_STARTED,
+                    run_id=effective_run_id,
+                    agent_id=agent_id,
+                    source="tool_service",
+                    payload=self._plugin_telemetry_payload(tool_name, tool_descriptor, arguments),
+                )
             assigned_worker_id = await self._assigned_worker_id(effective_run_id)
             if assigned_worker_id is not None and self.execution_plane is not None:
                 result = await self.execution_plane.call_tool(
@@ -69,6 +82,7 @@ class ToolService:
                 )
             else:
                 result = await self.tools.call(tool_name, arguments)
+            duration_ms = round((perf_counter() - start) * 1000, 2)
             await self.events.emit(
                 EventType.TOOL_CALLED,
                 run_id=effective_run_id,
@@ -76,6 +90,18 @@ class ToolService:
                 source="tool_service",
                 payload={"tool_name": tool_name, "arguments": arguments, "result": result},
             )
+            if is_plugin_tool:
+                await self.events.emit(
+                    EventType.PLUGIN_EXECUTION_COMPLETED,
+                    run_id=effective_run_id,
+                    agent_id=agent_id,
+                    source="tool_service",
+                    payload={
+                        **self._plugin_telemetry_payload(tool_name, tool_descriptor, arguments),
+                        "duration_ms": duration_ms,
+                        "result_keys": sorted(result.keys()),
+                    },
+                )
             return result
         except SandboxApprovalRequiredError as exc:
             await self.events.emit(
@@ -91,6 +117,21 @@ class ToolService:
                 },
                 severity=EventSeverity.WARNING,
             )
+            raise
+        except Exception as exc:
+            if is_plugin_tool:
+                await self.events.emit(
+                    EventType.PLUGIN_EXECUTION_FAILED,
+                    run_id=effective_run_id,
+                    agent_id=agent_id,
+                    source="tool_service",
+                    payload={
+                        **self._plugin_telemetry_payload(tool_name, tool_descriptor, arguments),
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                    severity=EventSeverity.ERROR,
+                )
             raise
 
     def list_tools(self) -> list[ToolDescriptor]:
@@ -154,3 +195,17 @@ class ToolService:
     def _run_id_from_arguments(arguments: dict[str, object]) -> str | None:
         run_id = arguments.get("run_id")
         return str(run_id) if isinstance(run_id, str) and run_id else None
+
+    @staticmethod
+    def _plugin_telemetry_payload(
+        tool_name: str,
+        tool_descriptor: ToolDescriptor,
+        arguments: dict[str, object],
+    ) -> dict[str, object]:
+        return {
+            "tool_name": tool_name,
+            "plugin_name": tool_descriptor.plugin,
+            "execution_mode": tool_descriptor.execution_mode.value,
+            "isolation_strategy": tool_descriptor.isolation_strategy,
+            "argument_keys": sorted(arguments.keys()),
+        }

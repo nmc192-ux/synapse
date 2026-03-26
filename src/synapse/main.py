@@ -29,7 +29,10 @@ runtime_state_store = InMemoryRuntimeStateStore()
 authenticator = Authenticator(settings)
 compression_provider = create_compression_provider(settings)
 agent_registry = AgentRegistry(state_store=runtime_state_store)
-tool_registry = ToolRegistry()
+tool_registry = ToolRegistry(
+    execution_mode=settings.plugin_execution_mode,
+    execution_timeout_seconds=settings.plugin_execution_timeout_seconds,
+)
 message_bus = AgentMessageBus()
 websocket_manager = WebSocketManager(state_store=runtime_state_store, compression_provider=compression_provider)
 session_profile_manager = SessionProfileManager(state_store=runtime_state_store)

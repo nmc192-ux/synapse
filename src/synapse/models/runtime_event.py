@@ -22,6 +22,9 @@ class EventType(str, Enum):
     LOOP_EVALUATED = "loop.evaluated"
     LOOP_REFLECTED = "loop.reflected"
     TOOL_CALLED = "tool.called"
+    PLUGIN_EXECUTION_STARTED = "plugin.execution.started"
+    PLUGIN_EXECUTION_COMPLETED = "plugin.execution.completed"
+    PLUGIN_EXECUTION_FAILED = "plugin.execution.failed"
     AGENT_REGISTERED = "agent.registered"
     AGENT_STATUS_UPDATED = "agent.status.updated"
     AGENT_MESSAGE = "agent.message"
@@ -139,6 +142,8 @@ def infer_event_phase(event_type: EventType | str) -> str:
         EventType.DATA_EXTRACTED.value,
         EventType.SCREENSHOT_CAPTURED.value,
         EventType.TOOL_CALLED.value,
+        EventType.PLUGIN_EXECUTION_STARTED.value,
+        EventType.PLUGIN_EXECUTION_COMPLETED.value,
         EventType.DOWNLOAD_COMPLETED.value,
         EventType.UPLOAD_COMPLETED.value,
         EventType.POPUP_DISMISSED.value,

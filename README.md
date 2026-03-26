@@ -376,3 +376,25 @@ agent or run security policy. Supported values are:
 - `pause`
 - `escalate_to_operator`
 - `retry_with_profile`
+# Plugin execution modes
+
+Hosted environments should use `SYNAPSE_PLUGIN_EXECUTION_MODE=isolated_hosted`. In this mode, Synapse executes plugin tools in a subprocess boundary with timeout enforcement via `SYNAPSE_PLUGIN_EXECUTION_TIMEOUT_SECONDS`.
+
+Modes:
+- `trusted_local`: current development default, plugin handlers run in-process.
+- `isolated_hosted`: plugin handlers run in a subprocess and report execution telemetry.
+
+Telemetry:
+- `plugin.execution.started`
+- `plugin.execution.completed`
+- `plugin.execution.failed`
+
+Limitations:
+- The hosted isolation boundary is process-level only. It does not yet provide container, VM, or syscall sandboxing.
+- Subprocess plugins still share the Python environment and host-level network access available to the Synapse process.
+- Stateful in-memory plugin behavior does not persist across isolated executions.
+
+Migration path:
+- Keep existing plugins unchanged for local development.
+- For hosted deployments, prefer stateless plugins and externalize durable state behind APIs.
+- Future hardening can replace the subprocess runner with containerized or remote plugin workers without changing the tool service API.

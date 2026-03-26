@@ -6,7 +6,7 @@ from synapse.api.routes import router
 from synapse.config import settings
 from synapse.runtime.a2a import A2AHub
 from synapse.runtime.budget import AgentBudgetManager
-from synapse.runtime.browser import BrowserRuntime
+from synapse.runtime.browser_workers import BrowserWorkerPool
 from synapse.runtime.compression.base import create_compression_provider
 from synapse.runtime.llm import create_llm_provider
 from synapse.runtime.memory import AgentMemoryManager
@@ -25,7 +25,10 @@ from synapse.transports.websocket_manager import WebSocketManager
 runtime_state_store = InMemoryRuntimeStateStore()
 authenticator = Authenticator(settings)
 compression_provider = create_compression_provider(settings)
-browser_runtime = BrowserRuntime(state_store=runtime_state_store)
+browser_runtime = BrowserWorkerPool(
+    state_store=runtime_state_store,
+    sockets=websocket_manager,
+)
 agent_registry = AgentRegistry(state_store=runtime_state_store)
 tool_registry = ToolRegistry()
 message_bus = AgentMessageBus()

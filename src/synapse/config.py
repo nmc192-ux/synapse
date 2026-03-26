@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     redis_required: bool = False
     runtime_state_fallback_memory: bool = True
+    browser_worker_count: int = 1
+    browser_worker_heartbeat_interval_seconds: float = 15.0
+    browser_worker_queue_prefix: str = "synapse:browser:worker"
     auth_required: bool = True
     jwt_secret: str = "synapse-dev-secret"
     jwt_issuer: str = "synapse"

@@ -11,6 +11,14 @@ class AgentRuntimeStatus(str, Enum):
     OFFLINE = "offline"
 
 
+class WorkerRuntimeStatus(str, Enum):
+    STARTING = "starting"
+    IDLE = "idle"
+    BUSY = "busy"
+    OFFLINE = "offline"
+    FAILED = "failed"
+
+
 class AgentRuntimeRecord(BaseModel):
     agent_id: str
     kind: str
@@ -48,6 +56,16 @@ class ConnectionState(BaseModel):
     last_heartbeat: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     status: AgentRuntimeStatus = AgentRuntimeStatus.ACTIVE
     endpoint_metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class BrowserWorkerState(BaseModel):
+    worker_id: str
+    queue_name: str
+    status: WorkerRuntimeStatus = WorkerRuntimeStatus.STARTING
+    last_heartbeat: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    active_sessions: int = 0
+    current_request_id: str | None = None
+    metadata: dict[str, object] = Field(default_factory=dict)
 
 
 class RuntimeCheckpoint(BaseModel):

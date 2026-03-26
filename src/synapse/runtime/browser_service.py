@@ -53,6 +53,8 @@ class BrowserService:
 
     def set_state_store(self, state_store: RuntimeStateStore) -> None:
         self.state_store = state_store
+        if hasattr(self.browser, "set_state_store"):
+            self.browser.set_state_store(state_store)
 
     async def create_session(self, session_id: str, agent_id: str | None = None, run_id: str | None = None) -> BrowserSession:
         session = await self.browser.create_session(session_id, agent_id=agent_id, run_id=run_id)

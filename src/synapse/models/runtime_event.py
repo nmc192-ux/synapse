@@ -43,6 +43,10 @@ class EventType(str, Enum):
     RUNTIME_EVENTS_COMPRESSED = "runtime.events.compressed"
     A2A_MESSAGE_COMPRESSED = "a2a.message.compressed"
     APPROVAL_REQUIRED = "approval.required"
+    BROWSER_WORKER_STATUS_UPDATED = "browser.worker.status.updated"
+    BROWSER_WORKER_HEARTBEAT = "browser.worker.heartbeat"
+    BROWSER_TASK_DISPATCHED = "browser.task.dispatched"
+    BROWSER_TASK_COMPLETED = "browser.task.completed"
 
 
 class EventSeverity(str, Enum):

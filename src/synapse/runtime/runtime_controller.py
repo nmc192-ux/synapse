@@ -33,7 +33,7 @@ from synapse.models.runtime_event import EventType, RunReplayView, RunTimeline
 from synapse.models.message import AgentMessage
 from synapse.models.memory import MemoryRecord, MemorySearchRequest, MemorySearchResult, MemoryStoreRequest
 from synapse.models.plugin import PluginDescriptor, PluginReloadRequest, ToolDescriptor
-from synapse.models.run import RunState
+from synapse.models.run import RunGraph, RunState
 from synapse.models.runtime_state import BrowserNetworkEntry, BrowserSessionState, BrowserTraceEntry, ConnectionState, RuntimeCheckpoint
 from synapse.models.task import ExtractionRequest, NavigationRequest, TaskClaimRequest, TaskCreateRequest, TaskRecord, TaskRequest, TaskResult, TaskUpdateRequest
 from synapse.runtime.a2a import A2AHub
@@ -371,6 +371,9 @@ class RuntimeController:
             for checkpoint in await self.checkpoint_service.list_checkpoints(run_id=run_id)
         ]
         return await self.run_store.get_replay(run_id, checkpoints=checkpoints, limit=limit)
+
+    async def get_run_graph(self, run_id: str) -> RunGraph:
+        return await self.run_store.get_graph(run_id)
 
     async def get_run_trace(self, run_id: str, limit: int = 500) -> list[BrowserTraceEntry]:
         return await self.run_store.get_trace(run_id, limit=limit)

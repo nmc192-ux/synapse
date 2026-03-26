@@ -203,6 +203,11 @@ def test_run_api_endpoints() -> None:
     assert replay_response.json()["run_id"] == run_id
     assert len(replay_response.json()["timeline"]) >= 1
 
+    graph_response = client.get(f"/api/runs/{run_id}/graph")
+    assert graph_response.status_code == 200
+    assert graph_response.json()["root_run_id"] == run_id
+    assert graph_response.json()["nodes"][0]["run_id"] == run_id
+
     children_response = client.get(f"/api/runs/{run_id}/children")
     assert children_response.status_code == 200
     assert children_response.json() == []
@@ -347,5 +352,40 @@ def test_task_runtime_creates_child_run_for_capability_delegation() -> None:
         event_types = {event["event_type"] for event in events_for_parent}
         assert EventType.TASK_DELEGATION_REQUESTED.value in event_types
         assert EventType.TASK_DELEGATION_COMPLETED.value in event_types
+
+    asyncio.run(scenario())
+
+
+def test_run_store_builds_multi_agent_graph() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+
+        parent = await run_store.create_run(
+            task_id="task-graph",
+            agent_id="research-agent",
+            correlation_id="task-graph",
+            metadata={"goal": "Research and analyze"},
+        )
+        child = await run_store.create_run(
+            task_id="task-graph",
+            agent_id="analysis-agent",
+            correlation_id="task-graph",
+            parent_run_id=parent.run_id,
+            metadata={"required_capability": "analysis", "delegated_by": "research-agent"},
+        )
+        await run_store.update_status(parent.run_id, RunStatus.RUNNING, metadata={"delegated_run_id": child.run_id})
+        await run_store.update_status(child.run_id, RunStatus.COMPLETED)
+
+        graph = await run_store.get_graph(parent.run_id)
+
+        assert graph.root_run_id == parent.run_id
+        assert graph.total_runs == 2
+        assert graph.completed_runs == 1
+        assert len(graph.edges) == 1
+        assert graph.edges[0].source_run_id == parent.run_id
+        assert graph.edges[0].target_run_id == child.run_id
+        assert graph.edges[0].required_capability == "analysis"
+        assert {node.run_id for node in graph.nodes} == {parent.run_id, child.run_id}
 
     asyncio.run(scenario())

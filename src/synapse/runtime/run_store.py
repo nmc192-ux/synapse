@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from synapse.models.agent import AgentBudgetUsage
-from synapse.models.run import RunState, RunStatus
+from synapse.models.run import RunGraph, RunGraphEdge, RunGraphNode, RunState, RunStatus
 from synapse.models.runtime_event import RunReplayView, RunTimeline, RunTimelineEntry, infer_event_phase
 from synapse.models.runtime_state import BrowserNetworkEntry, BrowserTraceEntry
 from synapse.runtime.state_store import RuntimeStateStore
@@ -187,6 +187,33 @@ class RunStore:
                 network_entries.append(entry)
         return network_entries
 
+    async def get_graph(self, run_id: str) -> RunGraph:
+        runs = await self.list()
+        run_map = {run.run_id: run for run in runs}
+        root = await self.get(run_id)
+        while root.parent_run_id is not None and root.parent_run_id in run_map:
+            root = run_map[root.parent_run_id]
+
+        descendant_ids = self._collect_descendants(root.run_id, run_map)
+        ordered_runs = [run_map[node_run_id] for node_run_id in descendant_ids]
+
+        nodes = [self._to_graph_node(run) for run in ordered_runs]
+        edges = [self._to_graph_edge(run_map[run_id]) for run_id in descendant_ids if run_map[run_id].parent_run_id is not None]
+
+        completed_runs = sum(1 for run in ordered_runs if run.status == RunStatus.COMPLETED)
+        failed_runs = sum(1 for run in ordered_runs if run.status == RunStatus.FAILED)
+        active_runs = sum(1 for run in ordered_runs if run.status in {RunStatus.PENDING, RunStatus.RUNNING, RunStatus.RESUMED, RunStatus.PAUSED})
+
+        return RunGraph(
+            root_run_id=root.run_id,
+            nodes=nodes,
+            edges=edges,
+            total_runs=len(nodes),
+            completed_runs=completed_runs,
+            failed_runs=failed_runs,
+            active_runs=active_runs,
+        )
+
     async def _get_run_events(self, run_id: str, limit: int) -> list[dict[str, object]]:
         if self.state_store is None:
             return []
@@ -216,6 +243,57 @@ class RunStore:
         timestamp = str(event.get("timestamp", ""))
         event_id = str(event.get("event_id", ""))
         return (timestamp, event_id)
+
+    @staticmethod
+    def _collect_descendants(root_run_id: str, run_map: dict[str, RunState]) -> list[str]:
+        ordered: list[str] = []
+        stack = [root_run_id]
+        while stack:
+            current = stack.pop(0)
+            if current in ordered:
+                continue
+            ordered.append(current)
+            children = sorted(
+                [run.run_id for run in run_map.values() if run.parent_run_id == current],
+                key=lambda child_run_id: run_map[child_run_id].started_at,
+            )
+            stack.extend(children)
+        return ordered
+
+    @staticmethod
+    def _to_graph_node(run: RunState) -> RunGraphNode:
+        delegation_state = None
+        if run.parent_run_id is not None:
+            delegation_state = "delegated"
+        if isinstance(run.metadata.get("delegated_run_id"), str):
+            delegation_state = "delegating"
+        return RunGraphNode(
+            run_id=run.run_id,
+            task_id=run.task_id,
+            agent_id=run.agent_id,
+            status=run.status,
+            parent_run_id=run.parent_run_id,
+            current_phase=run.current_phase,
+            started_at=run.started_at,
+            updated_at=run.updated_at,
+            completed_at=run.completed_at,
+            delegation_state=delegation_state,
+            metadata=dict(run.metadata),
+        )
+
+    @staticmethod
+    def _to_graph_edge(run: RunState) -> RunGraphEdge:
+        metadata = dict(run.metadata)
+        return RunGraphEdge(
+            source_run_id=str(run.parent_run_id),
+            target_run_id=run.run_id,
+            edge_type="delegation",
+            status=run.status.value,
+            delegated_to_agent_id=run.agent_id,
+            required_capability=str(metadata.get("required_capability")) if metadata.get("required_capability") is not None else None,
+            created_at=run.started_at,
+            metadata=metadata,
+        )
 
     @staticmethod
     def _to_trace_entry(run_id: str, event: dict[str, object]) -> BrowserTraceEntry | None:

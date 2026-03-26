@@ -269,6 +269,7 @@ New browser endpoints:
 
 New browser observability events:
 - `popup.dismissed`
+- `browser.popup.opened`
 - `download.completed`
 - `upload.completed`
 - `navigation.route_changed`
@@ -277,6 +278,14 @@ New browser observability events:
 - `browser.challenge.detected`
 - `browser.captcha.detected`
 - `browser.human_intervention.required`
+- `browser.console.logged`
+- `browser.network.failed`
+- `browser.navigation.traced`
+
+Run-scoped browser diagnostics APIs:
+
+- `GET /api/runs/{run_id}/trace`
+- `GET /api/runs/{run_id}/network`
 
 CAPTCHA and anti-bot policy behavior is controlled by `challenge_policy` on the
 agent or run security policy. Supported values are:

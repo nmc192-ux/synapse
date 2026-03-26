@@ -53,6 +53,9 @@ class BrowserRuntime:
     def set_state_store(self, state_store: RuntimeStateStore) -> None:
         self.session_manager.set_state_store(state_store)
 
+    def set_event_publisher(self, event_publisher) -> None:
+        self.session_manager.set_event_publisher(event_publisher)
+
     @property
     def _pages(self):
         return self.session_manager._pages

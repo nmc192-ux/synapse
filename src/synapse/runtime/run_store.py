@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from synapse.models.agent import AgentBudgetUsage
 from synapse.models.run import RunState, RunStatus
 from synapse.models.runtime_event import RunReplayView, RunTimeline, RunTimelineEntry, infer_event_phase
+from synapse.models.runtime_state import BrowserNetworkEntry, BrowserTraceEntry
 from synapse.runtime.state_store import RuntimeStateStore
 
 
@@ -166,6 +167,26 @@ class RunStore:
             timeline=timeline.entries,
         )
 
+    async def get_trace(self, run_id: str, limit: int = 500) -> list[BrowserTraceEntry]:
+        await self.get(run_id)
+        raw_events = await self._get_run_events(run_id, limit=limit)
+        trace_entries: list[BrowserTraceEntry] = []
+        for event in raw_events:
+            entry = self._to_trace_entry(run_id, event)
+            if entry is not None:
+                trace_entries.append(entry)
+        return trace_entries
+
+    async def get_network(self, run_id: str, limit: int = 500) -> list[BrowserNetworkEntry]:
+        await self.get(run_id)
+        raw_events = await self._get_run_events(run_id, limit=limit)
+        network_entries: list[BrowserNetworkEntry] = []
+        for event in raw_events:
+            entry = self._to_network_entry(run_id, event)
+            if entry is not None:
+                network_entries.append(entry)
+        return network_entries
+
     async def _get_run_events(self, run_id: str, limit: int) -> list[dict[str, object]]:
         if self.state_store is None:
             return []
@@ -195,3 +216,75 @@ class RunStore:
         timestamp = str(event.get("timestamp", ""))
         event_id = str(event.get("event_id", ""))
         return (timestamp, event_id)
+
+    @staticmethod
+    def _to_trace_entry(run_id: str, event: dict[str, object]) -> BrowserTraceEntry | None:
+        event_type = str(event.get("event_type", ""))
+        payload = event.get("payload", {}) if isinstance(event.get("payload"), dict) else {}
+        timestamp = event.get("timestamp")
+        if event_type not in {
+            "browser.console.logged",
+            "browser.network.failed",
+            "browser.navigation.traced",
+            "browser.popup.opened",
+            "popup.dismissed",
+            "download.completed",
+            "upload.completed",
+            "page.navigated",
+            "browser.error",
+        }:
+            return None
+        category = {
+            "browser.console.logged": "console",
+            "browser.network.failed": "network",
+            "browser.navigation.traced": "navigation",
+            "browser.popup.opened": "popup",
+            "popup.dismissed": "popup",
+            "download.completed": "download",
+            "upload.completed": "upload",
+            "page.navigated": "navigation",
+            "browser.error": "error",
+        }[event_type]
+        message = payload.get("message")
+        if not isinstance(message, str):
+            message = payload.get("error") if isinstance(payload.get("error"), str) else None
+        url = payload.get("url")
+        if not isinstance(url, str):
+            url = payload.get("page_url") if isinstance(payload.get("page_url"), str) else None
+        level = payload.get("level")
+        if not isinstance(level, str):
+            level = str(event.get("severity", "info"))
+        return BrowserTraceEntry(
+            event_id=str(event.get("event_id")),
+            run_id=run_id,
+            session_id=str(event.get("session_id")) if event.get("session_id") is not None else None,
+            timestamp=datetime.fromisoformat(str(timestamp)) if isinstance(timestamp, str) else datetime.now(timezone.utc),
+            event_type=event_type,
+            category=category,
+            level=level,
+            message=message,
+            url=url,
+            metadata=payload,
+        )
+
+    @staticmethod
+    def _to_network_entry(run_id: str, event: dict[str, object]) -> BrowserNetworkEntry | None:
+        if str(event.get("event_type", "")) != "browser.network.failed":
+            return None
+        payload = event.get("payload", {}) if isinstance(event.get("payload"), dict) else {}
+        url = payload.get("url")
+        if not isinstance(url, str):
+            return None
+        timestamp = event.get("timestamp")
+        return BrowserNetworkEntry(
+            event_id=str(event.get("event_id")),
+            run_id=run_id,
+            session_id=str(event.get("session_id")) if event.get("session_id") is not None else None,
+            timestamp=datetime.fromisoformat(str(timestamp)) if isinstance(timestamp, str) else datetime.now(timezone.utc),
+            url=url,
+            method=str(payload.get("method")) if payload.get("method") is not None else None,
+            resource_type=str(payload.get("resource_type")) if payload.get("resource_type") is not None else None,
+            failure_text=str(payload.get("failure_text")) if payload.get("failure_text") is not None else None,
+            status=str(payload.get("status", "failed")),
+            metadata=payload,
+        )

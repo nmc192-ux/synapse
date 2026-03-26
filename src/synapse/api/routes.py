@@ -38,7 +38,7 @@ from synapse.models.message import AgentMessage
 from synapse.models.memory import MemoryRecord, MemorySearchRequest, MemorySearchResult, MemoryStoreRequest
 from synapse.models.plugin import PluginDescriptor, PluginReloadRequest, ToolDescriptor
 from synapse.models.run import RunState
-from synapse.models.runtime_state import BrowserSessionState, ConnectionState, RuntimeCheckpoint
+from synapse.models.runtime_state import BrowserNetworkEntry, BrowserSessionState, BrowserTraceEntry, ConnectionState, RuntimeCheckpoint
 from synapse.models.task import (
     ExtractionRequest,
     NavigationRequest,
@@ -764,6 +764,30 @@ async def get_run_replay(
 ) -> RunReplayView:
     try:
         return await orchestrator.get_run_replay(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/runs/{run_id}/trace", response_model=list[BrowserTraceEntry])
+async def get_run_trace(
+    run_id: str,
+    _principal: TasksReadPrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> list[BrowserTraceEntry]:
+    try:
+        return await orchestrator.get_run_trace(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/runs/{run_id}/network", response_model=list[BrowserNetworkEntry])
+async def get_run_network(
+    run_id: str,
+    _principal: TasksReadPrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> list[BrowserNetworkEntry]:
+    try:
+        return await orchestrator.get_run_network(run_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

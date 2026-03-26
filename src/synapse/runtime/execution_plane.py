@@ -37,6 +37,10 @@ class ExecutionPlaneRuntime:
     def set_state_store(self, state_store: RuntimeStateStore) -> None:
         self.browser_runtime.set_state_store(state_store)
 
+    def set_event_publisher(self, publisher: RuntimeEventPublisher | None) -> None:
+        if hasattr(self.browser_runtime, "set_event_publisher"):
+            self.browser_runtime.set_event_publisher(publisher)
+
     async def create_session(self, session_id: str, agent_id: str | None = None, run_id: str | None = None):
         return await self.browser_runtime.create_session(session_id, agent_id=agent_id, run_id=run_id)
 

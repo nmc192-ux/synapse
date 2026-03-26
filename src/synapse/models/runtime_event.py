@@ -54,6 +54,10 @@ class EventType(str, Enum):
     BROWSER_CHALLENGE_DETECTED = "browser.challenge.detected"
     BROWSER_CAPTCHA_DETECTED = "browser.captcha.detected"
     BROWSER_HUMAN_INTERVENTION_REQUIRED = "browser.human_intervention.required"
+    BROWSER_CONSOLE_LOGGED = "browser.console.logged"
+    BROWSER_NETWORK_FAILED = "browser.network.failed"
+    BROWSER_NAVIGATION_TRACED = "browser.navigation.traced"
+    BROWSER_POPUP_OPENED = "browser.popup.opened"
 
 
 class EventSeverity(str, Enum):
@@ -135,6 +139,10 @@ def infer_event_phase(event_type: EventType | str) -> str:
         EventType.UPLOAD_COMPLETED.value,
         EventType.POPUP_DISMISSED.value,
         EventType.NAVIGATION_ROUTE_CHANGED.value,
+        EventType.BROWSER_NAVIGATION_TRACED.value,
+        EventType.BROWSER_POPUP_OPENED.value,
+        EventType.BROWSER_CONSOLE_LOGGED.value,
+        EventType.BROWSER_NETWORK_FAILED.value,
     }:
         return "act"
     if value in {EventType.LOOP_EVALUATED.value, EventType.BUDGET_UPDATED.value, EventType.BROWSER_ERROR.value}:

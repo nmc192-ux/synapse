@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import logging
+import asyncio
 from typing import Any
 
 try:
@@ -16,6 +17,7 @@ except Exception:  # pragma: no cover
         raise RuntimeError("playwright package is not installed.")
 
 from synapse.models.runtime_state import BrowserSessionState
+from synapse.models.runtime_event import EventSeverity, EventType, RuntimeEvent
 from synapse.runtime.session import BrowserSession
 from synapse.runtime.state_store import RuntimeStateStore
 
@@ -24,7 +26,13 @@ logger = logging.getLogger(__name__)
 
 
 class SessionManager:
-    def __init__(self, settings: Any, state_store: RuntimeStateStore | None = None, profile_manager=None) -> None:
+    def __init__(
+        self,
+        settings: Any,
+        state_store: RuntimeStateStore | None = None,
+        profile_manager=None,
+        event_publisher=None,
+    ) -> None:
         self.settings = settings
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
@@ -36,11 +44,15 @@ class SessionManager:
         self._profile_manager = profile_manager
         self._downloads: dict[str, list[dict[str, object]]] = {}
         self._last_urls: dict[str, str | None] = {}
+        self._event_publisher = event_publisher
 
     def set_state_store(self, state_store: RuntimeStateStore) -> None:
         self._state_store = state_store
         if hasattr(self._profile_manager, "set_state_store"):
             self._profile_manager.set_state_store(state_store)
+
+    def set_event_publisher(self, event_publisher) -> None:
+        self._event_publisher = event_publisher
 
     async def start(self) -> None:
         if self._browser is not None:
@@ -80,6 +92,7 @@ class SessionManager:
         self._session_runs[session_id] = run_id
         self._downloads.setdefault(session_id, [])
         self._last_urls[session_id] = None
+        self._attach_runtime_listeners(session_id, page)
         if run_id is not None and self._profile_manager is not None:
             await self._profile_manager.apply_profile_to_browser(run_id, context, page)
         await self.save_session_state(session_id, extractor, run_id=run_id)
@@ -143,6 +156,7 @@ class SessionManager:
             await self.create_session(session_id, extractor, agent_id=state.agent_id, run_id=state.run_id)
         page = self.require_page(session_id)
         context = self.require_context(session_id)
+        self._attach_runtime_listeners(session_id, page)
         if state.cookies:
             try:
                 await context.add_cookies(state.cookies)
@@ -218,6 +232,129 @@ class SessionManager:
 
     def get_last_url(self, session_id: str) -> str | None:
         return self._last_urls.get(session_id)
+
+    def _attach_runtime_listeners(self, session_id: str, page: Page) -> None:
+        if not hasattr(page, "on"):
+            return
+        try:
+            page.on("console", lambda message: self._schedule_event(self._on_console(session_id, message)))
+            page.on("requestfailed", lambda request: self._schedule_event(self._on_request_failed(session_id, request)))
+            page.on("framenavigated", lambda frame: self._schedule_event(self._on_frame_navigated(session_id, frame)))
+            page.on("popup", lambda popup: self._schedule_event(self._on_popup(session_id, popup)))
+        except Exception:
+            return
+
+    def _schedule_event(self, coro) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(coro)
+
+    async def _on_console(self, session_id: str, message: Any) -> None:
+        text_attr = getattr(message, "text", None)
+        text = text_attr() if callable(text_attr) else text_attr
+        type_attr = getattr(message, "type", None)
+        level = type_attr() if callable(type_attr) else type_attr
+        location_attr = getattr(message, "location", None)
+        location = location_attr() if callable(location_attr) else location_attr
+        await self._emit_runtime_event(
+            session_id,
+            EventType.BROWSER_CONSOLE_LOGGED,
+            payload={
+                "level": str(level or "info"),
+                "message": str(text or ""),
+                "location": dict(location) if isinstance(location, dict) else {},
+            },
+        )
+
+    async def _on_request_failed(self, session_id: str, request: Any) -> None:
+        failure_attr = getattr(request, "failure", None)
+        failure = failure_attr() if callable(failure_attr) else failure_attr
+        method_attr = getattr(request, "method", None)
+        method = method_attr() if callable(method_attr) else method_attr
+        resource_attr = getattr(request, "resource_type", None)
+        resource_type = resource_attr() if callable(resource_attr) else resource_attr
+        url = getattr(request, "url", None)
+        await self._emit_runtime_event(
+            session_id,
+            EventType.BROWSER_NETWORK_FAILED,
+            payload={
+                "url": str(url or ""),
+                "method": str(method or "GET"),
+                "resource_type": str(resource_type or "unknown"),
+                "failure_text": self._failure_text(failure),
+                "status": "failed",
+            },
+            severity=EventSeverity.WARNING,
+        )
+
+    async def _on_frame_navigated(self, session_id: str, frame: Any) -> None:
+        url = getattr(frame, "url", None)
+        name_attr = getattr(frame, "name", None)
+        name = name_attr() if callable(name_attr) else name_attr
+        parent_attr = getattr(frame, "parent_frame", None)
+        parent_frame = parent_attr() if callable(parent_attr) else parent_attr
+        await self._emit_runtime_event(
+            session_id,
+            EventType.BROWSER_NAVIGATION_TRACED,
+            payload={
+                "url": str(url or ""),
+                "frame_name": str(name or ""),
+                "is_main_frame": parent_frame is None,
+            },
+        )
+
+    async def _on_popup(self, session_id: str, popup: Any) -> None:
+        url = getattr(popup, "url", None)
+        title_attr = getattr(popup, "title", None)
+        title = None
+        try:
+            title = await title_attr() if callable(title_attr) else title_attr
+        except Exception:
+            title = None
+        await self._emit_runtime_event(
+            session_id,
+            EventType.BROWSER_POPUP_OPENED,
+            payload={"popup_url": str(url or ""), "popup_title": str(title or "")},
+            severity=EventSeverity.WARNING,
+        )
+
+    async def _emit_runtime_event(
+        self,
+        session_id: str,
+        event_type: EventType,
+        *,
+        payload: dict[str, object],
+        severity: EventSeverity = EventSeverity.INFO,
+    ) -> None:
+        if self._event_publisher is None:
+            return
+        await self._event_publisher(
+            RuntimeEvent(
+                event_type=event_type,
+                run_id=self._session_runs.get(session_id),
+                agent_id=self._session_agents.get(session_id),
+                session_id=session_id,
+                source="browser_session",
+                payload=payload,
+                severity=severity,
+                correlation_id=self._session_runs.get(session_id) or session_id,
+            )
+        )
+
+    @staticmethod
+    def _failure_text(failure: Any) -> str:
+        if isinstance(failure, dict):
+            text = failure.get("errorText")
+            return str(text or "")
+        error_text = getattr(failure, "error_text", None)
+        if callable(error_text):
+            try:
+                return str(error_text())
+            except Exception:
+                return str(failure)
+        return str(failure or "")
 
     async def _snapshot_storage(self, page: Page) -> dict[str, dict[str, str]]:
         try:

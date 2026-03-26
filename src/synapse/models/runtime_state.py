@@ -92,3 +92,29 @@ class RuntimeEventRecord(BaseModel):
     session_id: str | None = None
     payload: dict[str, object] = Field(default_factory=dict)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class BrowserTraceEntry(BaseModel):
+    event_id: str
+    run_id: str
+    session_id: str | None = None
+    timestamp: datetime
+    event_type: str
+    category: str
+    level: str = "info"
+    message: str | None = None
+    url: str | None = None
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class BrowserNetworkEntry(BaseModel):
+    event_id: str
+    run_id: str
+    session_id: str | None = None
+    timestamp: datetime
+    url: str
+    method: str | None = None
+    resource_type: str | None = None
+    failure_text: str | None = None
+    status: str = "failed"
+    metadata: dict[str, object] = Field(default_factory=dict)

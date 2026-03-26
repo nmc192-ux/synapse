@@ -116,7 +116,9 @@ function buildAction(
     !event.event_type.includes("popup") &&
     !event.event_type.includes("challenge") &&
     !event.event_type.includes("captcha") &&
-    !event.event_type.includes("human_intervention")
+    !event.event_type.includes("human_intervention") &&
+    !event.event_type.includes("console") &&
+    !event.event_type.includes("network")
   ) {
     return null;
   }
@@ -345,6 +347,14 @@ function summarizeEvent(eventType: string, payload: Record<string, unknown>): st
       return "CAPTCHA challenge detected; autonomous execution should stop or hand off.";
     case "browser.human_intervention.required":
       return "Operator handoff required to continue past a browser challenge.";
+    case "browser.console.logged":
+      return stringify(payload.message) ?? "Browser console log captured.";
+    case "browser.network.failed":
+      return `Network request failed for ${stringify(payload.url) ?? "unknown resource"}.`;
+    case "browser.navigation.traced":
+      return `Navigation trace recorded for ${stringify(payload.url) ?? "current page"}.`;
+    case "browser.popup.opened":
+      return `Popup detected for ${stringify(payload.popup_url) ?? "new window"}.`;
     case "browser.error":
       return stringify(payload.error) ?? "Browser interaction error captured.";
     default:

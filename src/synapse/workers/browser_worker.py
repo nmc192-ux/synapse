@@ -40,6 +40,8 @@ class BrowserWorker:
         if self._running:
             return
         self.runtime = self.runtime_factory()
+        if hasattr(self.runtime, "set_event_publisher"):
+            self.runtime.set_event_publisher(self.event_publisher)
         await self.queue.start()
         if hasattr(self.runtime, "start"):
             await self.runtime.start()
@@ -51,6 +53,8 @@ class BrowserWorker:
 
     def set_event_publisher(self, event_publisher: EventPublisher | None) -> None:
         self.event_publisher = event_publisher
+        if self.runtime is not None and hasattr(self.runtime, "set_event_publisher"):
+            self.runtime.set_event_publisher(event_publisher)
 
     async def stop(self) -> None:
         self._running = False

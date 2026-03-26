@@ -138,6 +138,7 @@ class RuntimeController:
             llm=llm,
             compression_provider=compression_provider,
             scheduler=self.scheduler,
+            a2a=a2a,
         )
 
     @property
@@ -353,6 +354,9 @@ class RuntimeController:
     async def get_run(self, run_id: str) -> RunState:
         return await self.task_runtime.get_run(run_id)
 
+    async def get_child_runs(self, run_id: str) -> list[RunState]:
+        return await self.task_runtime.list_child_runs(run_id)
+
     async def get_run_events(self, run_id: str) -> list[dict[str, object]]:
         if self.state_store is None:
             return []
@@ -460,11 +464,20 @@ class RuntimeController:
         return self.a2a.to_wire_message(response)
 
     async def delegate_agent_task(self, request: AgentDelegateRequest) -> AgentWireMessage:
+        target_agent = request.target_agent
+        if target_agent is None:
+            capability = request.payload.get("required_capability") if isinstance(request.payload, dict) else None
+            if isinstance(capability, str):
+                matches = await self.find_agents(capability)
+                if matches:
+                    target_agent = matches[0].id
+        if target_agent is None:
+            raise ValueError("No target agent available for delegation.")
         message = self.a2a.sign_wire_message(
             AgentWireMessage(
-            type=A2AMessageType.REQUEST_TASK,
+            type=A2AMessageType.TASK_REQUEST,
             agent=request.agent,
-            target_agent=request.target_agent,
+            target_agent=target_agent,
             payload=request.payload,
             )
         )

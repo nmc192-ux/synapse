@@ -116,6 +116,69 @@ class A2AHub:
     def find_agents(self, capability: str) -> list[AgentDiscoveryEntry]:
         return self.agents.find(capability, available_agent_ids=set(self._connections))
 
+    async def delegate_task(
+        self,
+        sender_agent_id: str,
+        recipient_agent_id: str,
+        task: TaskRequest,
+        *,
+        parent_run_id: str | None = None,
+        correlation_id: str | None = None,
+    ) -> TaskResult:
+        if self._task_executor is None:
+            raise RuntimeError("Task executor is not configured.")
+        try:
+            await self._authorize_delegation(sender_agent_id, recipient_agent_id, task.run_id)
+        except Exception as exc:
+            reject_envelope = A2AEnvelope(
+                type=A2AMessageType.TASK_REJECT,
+                sender_agent_id=recipient_agent_id,
+                recipient_agent_id=sender_agent_id,
+                correlation_id=correlation_id or task.run_id or task.task_id,
+                payload={"task_id": task.task_id, "run_id": task.run_id, "reason": str(exc)},
+            )
+            await self._broadcast_delegation_event(EventType.TASK_DELEGATION_REJECTED, reject_envelope, task)
+            raise
+        request_envelope = A2AEnvelope(
+            type=A2AMessageType.TASK_REQUEST,
+            sender_agent_id=sender_agent_id,
+            recipient_agent_id=recipient_agent_id,
+            correlation_id=correlation_id or task.run_id or task.task_id,
+            payload={"task": task.model_dump(mode="json"), "parent_run_id": parent_run_id},
+        )
+        await self._broadcast_delegation_event(EventType.TASK_DELEGATION_REQUESTED, request_envelope, task)
+
+        accept_envelope = A2AEnvelope(
+            type=A2AMessageType.TASK_ACCEPT,
+            sender_agent_id=recipient_agent_id,
+            recipient_agent_id=sender_agent_id,
+            correlation_id=request_envelope.message_id,
+            payload={"task_id": task.task_id, "run_id": task.run_id, "parent_run_id": parent_run_id},
+        )
+        await self._broadcast_delegation_event(EventType.TASK_DELEGATION_ACCEPTED, accept_envelope, task)
+
+        try:
+            task_result = await self._task_executor(task)
+        except Exception as exc:
+            reject_envelope = A2AEnvelope(
+                type=A2AMessageType.TASK_REJECT,
+                sender_agent_id=recipient_agent_id,
+                recipient_agent_id=sender_agent_id,
+                correlation_id=request_envelope.message_id,
+                payload={"task_id": task.task_id, "run_id": task.run_id, "reason": str(exc)},
+            )
+            await self._broadcast_delegation_event(EventType.TASK_DELEGATION_REJECTED, reject_envelope, task)
+            raise
+        result_envelope = A2AEnvelope(
+            type=A2AMessageType.TASK_RESULT,
+            sender_agent_id=recipient_agent_id,
+            recipient_agent_id=sender_agent_id,
+            correlation_id=request_envelope.message_id,
+            payload={"task": task_result.model_dump(mode="json"), "parent_run_id": parent_run_id},
+        )
+        await self._broadcast_delegation_event(EventType.TASK_DELEGATION_COMPLETED, result_envelope, task)
+        return task_result
+
     async def handle_message(self, sender_agent_id: str, payload: dict[str, object]) -> A2AEnvelope | None:
         await self.heartbeat(sender_agent_id)
         envelope = A2AEnvelope.model_validate(
@@ -146,7 +209,7 @@ class A2AHub:
         }:
             return await self._send_or_error(envelope, sender_agent_id)
 
-        if envelope.type in {A2AMessageType.DELEGATE, A2AMessageType.REQUEST_TASK}:
+        if envelope.type in {A2AMessageType.DELEGATE, A2AMessageType.REQUEST_TASK, A2AMessageType.TASK_REQUEST}:
             if self._task_executor is None:
                 error = self._build_error(
                     sender_agent_id=sender_agent_id,
@@ -163,6 +226,14 @@ class A2AHub:
                 await self._emit_approval_required(sender_agent_id, task.run_id, exc, envelope)
                 raise ValueError(exc.reason) from exc
             delegated_task = task.model_copy(update={"agent_id": envelope.recipient_agent_id or task.agent_id})
+            accept = A2AEnvelope(
+                type=A2AMessageType.TASK_ACCEPT,
+                sender_agent_id=envelope.recipient_agent_id or delegated_task.agent_id,
+                recipient_agent_id=sender_agent_id,
+                correlation_id=envelope.message_id,
+                payload={"task_id": delegated_task.task_id, "run_id": delegated_task.run_id},
+            )
+            await self._send_or_error(accept, sender_agent_id)
             task_result = await self._task_executor(delegated_task)
             response = A2AEnvelope(
                 type=A2AMessageType.TASK_RESULT,
@@ -341,7 +412,7 @@ class A2AHub:
 
     async def _build_compact_payload(self, envelope: A2AEnvelope) -> dict[str, Any]:
         payload = dict(envelope.payload)
-        if envelope.type in {A2AMessageType.DELEGATE, A2AMessageType.REQUEST_TASK}:
+        if envelope.type in {A2AMessageType.DELEGATE, A2AMessageType.REQUEST_TASK, A2AMessageType.TASK_REQUEST}:
             task = payload.get("task")
             if isinstance(task, dict):
                 return {
@@ -360,6 +431,18 @@ class A2AHub:
                     "status": task.get("status"),
                     "success": task.get("success"),
                 }
+        if envelope.type == A2AMessageType.TASK_ACCEPT:
+            return {
+                "mode": "task-accept-summary",
+                "task_id": payload.get("task_id"),
+                "run_id": payload.get("run_id"),
+            }
+        if envelope.type == A2AMessageType.TASK_REJECT:
+            return {
+                "mode": "task-reject-summary",
+                "task_id": payload.get("task_id"),
+                "reason": payload.get("reason"),
+            }
         if envelope.type in {A2AMessageType.DISCOVER_RESPONSE, A2AMessageType.DISCOVER, A2AMessageType.DISCOVER_AGENTS}:
             return {
                 "mode": "status-summary",
@@ -388,9 +471,39 @@ class A2AHub:
             A2AMessageType.RESPONSE,
             A2AMessageType.DELEGATE,
             A2AMessageType.REQUEST_TASK,
+            A2AMessageType.TASK_REQUEST,
+            A2AMessageType.TASK_ACCEPT,
             A2AMessageType.TASK_RESULT,
             A2AMessageType.TASK_RESULT_LEGACY,
+            A2AMessageType.TASK_REJECT,
         }
+
+    async def _broadcast_delegation_event(
+        self,
+        event_type: EventType,
+        envelope: A2AEnvelope,
+        task: TaskRequest,
+    ) -> None:
+        if self._sockets is None:
+            return
+        await self._sockets.broadcast(
+            RuntimeEvent(
+                event_type=event_type,
+                run_id=task.run_id,
+                agent_id=envelope.sender_agent_id,
+                task_id=task.task_id,
+                source="a2a_runtime",
+                payload={
+                    "message_id": envelope.message_id,
+                    "sender_agent_id": envelope.sender_agent_id,
+                    "recipient_agent_id": envelope.recipient_agent_id,
+                    "task_id": task.task_id,
+                    "run_id": task.run_id,
+                    "parent_run_id": task.parent_run_id,
+                },
+                correlation_id=envelope.correlation_id or envelope.message_id,
+            )
+        )
 
     @staticmethod
     def _task_id_from_payload(payload: dict[str, object]) -> str | None:

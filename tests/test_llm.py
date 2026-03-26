@@ -1,6 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 
+from synapse.models.agent import AgentDefinition, AgentDiscoveryEntry, AgentKind
 from synapse.models.browser import StructuredPageModel
 from synapse.models.loop import AgentAction, AgentActionType
 from synapse.runtime.browser.spm_extractor import SPMExtractor
@@ -141,6 +142,38 @@ def test_navigation_planner_prefers_graph_context_when_available() -> None:
     page_state = telemetry["raw_context"]["page_state"]
     assert "graph_summary" in page_state
     assert "actionable_paths" in page_state
+
+
+def test_navigation_planner_suggests_delegation_for_capability_gap() -> None:
+    planner = NavigationPlanner()
+    task = TaskRequest(
+        task_id="task-delegate",
+        agent_id="agent-1",
+        goal="Analyze a paper",
+        constraints={"required_capability": "analysis"},
+    )
+    suggestion = planner.suggest_delegation(
+        task,
+        AgentDefinition(
+            agent_id="agent-1",
+            kind=AgentKind.CUSTOM,
+            name="Research Agent",
+            capability_tags=["web_scraping"],
+        ),
+        [
+            AgentDiscoveryEntry(
+                id="agent-2",
+                capabilities=["analysis"],
+                endpoint="ws://agent-2",
+                reputation=0.9,
+                latency=5,
+                availability=True,
+                score=89,
+            )
+        ],
+    )
+    assert suggestion is not None
+    assert suggestion["target_agent_id"] == "agent-2"
 
 
 def test_navigation_evaluator_evaluate_action_uses_llm_response() -> None:

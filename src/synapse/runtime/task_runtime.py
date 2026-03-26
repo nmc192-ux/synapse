@@ -10,6 +10,7 @@ from synapse.runtime.compression.base import CompressionProvider
 from synapse.runtime.event_bus import EventBus
 from synapse.runtime.llm import LLMProvider
 from synapse.runtime.memory_service import MemoryService
+from synapse.runtime.planning import NavigationPlanner
 from synapse.runtime.registry import AgentRegistry
 from synapse.runtime.run_store import RunStore
 from synapse.runtime.scheduler import RunScheduler
@@ -17,6 +18,7 @@ from synapse.runtime.safety import AgentSafetyLayer, SecurityAlertError, Securit
 from synapse.runtime.task_manager import TaskExecutionManager
 from synapse.runtime.tool_service import ToolService
 from synapse.models.run import RunState, RunStatus
+from synapse.runtime.a2a import A2AHub
 
 
 class TaskRuntime:
@@ -34,6 +36,7 @@ class TaskRuntime:
         llm: LLMProvider | None = None,
         compression_provider: CompressionProvider | None = None,
         scheduler: RunScheduler | None = None,
+        a2a: A2AHub | None = None,
     ) -> None:
         self.agents = agents
         self.browser_service = browser_service
@@ -47,6 +50,8 @@ class TaskRuntime:
         self.llm = llm
         self.compression_provider = compression_provider
         self.scheduler = scheduler
+        self.a2a = a2a
+        self.planner = NavigationPlanner(llm=llm, compression=compression_provider)
 
     async def create_task(self, request: TaskCreateRequest) -> TaskRecord:
         return await self.task_manager.create_task(request)
@@ -63,6 +68,9 @@ class TaskRuntime:
     async def execute_task(self, request: TaskRequest) -> TaskResult:
         run = await self._ensure_run(request)
         request = request.model_copy(update={"run_id": run.run_id})
+        delegated = await self._delegate_if_needed(request, run)
+        if delegated is not None:
+            return delegated
         lease = await self.scheduler.assign_run(run.run_id) if self.scheduler is not None else None
         sandbox = getattr(self.browser_service, "sandbox", None)
         if hasattr(sandbox, "set_run_policy"):
@@ -176,6 +184,10 @@ class TaskRuntime:
     async def list_runs(self, agent_id: str | None = None, task_id: str | None = None) -> list[RunState]:
         return await self.run_store.list(agent_id=agent_id, task_id=task_id)
 
+    async def list_child_runs(self, run_id: str) -> list[RunState]:
+        runs = await self.run_store.list()
+        return [run for run in runs if run.parent_run_id == run_id]
+
     async def get_run(self, run_id: str) -> RunState:
         return await self.run_store.get(run_id)
 
@@ -220,7 +232,92 @@ class TaskRuntime:
             task_id=request.task_id,
             agent_id=request.agent_id,
             correlation_id=request.task_id,
+            parent_run_id=request.parent_run_id,
             metadata={"goal": request.goal},
+        )
+
+    async def _delegate_if_needed(self, request: TaskRequest, run: RunState) -> TaskResult | None:
+        if self.a2a is None or request.parent_run_id is not None:
+            return None
+        agent = self.agents.get(request.agent_id)
+        suggestion = self.planner.suggest_delegation(
+            request,
+            agent,
+            self.a2a.find_agents(str(request.constraints.get("required_capability", ""))) if request.constraints.get("required_capability") else [],
+        )
+        if suggestion is None:
+            return None
+
+        target_agent_id = str(suggestion["target_agent_id"])
+        child_run = await self.run_store.create_run(
+            task_id=request.task_id,
+            agent_id=target_agent_id,
+            correlation_id=run.correlation_id or request.task_id,
+            parent_run_id=run.run_id,
+            metadata={
+                "goal": request.goal,
+                "delegated_by": request.agent_id,
+                "required_capability": suggestion["required_capability"],
+            },
+        )
+        delegated_request = request.model_copy(
+            update={
+                "agent_id": target_agent_id,
+                "run_id": child_run.run_id,
+                "parent_run_id": run.run_id,
+            }
+        )
+        await self.events.emit(
+            EventType.TASK_DELEGATION_REQUESTED,
+            run_id=run.run_id,
+            agent_id=request.agent_id,
+            task_id=request.task_id,
+            source="task_runtime",
+            payload={
+                "target_agent_id": target_agent_id,
+                "child_run_id": child_run.run_id,
+                "required_capability": suggestion["required_capability"],
+                "reason": suggestion["reason"],
+            },
+            correlation_id=run.correlation_id or request.task_id,
+        )
+        delegated_result = await self.a2a.delegate_task(
+            request.agent_id,
+            target_agent_id,
+            delegated_request,
+            parent_run_id=run.run_id,
+            correlation_id=run.correlation_id or request.task_id,
+        )
+        await self.run_store.update_status(
+            run.run_id,
+            RunStatus.COMPLETED if delegated_result.status == TaskStatus.COMPLETED else RunStatus.RUNNING,
+            current_phase="delegated",
+            metadata={"delegated_run_id": child_run.run_id, "delegated_to": target_agent_id},
+        )
+        await self.events.emit(
+            EventType.TASK_DELEGATION_COMPLETED,
+            run_id=run.run_id,
+            agent_id=request.agent_id,
+            task_id=request.task_id,
+            source="task_runtime",
+            payload={
+                "target_agent_id": target_agent_id,
+                "child_run_id": child_run.run_id,
+                "result_run_id": delegated_result.run_id,
+                "status": delegated_result.status.value,
+            },
+            correlation_id=run.correlation_id or request.task_id,
+        )
+        return TaskResult(
+            task_id=request.task_id,
+            run_id=run.run_id,
+            status=delegated_result.status,
+            message=f"Delegated to {target_agent_id}",
+            artifacts={
+                "delegated": True,
+                "child_run_id": child_run.run_id,
+                "delegate_result": delegated_result.model_dump(mode="json"),
+            },
         )
 
     async def _enforce_task_safety(self, request: TaskRequest) -> None:

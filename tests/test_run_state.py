@@ -5,12 +5,14 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from synapse.api.routes import get_authenticator, get_orchestrator, router
+from synapse.models.a2a import AgentRegistrationRequest
 from synapse.config import Settings
 from synapse.models.agent import AgentDefinition, AgentKind
 from synapse.models.run import RunStatus
 from synapse.models.runtime_event import EventType
 from synapse.models.task import TaskRequest, TaskResult, TaskStatus
 from synapse.runtime.budget import AgentBudgetManager
+from synapse.runtime.a2a import A2AHub
 from synapse.runtime.checkpoint_service import CheckpointService
 from synapse.runtime.event_bus import EventBus
 from synapse.runtime.memory_service import MemoryService
@@ -201,6 +203,10 @@ def test_run_api_endpoints() -> None:
     assert replay_response.json()["run_id"] == run_id
     assert len(replay_response.json()["timeline"]) >= 1
 
+    children_response = client.get(f"/api/runs/{run_id}/children")
+    assert children_response.status_code == 200
+    assert children_response.json() == []
+
     cancel_response = client.post(f"/api/runs/{run_id}/cancel")
     assert cancel_response.status_code == 200
     assert cancel_response.json()["status"] == "cancelled"
@@ -265,5 +271,81 @@ def test_run_timeline_orders_events_and_groups_replay() -> None:
         assert replay.planner_outputs[0]["event_id"] == "evt-1"
         assert replay.budget_updates[0]["event_id"] == "evt-3"
         assert replay.checkpoints == [{"checkpoint_id": "cp-1"}]
+
+    asyncio.run(scenario())
+
+
+def test_task_runtime_creates_child_run_for_capability_delegation() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        registry = AgentRegistry(state_store=store)
+        parent_agent = registry.register(
+            AgentDefinition(
+                agent_id="research-agent",
+                kind=AgentKind.CUSTOM,
+                name="Research Agent",
+                capability_tags=["web_scraping"],
+            )
+        )
+        child_agent = registry.register(
+            AgentDefinition(
+                agent_id="analysis-agent",
+                kind=AgentKind.A2A,
+                name="Analysis Agent",
+                capability_tags=["analysis"],
+            )
+        )
+        await registry.save_to_store(parent_agent)
+        await registry.save_to_store(child_agent)
+        registry.build_adapter = lambda *args, **kwargs: _StubAdapter()  # type: ignore[method-assign]
+
+        sockets = WebSocketManager(state_store=store)
+        a2a = A2AHub(registry, state_store=store, sockets=sockets)
+        a2a.register_agent(
+            AgentRegistrationRequest(
+                agent_id="analysis-agent",
+                name="Analysis Agent",
+                capabilities=["analysis"],
+                verification_key="analysis-key",
+            )
+        )
+        events = EventBus(sockets)
+        browser_service = _StubBrowserService()
+        checkpoint_service = CheckpointService(store, browser_service, events)
+        run_store = RunStore(store)
+        runtime = TaskRuntime(
+            agents=registry,
+            browser_service=browser_service,
+            tool_service=_StubToolService(),
+            memory_service=MemoryService(_StubMemoryManager()),
+            task_manager=_StubTaskManager(),
+            checkpoint_service=checkpoint_service,
+            run_store=run_store,
+            events=events,
+            safety=_StubSafety(),
+            llm=None,
+            a2a=a2a,
+        )
+        a2a.set_task_executor(runtime.execute_task)
+
+        result = await runtime.execute_task(
+            TaskRequest(
+                task_id="task-delegate",
+                agent_id="research-agent",
+                goal="Analyze the extracted paper",
+                constraints={"required_capability": "analysis"},
+            )
+        )
+
+        parent_run = await run_store.get(result.run_id)
+        child_runs = [run for run in await run_store.list() if run.parent_run_id == parent_run.run_id]
+        assert result.artifacts["delegated"] is True
+        assert len(child_runs) == 1
+        assert child_runs[0].agent_id == "analysis-agent"
+
+        events_for_parent = await store.get_runtime_events(run_id=parent_run.run_id)
+        event_types = {event["event_type"] for event in events_for_parent}
+        assert EventType.TASK_DELEGATION_REQUESTED.value in event_types
+        assert EventType.TASK_DELEGATION_COMPLETED.value in event_types
 
     asyncio.run(scenario())

@@ -42,6 +42,7 @@ class LoopPlan(BaseModel):
     task_id: str
     phase: LoopPhase = LoopPhase.PLAN
     actions: list[AgentAction] = Field(default_factory=list)
+    delegation_suggestion: dict[str, object] | None = None
     raw_context_size: int = 0
     compressed_context_size: int = 0
     compression_ratio: float = 1.0

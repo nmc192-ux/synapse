@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import uuid
 
+from synapse.models.agent import AgentDefinition, AgentDiscoveryEntry
 from synapse.models.browser import StructuredPageModel
 from synapse.models.loop import AgentAction, AgentActionType, LoopEvaluation
 from synapse.models.task import TaskRequest
@@ -38,6 +39,34 @@ class NavigationPlanner:
             recent_memories=recent_memories,
             recent_events=recent_events,
         )
+
+    def suggest_delegation(
+        self,
+        task: TaskRequest,
+        agent: AgentDefinition,
+        candidate_agents: list[AgentDiscoveryEntry],
+    ) -> dict[str, object] | None:
+        if task.constraints.get("delegation_allowed", True) is False:
+            return None
+        required_capability = task.constraints.get("required_capability")
+        if not isinstance(required_capability, str) or not required_capability.strip():
+            return None
+        agent_capabilities = {cap.lower() for cap in agent.capability_tags}
+        normalized_required = required_capability.lower()
+        if normalized_required in agent_capabilities:
+            return None
+        for candidate in candidate_agents:
+            if candidate.id == agent.agent_id:
+                continue
+            if normalized_required not in {cap.lower() for cap in candidate.capabilities}:
+                continue
+            return {
+                "required_capability": required_capability,
+                "target_agent_id": candidate.id,
+                "reason": f"Current agent lacks required capability '{required_capability}'.",
+                "score": candidate.score,
+            }
+        return None
 
     async def generate_plan(
         self,

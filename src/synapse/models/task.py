@@ -41,6 +41,7 @@ class TaskRequest(BaseModel):
     agent_id: str
     goal: str
     run_id: str | None = None
+    parent_run_id: str | None = None
     session_id: str | None = None
     start_url: HttpUrl | None = None
     tool_calls: list[ToolCallRequest] = Field(default_factory=list)

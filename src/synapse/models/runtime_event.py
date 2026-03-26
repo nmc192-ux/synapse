@@ -58,6 +58,10 @@ class EventType(str, Enum):
     BROWSER_NETWORK_FAILED = "browser.network.failed"
     BROWSER_NAVIGATION_TRACED = "browser.navigation.traced"
     BROWSER_POPUP_OPENED = "browser.popup.opened"
+    TASK_DELEGATION_REQUESTED = "task.delegation.requested"
+    TASK_DELEGATION_ACCEPTED = "task.delegation.accepted"
+    TASK_DELEGATION_REJECTED = "task.delegation.rejected"
+    TASK_DELEGATION_COMPLETED = "task.delegation.completed"
 
 
 class EventSeverity(str, Enum):

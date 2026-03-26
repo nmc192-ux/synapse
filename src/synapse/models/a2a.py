@@ -12,8 +12,11 @@ class A2AMessageType(str, Enum):
     REGISTER_AGENT = "REGISTER_AGENT"
     DISCOVER_AGENTS = "DISCOVER_AGENTS"
     SEND_MESSAGE = "SEND_MESSAGE"
-    REQUEST_TASK = "REQUEST_TASK"
+    TASK_REQUEST = "TASK_REQUEST"
+    REQUEST_TASK = "TASK_REQUEST"
+    TASK_ACCEPT = "TASK_ACCEPT"
     TASK_RESULT = "TASK_RESULT"
+    TASK_REJECT = "TASK_REJECT"
     DISCOVER_RESPONSE = "DISCOVER_RESPONSE"
     ERROR = "ERROR"
     DISCOVER = "discover"
@@ -97,5 +100,5 @@ class AgentIdentityRecord(BaseModel):
 
 class AgentDelegateRequest(BaseModel):
     agent: str
-    target_agent: str
+    target_agent: str | None = None
     payload: dict[str, object] = Field(default_factory=dict)

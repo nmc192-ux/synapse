@@ -819,6 +819,15 @@ async def get_run_checkpoints(
     return await orchestrator.get_run_checkpoints(run_id)
 
 
+@router.get("/runs/{run_id}/children", response_model=list[RunState])
+async def get_child_runs(
+    run_id: str,
+    _principal: TasksReadPrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> list[RunState]:
+    return await orchestrator.get_child_runs(run_id)
+
+
 @router.post("/runs/{run_id}/pause", response_model=RunState)
 async def pause_run(
     run_id: str,

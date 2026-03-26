@@ -137,6 +137,7 @@ def test_scheduler_assigns_run_to_available_worker() -> None:
         lease = await run_store.get_lease(run.run_id)
         assert lease is not None
         assert lease.worker_id == "worker-2"
+        assert lease.token >= 1
 
     asyncio.run(scenario())
 
@@ -179,8 +180,9 @@ def test_scheduler_requeues_expired_leases() -> None:
             RunLeaseRecord(
                 run_id=run.run_id,
                 worker_id="worker-1",
-                lease_acquired_at=datetime.now(timezone.utc) - timedelta(seconds=5),
-                lease_expiration=datetime.now(timezone.utc) - timedelta(seconds=1),
+                acquired_at=datetime.now(timezone.utc) - timedelta(seconds=5),
+                expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+                token=1,
                 attempts=1,
             )
         )
@@ -199,6 +201,53 @@ def test_scheduler_requeues_expired_leases() -> None:
         lease = await run_store.get_lease(run.run_id)
         assert lease is not None
         assert lease.worker_id == "worker-1"
+        assert lease.token > 1
+
+    asyncio.run(scenario())
+
+
+def test_scheduler_prevents_double_assignment_race() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        bus = EventBus(WebSocketManager(state_store=store))
+        scheduler = RunScheduler(
+            run_store,
+            _StubWorkerPool([BrowserWorkerState(worker_id="worker-1", queue_name="q1", status=WorkerRuntimeStatus.IDLE)]),
+            bus,
+            cleanup_interval_seconds=60,
+        )
+        run = await run_store.create_run(task_id="task-race", agent_id="agent-1")
+
+        first, second = await asyncio.gather(
+            scheduler.assign_run(run.run_id),
+            scheduler.assign_run(run.run_id),
+        )
+
+        assert first.worker_id == "worker-1"
+        assert second.worker_id == "worker-1"
+        assert first.token == second.token
+
+    asyncio.run(scenario())
+
+
+def test_scheduler_rejects_stale_token_renewal() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        run = await run_store.create_run(task_id="task-stale", agent_id="agent-1")
+        lease = await run_store.acquire_lease(
+            run_id=run.run_id,
+            worker_id="worker-1",
+            lease_timeout_seconds=30.0,
+        )
+
+        with pytest.raises(PermissionError):
+            await run_store.renew_lease(
+                run.run_id,
+                lease_timeout_seconds=30.0,
+                token=lease.token - 1,
+            )
 
     asyncio.run(scenario())
 

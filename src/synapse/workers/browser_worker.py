@@ -92,22 +92,26 @@ class BrowserWorker:
                 payload = await handler(**item.arguments)
                 await self.result_handler(
                     BrowserTaskResult(
-                        request_id=item.request_id,
+                        action_id=item.action_id,
                         worker_id=self.worker_id,
                         action=item.action,
+                        run_id=item.run_id,
                         success=True,
                         payload=payload,
+                        fencing_token=item.fencing_token,
                     )
                 )
                 await self._emit_task_completed(item, success=True)
             except Exception as exc:
                 await self.result_handler(
                     BrowserTaskResult(
-                        request_id=item.request_id,
+                        action_id=item.action_id,
                         worker_id=self.worker_id,
                         action=item.action,
+                        run_id=item.run_id,
                         success=False,
                         error=str(exc),
+                        fencing_token=item.fencing_token,
                     )
                 )
                 await self._emit_task_completed(item, success=False, error=str(exc))
@@ -170,9 +174,11 @@ class BrowserWorker:
                 payload={
                     "worker_id": self.worker_id,
                     "request_id": item.request_id,
+                    "action_id": item.action_id,
                     "action": item.action,
                     "success": success,
                     "error": error,
+                    "fencing_token": item.fencing_token,
                 },
                 severity=EventSeverity.ERROR if not success else EventSeverity.INFO,
                 correlation_id=item.request_id,

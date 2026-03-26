@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
 from typing import Any
 
 from synapse.config import settings
@@ -132,6 +133,42 @@ class RuntimeStateStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def acquire_run_lease(self, run_id: str, lease_data: dict[str, Any]) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def renew_run_lease(self, run_id: str, worker_id: str, token: int, lease_data: dict[str, Any]) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def store_worker(self, worker_id: str, worker_data: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_worker(self, worker_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def list_workers(self) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def store_worker_request(self, run_id: str | None, action_id: str, request_data: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_worker_request(self, run_id: str | None, action_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def store_worker_result(self, run_id: str | None, action_id: str, result_data: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_worker_result(self, run_id: str | None, action_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    @abstractmethod
     async def store_runtime_event(self, event_id: str, event_data: dict[str, Any]) -> None:
         raise NotImplementedError
 
@@ -205,6 +242,10 @@ class InMemoryRuntimeStateStore(RuntimeStateStore):
         self._events: dict[str, dict[str, Any]] = {}
         self._event_ids: list[str] = []
         self._run_leases: dict[str, dict[str, Any]] = {}
+        self._lease_counter: int = 0
+        self._workers: dict[str, dict[str, Any]] = {}
+        self._worker_requests: dict[tuple[str | None, str], dict[str, Any]] = {}
+        self._worker_results: dict[tuple[str | None, str], dict[str, Any]] = {}
         self._organizations: dict[str, dict[str, Any]] = {}
         self._projects: dict[str, dict[str, Any]] = {}
         self._users: dict[str, dict[str, Any]] = {}
@@ -306,7 +347,11 @@ class InMemoryRuntimeStateStore(RuntimeStateStore):
         return rows
 
     async def store_run_lease(self, run_id: str, lease_data: dict[str, Any]) -> None:
-        self._run_leases[run_id] = dict(lease_data)
+        payload = dict(lease_data)
+        token = payload.get("token")
+        if isinstance(token, int):
+            self._lease_counter = max(self._lease_counter, token)
+        self._run_leases[run_id] = payload
 
     async def get_run_lease(self, run_id: str) -> dict[str, Any] | None:
         record = self._run_leases.get(run_id)
@@ -320,6 +365,54 @@ class InMemoryRuntimeStateStore(RuntimeStateStore):
 
     async def delete_run_lease(self, run_id: str) -> None:
         self._run_leases.pop(run_id, None)
+
+    async def acquire_run_lease(self, run_id: str, lease_data: dict[str, Any]) -> dict[str, Any]:
+        current = self._run_leases.get(run_id)
+        if current is not None:
+            expires_at = current.get("expires_at")
+            status = current.get("status")
+            if status == "active" and isinstance(expires_at, str) and datetime.fromisoformat(expires_at) > datetime.now(timezone.utc):
+                return dict(current)
+        self._lease_counter += 1
+        payload = dict(lease_data)
+        payload["token"] = self._lease_counter
+        self._run_leases[run_id] = payload
+        return dict(payload)
+
+    async def renew_run_lease(self, run_id: str, worker_id: str, token: int, lease_data: dict[str, Any]) -> dict[str, Any]:
+        current = self._run_leases.get(run_id)
+        if current is None:
+            raise KeyError(f"Run lease not found: {run_id}")
+        if current.get("worker_id") != worker_id or int(current.get("token", -1)) != token:
+            raise PermissionError("Stale fencing token for run lease renewal.")
+        payload = dict(lease_data)
+        payload["token"] = token
+        self._run_leases[run_id] = payload
+        return dict(payload)
+
+    async def store_worker(self, worker_id: str, worker_data: dict[str, Any]) -> None:
+        self._workers[worker_id] = dict(worker_data)
+
+    async def get_worker(self, worker_id: str) -> dict[str, Any] | None:
+        record = self._workers.get(worker_id)
+        return dict(record) if record is not None else None
+
+    async def list_workers(self) -> list[dict[str, Any]]:
+        return [dict(value) for value in self._workers.values()]
+
+    async def store_worker_request(self, run_id: str | None, action_id: str, request_data: dict[str, Any]) -> None:
+        self._worker_requests[(run_id, action_id)] = dict(request_data)
+
+    async def get_worker_request(self, run_id: str | None, action_id: str) -> dict[str, Any] | None:
+        record = self._worker_requests.get((run_id, action_id))
+        return dict(record) if record is not None else None
+
+    async def store_worker_result(self, run_id: str | None, action_id: str, result_data: dict[str, Any]) -> None:
+        self._worker_results[(run_id, action_id)] = dict(result_data)
+
+    async def get_worker_result(self, run_id: str | None, action_id: str) -> dict[str, Any] | None:
+        record = self._worker_results.get((run_id, action_id))
+        return dict(record) if record is not None else None
 
     async def store_runtime_event(self, event_id: str, event_data: dict[str, Any]) -> None:
         self._events[event_id] = dict(event_data)
@@ -589,8 +682,17 @@ class RedisRuntimeStateStore(RuntimeStateStore):
 
     async def store_run_lease(self, run_id: str, lease_data: dict[str, Any]) -> None:
         redis = self._require_redis()
+        previous = await self.get_run_lease(run_id)
+        token = lease_data.get("token")
+        if isinstance(token, int):
+            current_counter = await redis.get("synapse:run-leases:token")
+            current_value = int(current_counter) if current_counter is not None else 0
+            if token > current_value:
+                await redis.set("synapse:run-leases:token", token)
         await redis.set(self._run_lease_key(run_id), json.dumps(lease_data))
         await redis.sadd("synapse:run-leases:index", run_id)
+        if previous is not None and isinstance(previous.get("worker_id"), str):
+            await redis.srem(f"synapse:run-leases:worker:{previous['worker_id']}", run_id)
         worker_id = lease_data.get("worker_id")
         if isinstance(worker_id, str) and worker_id:
             await redis.sadd(f"synapse:run-leases:worker:{worker_id}", run_id)
@@ -616,6 +718,66 @@ class RedisRuntimeStateStore(RuntimeStateStore):
         await redis.srem("synapse:run-leases:index", run_id)
         if lease is not None and isinstance(lease.get("worker_id"), str):
             await redis.srem(f"synapse:run-leases:worker:{lease['worker_id']}", run_id)
+
+    async def acquire_run_lease(self, run_id: str, lease_data: dict[str, Any]) -> dict[str, Any]:
+        redis = self._require_redis()
+        current = await self.get_run_lease(run_id)
+        if current is not None:
+            expires_at = current.get("expires_at")
+            status = current.get("status")
+            if status == "active" and isinstance(expires_at, str) and datetime.fromisoformat(expires_at) > datetime.now(timezone.utc):
+                return current
+        token = int(await redis.incr("synapse:run-leases:token"))
+        payload = dict(lease_data)
+        payload["token"] = token
+        await self.store_run_lease(run_id, payload)
+        return payload
+
+    async def renew_run_lease(self, run_id: str, worker_id: str, token: int, lease_data: dict[str, Any]) -> dict[str, Any]:
+        current = await self.get_run_lease(run_id)
+        if current is None:
+            raise KeyError(f"Run lease not found: {run_id}")
+        if current.get("worker_id") != worker_id or int(current.get("token", -1)) != token:
+            raise PermissionError("Stale fencing token for run lease renewal.")
+        payload = dict(lease_data)
+        payload["token"] = token
+        await self.store_run_lease(run_id, payload)
+        return payload
+
+    async def store_worker(self, worker_id: str, worker_data: dict[str, Any]) -> None:
+        redis = self._require_redis()
+        await redis.set(self._worker_key(worker_id), json.dumps(worker_data))
+        await redis.sadd("synapse:workers:index", worker_id)
+
+    async def get_worker(self, worker_id: str) -> dict[str, Any] | None:
+        redis = self._require_redis()
+        payload = await redis.get(self._worker_key(worker_id))
+        return self._decode(payload)
+
+    async def list_workers(self) -> list[dict[str, Any]]:
+        redis = self._require_redis()
+        ids = await redis.smembers("synapse:workers:index")
+        return await self._mget_json([self._worker_key(worker_id) for worker_id in ids])
+
+    async def store_worker_request(self, run_id: str | None, action_id: str, request_data: dict[str, Any]) -> None:
+        redis = self._require_redis()
+        await redis.set(self._worker_request_key(run_id, action_id), json.dumps(request_data))
+        await redis.sadd(self._worker_request_index_key(run_id), action_id)
+
+    async def get_worker_request(self, run_id: str | None, action_id: str) -> dict[str, Any] | None:
+        redis = self._require_redis()
+        payload = await redis.get(self._worker_request_key(run_id, action_id))
+        return self._decode(payload)
+
+    async def store_worker_result(self, run_id: str | None, action_id: str, result_data: dict[str, Any]) -> None:
+        redis = self._require_redis()
+        await redis.set(self._worker_result_key(run_id, action_id), json.dumps(result_data))
+        await redis.sadd(self._worker_result_index_key(run_id), action_id)
+
+    async def get_worker_result(self, run_id: str | None, action_id: str) -> dict[str, Any] | None:
+        redis = self._require_redis()
+        payload = await redis.get(self._worker_result_key(run_id, action_id))
+        return self._decode(payload)
 
     async def store_runtime_event(self, event_id: str, event_data: dict[str, Any]) -> None:
         redis = self._require_redis()
@@ -776,6 +938,30 @@ class RedisRuntimeStateStore(RuntimeStateStore):
     @staticmethod
     def _run_lease_key(run_id: str) -> str:
         return f"synapse:run-leases:{run_id}"
+
+    @staticmethod
+    def _worker_key(worker_id: str) -> str:
+        return f"synapse:workers:{worker_id}"
+
+    @staticmethod
+    def _worker_request_key(run_id: str | None, action_id: str) -> str:
+        run_part = run_id or "global"
+        return f"synapse:worker-requests:{run_part}:{action_id}"
+
+    @staticmethod
+    def _worker_request_index_key(run_id: str | None) -> str:
+        run_part = run_id or "global"
+        return f"synapse:worker-requests:index:{run_part}"
+
+    @staticmethod
+    def _worker_result_key(run_id: str | None, action_id: str) -> str:
+        run_part = run_id or "global"
+        return f"synapse:worker-results:{run_part}:{action_id}"
+
+    @staticmethod
+    def _worker_result_index_key(run_id: str | None) -> str:
+        run_part = run_id or "global"
+        return f"synapse:worker-results:index:{run_part}"
 
     @staticmethod
     def _event_key(event_id: str) -> str:

@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from synapse.config import settings
 
@@ -18,24 +18,41 @@ except Exception:  # pragma: no cover - optional import
 
 
 class BrowserTaskEnvelope(BaseModel):
-    request_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    action_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    request_id: str | None = None
     action: str
     session_id: str | None = None
     agent_id: str | None = None
     run_id: str | None = None
     task_id: str | None = None
+    fencing_token: int | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     arguments: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def _sync_request_id(self) -> "BrowserTaskEnvelope":
+        if self.request_id is None:
+            self.request_id = self.action_id
+        return self
+
 
 class BrowserTaskResult(BaseModel):
-    request_id: str
+    action_id: str
+    request_id: str | None = None
     worker_id: str
     action: str
+    run_id: str | None = None
     success: bool = True
     payload: Any = None
     error: str | None = None
+    fencing_token: int | None = None
     completed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @model_validator(mode="after")
+    def _sync_request_id(self) -> "BrowserTaskResult":
+        if self.request_id is None:
+            self.request_id = self.action_id
+        return self
 
 
 class BrowserTaskQueue(ABC):

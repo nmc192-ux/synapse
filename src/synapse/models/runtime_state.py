@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 
 class AgentRuntimeStatus(str, Enum):
@@ -69,16 +69,69 @@ class BrowserWorkerState(BaseModel):
     last_heartbeat: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     active_sessions: int = 0
     current_request_id: str | None = None
+    capabilities: list[str] = Field(default_factory=list)
+    current_runs: list[str] = Field(default_factory=list)
     metadata: dict[str, object] = Field(default_factory=dict)
 
 
+class RunLeaseStatus(str, Enum):
+    ACTIVE = "active"
+    EXPIRED = "expired"
+    RELEASED = "released"
+
+
 class RunLeaseRecord(BaseModel):
+    lease_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     run_id: str
     worker_id: str
-    lease_acquired_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    lease_expiration: datetime
+    token: int = 0
+    acquired_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    expires_at: datetime = Field(validation_alias=AliasChoices("expires_at", "lease_expiration"))
+    status: RunLeaseStatus = RunLeaseStatus.ACTIVE
     attempts: int = 1
     next_retry_at: datetime | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _upgrade_legacy_fields(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        payload = dict(value)
+        if "acquired_at" not in payload and "lease_acquired_at" in payload:
+            payload["acquired_at"] = payload["lease_acquired_at"]
+        if "expires_at" not in payload and "lease_expiration" in payload:
+            payload["expires_at"] = payload["lease_expiration"]
+        payload.pop("lease_acquired_at", None)
+        payload.pop("lease_expiration", None)
+        return payload
+
+
+class BrowserTaskRequestRecord(BaseModel):
+    action_id: str
+    run_id: str | None = None
+    worker_id: str
+    action: str
+    session_id: str | None = None
+    task_id: str | None = None
+    agent_id: str | None = None
+    fencing_token: int | None = None
+    status: str = "queued"
+    payload: dict[str, object] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class BrowserTaskResultRecord(BaseModel):
+    action_id: str
+    run_id: str | None = None
+    worker_id: str
+    action: str
+    success: bool = True
+    payload: dict[str, object] = Field(default_factory=dict)
+    error: str | None = None
+    fencing_token: int | None = None
+    status: str = "completed"
+    completed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class RuntimeCheckpoint(BaseModel):

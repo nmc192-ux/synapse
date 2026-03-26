@@ -5,7 +5,15 @@ from datetime import datetime, timedelta, timezone
 from synapse.models.agent import AgentBudgetUsage
 from synapse.models.run import RunGraph, RunGraphEdge, RunGraphNode, RunState, RunStatus
 from synapse.models.runtime_event import RunReplayView, RunTimeline, RunTimelineEntry, infer_event_phase
-from synapse.models.runtime_state import BrowserNetworkEntry, BrowserTraceEntry, RunLeaseRecord
+from synapse.models.runtime_state import (
+    BrowserNetworkEntry,
+    BrowserTaskRequestRecord,
+    BrowserTaskResultRecord,
+    BrowserTraceEntry,
+    BrowserWorkerState,
+    RunLeaseRecord,
+    RunLeaseStatus,
+)
 from synapse.runtime.state_store import RuntimeStateStore
 
 
@@ -143,11 +151,36 @@ class RunStore:
             await self.state_store.store_run_lease(lease.run_id, lease.model_dump(mode="json"))
         return lease
 
+    async def acquire_lease(
+        self,
+        *,
+        run_id: str,
+        worker_id: str,
+        lease_timeout_seconds: float,
+        attempts: int = 1,
+        next_retry_at: datetime | None = None,
+    ) -> RunLeaseRecord:
+        now = datetime.now(timezone.utc)
+        lease = RunLeaseRecord(
+            run_id=run_id,
+            worker_id=worker_id,
+            acquired_at=now,
+            expires_at=now + timedelta(seconds=lease_timeout_seconds),
+            status=RunLeaseStatus.ACTIVE,
+            attempts=attempts,
+            next_retry_at=next_retry_at,
+        )
+        if self.state_store is not None:
+            payload = await self.state_store.acquire_run_lease(run_id, lease.model_dump(mode="json"))
+            return RunLeaseRecord.model_validate(payload)
+        return await self.save_lease(lease)
+
     async def renew_lease(
         self,
         run_id: str,
         *,
         lease_timeout_seconds: float,
+        token: int,
         worker_id: str | None = None,
         reset_acquired_at: bool = False,
     ) -> RunLeaseRecord:
@@ -156,13 +189,21 @@ class RunStore:
             raise KeyError(f"Run lease not found: {run_id}")
         now = datetime.now(timezone.utc)
         updates: dict[str, object] = {
-            "lease_expiration": now + timedelta(seconds=lease_timeout_seconds),
+            "expires_at": now + timedelta(seconds=lease_timeout_seconds),
         }
         if worker_id is not None:
             updates["worker_id"] = worker_id
         if reset_acquired_at:
-            updates["lease_acquired_at"] = now
+            updates["acquired_at"] = now
         lease = lease.model_copy(update=updates)
+        if self.state_store is not None:
+            payload = await self.state_store.renew_run_lease(
+                run_id,
+                worker_id=lease.worker_id,
+                token=token,
+                lease_data=lease.model_dump(mode="json"),
+            )
+            return RunLeaseRecord.model_validate(payload)
         return await self.save_lease(lease)
 
     async def get_lease(self, run_id: str) -> RunLeaseRecord | None:
@@ -187,11 +228,56 @@ class RunStore:
     ) -> list[RunLeaseRecord]:
         reference = now or datetime.now(timezone.utc)
         leases = await self.list_leases(worker_id=worker_id)
-        return [lease for lease in leases if lease.lease_expiration <= reference]
+        return [lease for lease in leases if lease.expires_at <= reference]
 
     async def delete_lease(self, run_id: str) -> None:
         if self.state_store is not None:
             await self.state_store.delete_run_lease(run_id)
+
+    async def save_worker(self, worker: BrowserWorkerState) -> BrowserWorkerState:
+        if self.state_store is not None:
+            await self.state_store.store_worker(worker.worker_id, worker.model_dump(mode="json"))
+        return worker
+
+    async def list_workers(self) -> list[BrowserWorkerState]:
+        if self.state_store is None:
+            return []
+        rows = await self.state_store.list_workers()
+        return [BrowserWorkerState.model_validate(row) for row in rows]
+
+    async def save_worker_request(self, request: BrowserTaskRequestRecord) -> BrowserTaskRequestRecord:
+        if self.state_store is not None:
+            await self.state_store.store_worker_request(request.run_id, request.action_id, request.model_dump(mode="json"))
+        return request
+
+    async def get_worker_request(self, run_id: str | None, action_id: str) -> BrowserTaskRequestRecord | None:
+        if self.state_store is None:
+            return None
+        payload = await self.state_store.get_worker_request(run_id, action_id)
+        if payload is None:
+            return None
+        return BrowserTaskRequestRecord.model_validate(payload)
+
+    async def save_worker_result(self, result: BrowserTaskResultRecord) -> BrowserTaskResultRecord:
+        if self.state_store is not None:
+            await self.state_store.store_worker_result(result.run_id, result.action_id, result.model_dump(mode="json"))
+        return result
+
+    async def get_worker_result(self, run_id: str | None, action_id: str) -> BrowserTaskResultRecord | None:
+        if self.state_store is None:
+            return None
+        payload = await self.state_store.get_worker_result(run_id, action_id)
+        if payload is None:
+            return None
+        return BrowserTaskResultRecord.model_validate(payload)
+
+    async def validate_fencing_token(self, run_id: str | None, worker_id: str, token: int | None) -> bool:
+        if run_id is None or token is None:
+            return True
+        lease = await self.get_lease(run_id)
+        if lease is None:
+            return False
+        return lease.worker_id == worker_id and lease.token == token and lease.status == RunLeaseStatus.ACTIVE
 
     async def get_timeline(self, run_id: str, limit: int = 500) -> RunTimeline:
         run = await self.get(run_id)

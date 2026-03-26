@@ -8,16 +8,19 @@ from pydantic import BaseModel, Field
 from synapse.config import settings
 from synapse.models.run import RunState, RunStatus
 from synapse.models.runtime_event import EventSeverity, EventType
-from synapse.models.runtime_state import BrowserWorkerState, RunLeaseRecord, WorkerRuntimeStatus
+from synapse.models.runtime_state import BrowserWorkerState, RunLeaseRecord, RunLeaseStatus, WorkerRuntimeStatus
 from synapse.runtime.event_bus import EventBus
 from synapse.runtime.run_store import RunStore
 
 
 class RunLease(BaseModel):
+    lease_id: str
     run_id: str
     worker_id: str
+    token: int
     leased_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     expires_at: datetime
+    status: RunLeaseStatus = RunLeaseStatus.ACTIVE
     attempts: int = 1
     next_retry_at: datetime | None = None
 
@@ -65,7 +68,7 @@ class RunScheduler:
         await self.cleanup_expired_leases()
         existing = await self._load_lease(run_id)
         if existing is not None and self._worker_available(existing.worker_id):
-            return await self.renew_lease(run_id)
+            return await self.renew_lease(run_id, token=existing.token)
         next_retry_at = run.metadata.get("next_retry_at")
         if isinstance(next_retry_at, str):
             retry_at = datetime.fromisoformat(next_retry_at)
@@ -79,14 +82,13 @@ class RunScheduler:
             raise RuntimeError("No browser workers available.")
 
         attempts = self._assignment_attempts(run) + 1
-        lease = RunLease(
+        lease_record = await self.run_store.acquire_lease(
             run_id=run_id,
             worker_id=worker.worker_id,
-            leased_at=datetime.now(timezone.utc),
-            expires_at=datetime.now(timezone.utc) + timedelta(seconds=self.lease_timeout_seconds),
+            lease_timeout_seconds=self.lease_timeout_seconds,
             attempts=attempts,
         )
-        await self._persist_lease(lease)
+        lease = self._from_record(lease_record)
         await self.run_store.update_status(
             run_id,
             RunStatus.RUNNING if run.status != RunStatus.PAUSED else RunStatus.RESUMED,
@@ -95,6 +97,7 @@ class RunScheduler:
                 "assigned_worker_id": worker.worker_id,
                 "assignment_attempts": attempts,
                 "lease_expires_at": lease.expires_at.isoformat(),
+                "lease_token": lease.token,
                 "next_retry_at": None,
             },
         )
@@ -106,6 +109,8 @@ class RunScheduler:
             source="scheduler",
             payload={
                 "worker_id": worker.worker_id,
+                "lease_id": lease.lease_id,
+                "token": lease.token,
                 "lease_expires_at": lease.expires_at.isoformat(),
                 "attempts": attempts,
             },
@@ -113,7 +118,7 @@ class RunScheduler:
         )
         return lease
 
-    async def renew_lease(self, run_id: str) -> RunLease:
+    async def renew_lease(self, run_id: str, *, token: int) -> RunLease:
         run = await self.run_store.get(run_id)
         lease = await self._load_lease(run_id)
         if lease is None:
@@ -121,17 +126,22 @@ class RunScheduler:
         record = await self.run_store.renew_lease(
             run_id,
             lease_timeout_seconds=self.lease_timeout_seconds,
+            token=token,
         )
         lease = self._from_record(record)
         await self.run_store.update_metadata(
             run_id,
-            {"lease_expires_at": lease.expires_at.isoformat(), "assigned_worker_id": lease.worker_id},
+            {
+                "lease_expires_at": lease.expires_at.isoformat(),
+                "assigned_worker_id": lease.worker_id,
+                "lease_token": lease.token,
+            },
         )
         return lease
 
     async def release_run(self, run_id: str) -> None:
         await self.run_store.delete_lease(run_id)
-        await self.run_store.update_metadata(run_id, {"lease_expires_at": None, "assigned_worker_id": None})
+        await self.run_store.update_metadata(run_id, {"lease_expires_at": None, "assigned_worker_id": None, "lease_token": None})
 
     async def mark_assignment_failed(self, run_id: str, *, reason: str) -> RunLease:
         run = await self.run_store.get(run_id)
@@ -207,7 +217,7 @@ class RunScheduler:
     async def cleanup_expired_leases(self) -> list[str]:
         now = datetime.now(timezone.utc)
         leases = await self.run_store.list_expired_leases(now=now)
-        expired = [lease.run_id for lease in leases if lease.lease_expiration <= now]
+        expired = [lease.run_id for lease in leases if lease.expires_at <= now]
         for run_id in expired:
             await self.requeue_run(run_id, reason="Worker lease expired.", reassign=True, recovered=True)
         return expired
@@ -256,19 +266,7 @@ class RunScheduler:
         leases = await self.run_store.list_leases(worker_id=worker_id)
         for lease in leases:
             if self._worker_available(worker_id):
-                await self.renew_lease(lease.run_id)
-
-    async def _persist_lease(self, lease: RunLease) -> None:
-        await self.run_store.save_lease(
-            RunLeaseRecord(
-                run_id=lease.run_id,
-                worker_id=lease.worker_id,
-                lease_acquired_at=lease.leased_at,
-                lease_expiration=lease.expires_at,
-                attempts=lease.attempts,
-                next_retry_at=lease.next_retry_at,
-            )
-        )
+                await self.renew_lease(lease.run_id, token=lease.token)
 
     async def _load_lease(self, run_id: str) -> RunLease | None:
         record = await self.run_store.get_lease(run_id)
@@ -279,10 +277,13 @@ class RunScheduler:
     @staticmethod
     def _from_record(record: RunLeaseRecord) -> RunLease:
         return RunLease(
+            lease_id=record.lease_id,
             run_id=record.run_id,
             worker_id=record.worker_id,
-            leased_at=record.lease_acquired_at,
-            expires_at=record.lease_expiration,
+            token=record.token,
+            leased_at=record.acquired_at,
+            expires_at=record.expires_at,
+            status=record.status,
             attempts=record.attempts,
             next_retry_at=record.next_retry_at,
         )

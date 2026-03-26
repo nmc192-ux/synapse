@@ -1,10 +1,12 @@
 import asyncio
 from datetime import datetime, timezone
+from contextlib import suppress
 
 from synapse.models.browser import BrowserState, StructuredPageModel
 from synapse.models.runtime_event import EventType
-from synapse.models.runtime_state import BrowserSessionState, RunLeaseRecord, WorkerRuntimeStatus
+from synapse.models.runtime_state import BrowserSessionState, BrowserTaskResultRecord, RunLeaseRecord, WorkerRuntimeStatus
 from synapse.runtime.browser_workers import BrowserWorkerPool
+from synapse.runtime.queues import BrowserTaskEnvelope, BrowserTaskResult
 from synapse.runtime.run_store import RunStore
 from synapse.runtime.session import BrowserSession
 from synapse.runtime.state_store import InMemoryRuntimeStateStore
@@ -156,8 +158,9 @@ def test_browser_worker_pool_renews_durable_leases_on_heartbeat() -> None:
             RunLeaseRecord(
                 run_id=run_id,
                 worker_id="browser-worker-1",
-                lease_acquired_at=datetime.now(timezone.utc),
-                lease_expiration=datetime.now(timezone.utc),
+                acquired_at=datetime.now(timezone.utc),
+                expires_at=datetime.now(timezone.utc),
+                token=1,
             )
         )
         await pool.start()
@@ -165,8 +168,93 @@ def test_browser_worker_pool_renews_durable_leases_on_heartbeat() -> None:
             await asyncio.sleep(0.03)
             lease = await run_store.get_lease(run_id)
             assert lease is not None
-            assert lease.lease_expiration > datetime.now(timezone.utc)
+            assert lease.expires_at > datetime.now(timezone.utc)
         finally:
+            await pool.stop()
+
+    asyncio.run(scenario())
+
+
+def test_browser_worker_pool_recovers_persisted_result_after_restart() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+        )
+        await run_store.save_worker_result(
+            BrowserTaskResultRecord(
+                action_id="action-1",
+                run_id="run-1",
+                worker_id="browser-worker-1",
+                action="get_layout",
+                success=True,
+                payload={"restored": True},
+                fencing_token=3,
+            )
+        )
+
+        await pool.start()
+        try:
+            payload = await pool._dispatch(
+                "browser-worker-1",
+                BrowserTaskEnvelope(action_id="action-1", run_id="run-1", action="get_layout"),
+            )
+            assert payload == {"restored": True}
+        finally:
+            await pool.stop()
+
+    asyncio.run(scenario())
+
+
+def test_browser_worker_pool_rejects_stale_fencing_result() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+        )
+        await run_store.save_lease(
+            RunLeaseRecord(
+                run_id="run-1",
+                worker_id="browser-worker-1",
+                acquired_at=datetime.now(timezone.utc),
+                expires_at=datetime.now(timezone.utc),
+                token=2,
+            )
+        )
+        await pool.start()
+        try:
+            loop = asyncio.get_running_loop()
+            future = loop.create_future()
+            pool._pending["action-stale"] = future
+
+            await pool._handle_result(
+                BrowserTaskResult(
+                    action_id="action-stale",
+                    run_id="run-1",
+                    worker_id="browser-worker-1",
+                    action="open",
+                    success=True,
+                    payload={"stale": True},
+                    fencing_token=1,
+                )
+            )
+
+            assert not future.done()
+            assert await run_store.get_worker_result("run-1", "action-stale") is None
+        finally:
+            pending = pool._pending.pop("action-stale", None)
+            if pending is not None:
+                pending.cancel()
+                with suppress(asyncio.CancelledError):
+                    await pending
             await pool.stop()
 
     asyncio.run(scenario())

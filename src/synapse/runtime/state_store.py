@@ -169,6 +169,14 @@ class RuntimeStateStore(ABC):
     async def get_agent_ownership(self, agent_id: str) -> dict[str, Any] | None:
         raise NotImplementedError
 
+    @abstractmethod
+    async def store_audit_log(self, audit_log_id: str, audit_log_data: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def list_audit_logs(self, project_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
 
 class InMemoryRuntimeStateStore(RuntimeStateStore):
     def __init__(self) -> None:
@@ -185,6 +193,8 @@ class InMemoryRuntimeStateStore(RuntimeStateStore):
         self._users: dict[str, dict[str, Any]] = {}
         self._api_keys: dict[str, dict[str, Any]] = {}
         self._agent_ownership: dict[str, dict[str, Any]] = {}
+        self._audit_logs: dict[str, dict[str, Any]] = {}
+        self._audit_log_ids: list[str] = []
 
     async def register_agent(self, agent: dict[str, Any]) -> None:
         self._agents[agent["agent_id"]] = dict(agent)
@@ -336,6 +346,24 @@ class InMemoryRuntimeStateStore(RuntimeStateStore):
     async def get_agent_ownership(self, agent_id: str) -> dict[str, Any] | None:
         record = self._agent_ownership.get(agent_id)
         return dict(record) if record is not None else None
+
+    async def store_audit_log(self, audit_log_id: str, audit_log_data: dict[str, Any]) -> None:
+        self._audit_logs[audit_log_id] = dict(audit_log_data)
+        self._audit_log_ids.insert(0, audit_log_id)
+        if len(self._audit_log_ids) > 10_000:
+            stale = self._audit_log_ids.pop()
+            self._audit_logs.pop(stale, None)
+
+    async def list_audit_logs(self, project_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for audit_log_id in self._audit_log_ids:
+            record = self._audit_logs[audit_log_id]
+            if project_id is not None and record.get("project_id") != project_id:
+                continue
+            rows.append(dict(record))
+            if len(rows) >= limit:
+                break
+        return rows
 
 
 class RedisRuntimeStateStore(RuntimeStateStore):
@@ -613,6 +641,24 @@ class RedisRuntimeStateStore(RuntimeStateStore):
         payload = await redis.get(self._agent_ownership_key(agent_id))
         return self._decode(payload)
 
+    async def store_audit_log(self, audit_log_id: str, audit_log_data: dict[str, Any]) -> None:
+        redis = self._require_redis()
+        await redis.set(self._audit_log_key(audit_log_id), json.dumps(audit_log_data))
+        await redis.lpush("synapse:audit-logs:index", audit_log_id)
+        await redis.ltrim("synapse:audit-logs:index", 0, self._max_events - 1)
+        project_id = audit_log_data.get("project_id")
+        if isinstance(project_id, str) and project_id:
+            await redis.lpush(f"synapse:audit-logs:project:{project_id}", audit_log_id)
+            await redis.ltrim(f"synapse:audit-logs:project:{project_id}", 0, self._max_events - 1)
+
+    async def list_audit_logs(self, project_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        redis = self._require_redis()
+        if project_id is not None:
+            ids = await redis.lrange(f"synapse:audit-logs:project:{project_id}", 0, max(0, limit - 1))
+        else:
+            ids = await redis.lrange("synapse:audit-logs:index", 0, max(0, limit - 1))
+        return await self._mget_json([self._audit_log_key(item_id) for item_id in ids])
+
     def _require_redis(self) -> Redis:
         if self._redis is None:
             raise RuntimeError("Redis runtime store is not started.")
@@ -687,6 +733,10 @@ class RedisRuntimeStateStore(RuntimeStateStore):
     @staticmethod
     def _agent_ownership_key(agent_id: str) -> str:
         return f"synapse:agent-ownership:{agent_id}"
+
+    @staticmethod
+    def _audit_log_key(audit_log_id: str) -> str:
+        return f"synapse:audit-logs:{audit_log_id}"
 
 
 async def create_runtime_state_store() -> RuntimeStateStore:

@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from synapse.api.routes import get_authenticator, get_orchestrator, router
 from synapse.config import Settings
 from synapse.models.agent import AgentDefinition, AgentKind
+from synapse.models.runtime_state import BrowserWorkerState, WorkerRuntimeStatus
 from synapse.models.platform import (
     APIKeyCreateRequest,
     AgentOwnershipRequest,
@@ -42,6 +43,15 @@ class _StubBrowserService:
 
     async def restore_session_state(self, *args, **kwargs):
         return None
+
+    def list_workers(self):
+        return [
+            BrowserWorkerState(
+                worker_id="browser-worker-1",
+                queue_name="synapse:browser:worker:browser-worker-1",
+                status=WorkerRuntimeStatus.IDLE,
+            )
+        ]
 
 
 class _StubToolService:
@@ -262,3 +272,150 @@ def test_platform_api_routes() -> None:
     list_response = client.get("/api/platform/projects", headers=headers)
     assert list_response.status_code == 200
     assert list_response.json()[0]["organization_id"] == organization_id
+
+
+def test_hosted_control_plane_project_scoped_routes_and_audit_logs() -> None:
+    store = InMemoryRuntimeStateStore()
+    settings = Settings(
+        auth_required=True,
+        jwt_secret="cloud-secret",
+        jwt_issuer="synapse-test",
+        jwt_audience="synapse-test-api",
+    )
+    authenticator = Authenticator(settings)
+    registry = AgentRegistry(state_store=store)
+    agent = registry.register(AgentDefinition(agent_id="agent-1", kind=AgentKind.CUSTOM, name="Agent One"))
+    registry.build_adapter = lambda *args, **kwargs: _StubAdapter()  # type: ignore[method-assign]
+    asyncio.run(registry.save_to_store(agent))
+
+    orchestrator = RuntimeOrchestrator(
+        browser=_StubBrowserService(),
+        agents=registry,
+        tools=SimpleNamespace(),
+        messages=SimpleNamespace(),
+        a2a=SimpleNamespace(),
+        memory_manager=_StubMemoryManager(),
+        task_manager=_StubTaskManager(),
+        sockets=WebSocketManager(state_store=store),
+        sandbox=SimpleNamespace(),
+        safety=_StubSafety(),
+        budget_manager=AgentBudgetManager(),
+        state_store=store,
+        authenticator=authenticator,
+    )
+    orchestrator.scheduler = None
+    orchestrator.task_runtime.scheduler = None
+    organization = asyncio.run(orchestrator.create_organization(OrganizationCreateRequest(name="Acme", slug="acme")))
+    project = asyncio.run(
+        orchestrator.create_project(ProjectCreateRequest(organization_id=organization.organization_id, name="Core", slug="core"))
+    )
+    owner = asyncio.run(
+        orchestrator.create_user(
+            UserCreateRequest(
+                organization_id=organization.organization_id,
+                project_ids=[project.project_id],
+                email="ops@example.com",
+                display_name="Ops",
+            )
+        )
+    )
+    asyncio.run(
+        orchestrator.assign_agent_ownership(
+            "agent-1",
+            AgentOwnershipRequest(
+                organization_id=organization.organization_id,
+                project_id=project.project_id,
+                owner_user_id=owner.user_id,
+            ),
+        )
+    )
+
+    app = FastAPI()
+    app.include_router(router, prefix="/api")
+    app.dependency_overrides[get_orchestrator] = lambda: orchestrator
+    app.dependency_overrides[get_authenticator] = lambda: authenticator
+    client = TestClient(app)
+
+    project_token = authenticator.issue_token(
+        subject="svc-1",
+        principal_type=PrincipalType.SERVICE,
+        scopes=[
+            Scope.TASKS_WRITE.value,
+            Scope.BROWSER_CONTROL.value,
+            Scope.A2A_SEND.value,
+            Scope.A2A_RECEIVE.value,
+            Scope.ADMIN.value,
+        ],
+        organization_id=organization.organization_id,
+        project_id=project.project_id,
+    )
+    headers = {"Authorization": f"Bearer {project_token}"}
+
+    run_response = client.post(
+        f"/api/cloud/projects/{project.project_id}/runs",
+        json={"task_id": "task-cloud", "agent_id": "agent-1", "goal": "Do work"},
+        headers=headers,
+    )
+    assert run_response.status_code == 200
+    assert run_response.json()["project_id"] == project.project_id
+
+    profile_response = client.post(
+        f"/api/cloud/projects/{project.project_id}/profiles",
+        json={"name": "cloud-profile", "agent_id": "agent-1"},
+        headers=headers,
+    )
+    assert profile_response.status_code == 200
+    assert profile_response.json()["project_id"] == project.project_id
+
+    capability_response = client.post(
+        f"/api/cloud/projects/{project.project_id}/capabilities",
+        json={
+            "agent_id": "agent-1",
+            "capabilities": ["web_scraping"],
+            "description": "Hosted worker",
+            "endpoint": "ws://agent-1",
+            "latency": 12,
+            "availability": True,
+            "reputation": 0.8,
+        },
+        headers=headers,
+    )
+    assert capability_response.status_code == 200
+
+    capabilities_list = client.get(f"/api/cloud/projects/{project.project_id}/capabilities", headers=headers)
+    assert capabilities_list.status_code == 200
+    assert capabilities_list.json()[0]["agent_id"] == "agent-1"
+
+    capability_find = client.get(
+        f"/api/cloud/projects/{project.project_id}/agents/find",
+        params={"capability": "web_scraping"},
+        headers=headers,
+    )
+    assert capability_find.status_code == 200
+    assert capability_find.json()[0]["id"] == "agent-1"
+
+    api_key_issue = client.post(
+        f"/api/cloud/projects/{project.project_id}/api-keys",
+        json={
+            "organization_id": organization.organization_id,
+            "project_id": project.project_id,
+            "user_id": owner.user_id,
+            "name": "Hosted SDK Key",
+            "scopes": [Scope.TASKS_READ.value],
+        },
+        headers=headers,
+    )
+    assert api_key_issue.status_code == 200
+    assert api_key_issue.json()["record"]["project_id"] == project.project_id
+
+    audit_response = client.get(f"/api/cloud/projects/{project.project_id}/audit-logs", headers=headers)
+    assert audit_response.status_code == 200
+    actions = {entry["action"] for entry in audit_response.json()}
+    assert "run.create" in actions
+    assert "profile.create" in actions
+    assert "capability.advertise" in actions
+    assert "api_key.issue" in actions
+
+    workers_response = client.get("/api/cloud/admin/workers", headers=headers)
+    assert workers_response.status_code == 200
+    assert workers_response.json()[0]["worker_id"] == "browser-worker-1"

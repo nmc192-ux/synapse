@@ -42,6 +42,7 @@ from synapse.models.platform import (
     APIKeyCreateRequest,
     APIKeyIssueResponse,
     APIKeyRecord,
+    AuditLogRecord,
     AgentOwnership,
     AgentOwnershipRequest,
     Organization,
@@ -53,6 +54,7 @@ from synapse.models.platform import (
 )
 from synapse.models.run import RunGraph, RunState
 from synapse.models.runtime_state import BrowserNetworkEntry, BrowserSessionState, BrowserTraceEntry, ConnectionState, RuntimeCheckpoint
+from synapse.models.runtime_state import BrowserWorkerState
 from synapse.models.task import (
     ExtractionRequest,
     NavigationRequest,
@@ -89,6 +91,11 @@ def get_orchestrator() -> RuntimeOrchestrator:
     from synapse.main import orchestrator
 
     return orchestrator
+
+
+def _ensure_project_access(principal: AuthPrincipal, project_id: str) -> None:
+    if principal.project_id is not None and principal.project_id != project_id and Scope.ADMIN.value not in principal.scopes:
+        raise HTTPException(status_code=403, detail="Token is not authorized for this project.")
 
 
 @router.get("/health")
@@ -166,6 +173,174 @@ async def list_api_keys(
     orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
 ) -> list[APIKeyRecord]:
     return await orchestrator.list_api_keys(project_id=project_id)
+
+
+@router.post("/cloud/projects/{project_id}/runs", response_model=RunState)
+async def create_project_run(
+    project_id: str,
+    request: TaskRequest,
+    principal: TasksWritePrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> RunState:
+    _ensure_project_access(principal, project_id)
+    result = await orchestrator.execute_task(request)
+    run = await orchestrator.get_run(result.run_id)
+    if run.project_id != project_id:
+        raise HTTPException(status_code=403, detail="Run project scope mismatch.")
+    await orchestrator.log_audit_action(
+        actor_id=principal.subject,
+        actor_type=principal.principal_type.value,
+        action="run.create",
+        resource_type="run",
+        resource_id=run.run_id,
+        project_id=project_id,
+        organization_id=principal.organization_id,
+        metadata={"task_id": request.task_id, "agent_id": request.agent_id},
+    )
+    return run
+
+
+@router.post("/cloud/projects/{project_id}/profiles", response_model=SessionProfile)
+async def create_project_session_profile(
+    project_id: str,
+    request: SessionProfileCreateRequest,
+    principal: BrowserControlPrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> SessionProfile:
+    _ensure_project_access(principal, project_id)
+    profile = await orchestrator.create_session_profile(
+        request.model_copy(update={"project_id": project_id, "organization_id": principal.organization_id})
+    )
+    await orchestrator.log_audit_action(
+        actor_id=principal.subject,
+        actor_type=principal.principal_type.value,
+        action="profile.create",
+        resource_type="session_profile",
+        resource_id=profile.profile_id,
+        project_id=project_id,
+        organization_id=principal.organization_id,
+    )
+    return profile
+
+
+@router.get("/cloud/projects/{project_id}/profiles", response_model=list[SessionProfile])
+async def list_project_session_profiles(
+    project_id: str,
+    principal: TasksReadPrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> list[SessionProfile]:
+    _ensure_project_access(principal, project_id)
+    profiles = await orchestrator.list_session_profiles()
+    return [profile for profile in profiles if profile.project_id == project_id]
+
+
+@router.post("/cloud/projects/{project_id}/capabilities", response_model=CapabilityRecord)
+async def advertise_project_capabilities(
+    project_id: str,
+    request: CapabilityAdvertisementRequest,
+    principal: A2ASendPrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> CapabilityRecord:
+    _ensure_project_access(principal, project_id)
+    agent = await orchestrator.get_persisted_agent(request.agent_id)
+    if agent.project_id != project_id:
+        raise HTTPException(status_code=403, detail="Agent does not belong to this project.")
+    record = await orchestrator.advertise_capabilities(request)
+    await orchestrator.log_audit_action(
+        actor_id=principal.subject,
+        actor_type=principal.principal_type.value,
+        action="capability.advertise",
+        resource_type="agent",
+        resource_id=request.agent_id,
+        project_id=project_id,
+        organization_id=principal.organization_id,
+        metadata={"capabilities": request.capabilities},
+    )
+    return record
+
+
+@router.get("/cloud/projects/{project_id}/capabilities", response_model=list[CapabilityRecord])
+async def list_project_capabilities(
+    project_id: str,
+    principal: A2AReceivePrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> list[CapabilityRecord]:
+    _ensure_project_access(principal, project_id)
+    records = await orchestrator.list_capabilities()
+    project_agents = {
+        agent.agent_id
+        for agent in await orchestrator.get_persisted_agents()
+        if agent.project_id == project_id
+    }
+    return [record for record in records if record.agent_id in project_agents]
+
+
+@router.get("/cloud/projects/{project_id}/agents/find", response_model=list[AgentDiscoveryEntry])
+async def find_project_agents(
+    project_id: str,
+    capability: str,
+    principal: A2AReceivePrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> list[AgentDiscoveryEntry]:
+    _ensure_project_access(principal, project_id)
+    matches = await orchestrator.find_agents(capability)
+    project_agents = {
+        agent.agent_id
+        for agent in await orchestrator.get_persisted_agents()
+        if agent.project_id == project_id
+    }
+    return [entry for entry in matches if entry.id in project_agents]
+
+
+@router.post("/cloud/projects/{project_id}/api-keys", response_model=APIKeyIssueResponse)
+async def create_project_api_key(
+    project_id: str,
+    request: APIKeyCreateRequest,
+    principal: AdminPrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> APIKeyIssueResponse:
+    _ensure_project_access(principal, project_id)
+    if request.project_id != project_id:
+        raise HTTPException(status_code=400, detail="Project path and request project_id must match.")
+    issued = await orchestrator.create_api_key(request)
+    await orchestrator.log_audit_action(
+        actor_id=principal.subject,
+        actor_type=principal.principal_type.value,
+        action="api_key.issue",
+        resource_type="api_key",
+        resource_id=issued.record.api_key_id,
+        project_id=project_id,
+        organization_id=principal.organization_id,
+        metadata={"name": request.name, "scopes": request.scopes},
+    )
+    return issued
+
+
+@router.get("/cloud/projects/{project_id}/audit-logs", response_model=list[AuditLogRecord])
+async def list_project_audit_logs(
+    project_id: str,
+    principal: AdminPrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> list[AuditLogRecord]:
+    _ensure_project_access(principal, project_id)
+    return await orchestrator.list_audit_logs(project_id=project_id)
+
+
+@router.get("/cloud/admin/workers", response_model=list[BrowserWorkerState])
+async def list_worker_health(
+    principal: AdminPrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> list[BrowserWorkerState]:
+    workers = await orchestrator.list_worker_health()
+    await orchestrator.log_audit_action(
+        actor_id=principal.subject,
+        actor_type=principal.principal_type.value,
+        action="worker.health.read",
+        resource_type="browser_worker",
+        project_id=principal.project_id,
+        organization_id=principal.organization_id,
+    )
+    return [worker for worker in workers if isinstance(worker, BrowserWorkerState)]
 
 
 @router.post("/platform/agents/{agent_id}/ownership", response_model=AgentOwnership)

@@ -278,6 +278,18 @@ API keys, and agent ownership.
 Project-scoped API keys issue JWT access tokens that carry `organization_id`,
 `project_id`, and `api_key_id` claims for downstream policy enforcement.
 
+Hosted control plane APIs are also available under project-scoped cloud routes:
+
+- `POST /api/cloud/projects/{project_id}/api-keys`
+- `POST /api/cloud/projects/{project_id}/runs`
+- `POST /api/cloud/projects/{project_id}/profiles`
+- `GET /api/cloud/projects/{project_id}/profiles`
+- `POST /api/cloud/projects/{project_id}/capabilities`
+- `GET /api/cloud/projects/{project_id}/capabilities`
+- `GET /api/cloud/projects/{project_id}/agents/find?capability=...`
+- `GET /api/cloud/projects/{project_id}/audit-logs`
+- `GET /api/cloud/admin/workers`
+
 ## Capability Discovery
 
 Synapse can persist agent capability advertisements and ranked discovery metadata.

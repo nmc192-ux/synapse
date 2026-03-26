@@ -87,6 +87,19 @@ class APIKeyIssueResponse(BaseModel):
     access_token: str
 
 
+class AuditLogRecord(BaseModel):
+    audit_log_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    organization_id: str | None = None
+    project_id: str | None = None
+    actor_id: str
+    actor_type: str
+    action: str
+    resource_type: str
+    resource_id: str | None = None
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
 class AgentOwnership(BaseModel):
     agent_id: str
     organization_id: str

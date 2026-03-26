@@ -8,6 +8,7 @@ from synapse.models.platform import (
     APIKeyCreateRequest,
     APIKeyIssueResponse,
     APIKeyRecord,
+    AuditLogRecord,
     AgentOwnership,
     AgentOwnershipRequest,
     Organization,
@@ -162,6 +163,37 @@ class PlatformService:
                 owner_user_id=agent.owner_user_id,
             ).model_dump(mode="json")
         return AgentOwnership.model_validate(payload)
+
+    async def log_audit_action(
+        self,
+        *,
+        actor_id: str,
+        actor_type: str,
+        action: str,
+        resource_type: str,
+        resource_id: str | None = None,
+        project_id: str | None = None,
+        organization_id: str | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> AuditLogRecord:
+        self._require_store()
+        record = AuditLogRecord(
+            organization_id=organization_id,
+            project_id=project_id,
+            actor_id=actor_id,
+            actor_type=actor_type,
+            action=action,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            metadata=metadata or {},
+        )
+        await self.state_store.store_audit_log(record.audit_log_id, record.model_dump(mode="json"))
+        return record
+
+    async def list_audit_logs(self, project_id: str | None = None, limit: int = 100) -> list[AuditLogRecord]:
+        self._require_store()
+        rows = await self.state_store.list_audit_logs(project_id=project_id, limit=limit)
+        return [AuditLogRecord.model_validate(row) for row in rows]
 
     @staticmethod
     def _hash_secret(secret: str) -> str:

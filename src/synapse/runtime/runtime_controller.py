@@ -36,6 +36,7 @@ from synapse.models.platform import (
     APIKeyCreateRequest,
     APIKeyIssueResponse,
     APIKeyRecord,
+    AuditLogRecord,
     AgentOwnership,
     AgentOwnershipRequest,
     Organization,
@@ -47,7 +48,7 @@ from synapse.models.platform import (
 )
 from synapse.models.plugin import PluginDescriptor, PluginReloadRequest, ToolDescriptor
 from synapse.models.run import RunGraph, RunState
-from synapse.models.runtime_state import BrowserNetworkEntry, BrowserSessionState, BrowserTraceEntry, ConnectionState, RuntimeCheckpoint
+from synapse.models.runtime_state import BrowserNetworkEntry, BrowserSessionState, BrowserTraceEntry, BrowserWorkerState, ConnectionState, RuntimeCheckpoint
 from synapse.models.task import ExtractionRequest, NavigationRequest, TaskClaimRequest, TaskCreateRequest, TaskRecord, TaskRequest, TaskResult, TaskUpdateRequest
 from synapse.runtime.a2a import A2AHub
 from synapse.runtime.benchmarking import BenchmarkSuite
@@ -348,6 +349,32 @@ class RuntimeController:
     async def get_agent_ownership(self, agent_id: str) -> AgentOwnership | None:
         return await self.platform.get_agent_ownership(agent_id)
 
+    async def log_audit_action(
+        self,
+        *,
+        actor_id: str,
+        actor_type: str,
+        action: str,
+        resource_type: str,
+        resource_id: str | None = None,
+        project_id: str | None = None,
+        organization_id: str | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> AuditLogRecord:
+        return await self.platform.log_audit_action(
+            actor_id=actor_id,
+            actor_type=actor_type,
+            action=action,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            project_id=project_id,
+            organization_id=organization_id,
+            metadata=metadata,
+        )
+
+    async def list_audit_logs(self, project_id: str | None = None, limit: int = 100) -> list[AuditLogRecord]:
+        return await self.platform.list_audit_logs(project_id=project_id, limit=limit)
+
     async def get_persisted_agent(self, agent_id: str) -> AgentDefinition:
         row = await self.agents.get_persisted_agent(agent_id)
         if row is None or not isinstance(row.get("agent"), dict):
@@ -366,6 +393,11 @@ class RuntimeController:
 
     async def list_sessions(self, agent_id: str | None = None) -> list[BrowserSessionState]:
         return await self.browser_service.list_sessions(agent_id=agent_id)
+
+    async def list_worker_health(self) -> list[ConnectionState | BrowserWorkerState]:
+        if hasattr(self.browser, "list_workers"):
+            return self.browser.list_workers()
+        return []
 
     async def get_session(self, session_id: str) -> BrowserSessionState:
         return await self.browser_service.get_session(session_id)

@@ -7,6 +7,7 @@ from common import (
     default_safe_urls,
     parse_loop_args,
     register_role_agent,
+    retry_with_backoff,
     role_project_alias,
     run_forever,
     timestamp_slug,
@@ -32,7 +33,7 @@ def run_once() -> None:
 
     failures: list[dict[str, str]] = []
     with build_project_client("chaos", agent_id="synthetic-alpha-chaos-monkey") as client:
-        client.browser.open(default_safe_urls()[0])
+        retry_with_backoff(lambda: client.browser.open(default_safe_urls()[0]), label="chaos-monkey:browser.open")
         try:
             client.browser.inspect("#this-selector-does-not-exist")
         except Exception as exc:  # pragma: no cover - scaffold path

@@ -117,6 +117,11 @@ Optional env vars for bootstrap:
 - `SYNTHETIC_ALPHA_SWARM_ADMIN_PROJECT_ID` if your admin token needs a project context header
 - `SYNTHETIC_ALPHA_SWARM_DIRECTOR_ENABLE_SCHEDULE=true`
 - `SYNTHETIC_ALPHA_SWARM_DIRECTOR_SUBMIT_RUNS=true`
+- `SYNTHETIC_ALPHA_SWARM_ROLE_MAX_PAGES=20000`
+- `SYNTHETIC_ALPHA_SWARM_ROLE_MAX_RUNTIME_SECONDS=2592000`
+- `SYNTHETIC_ALPHA_SWARM_ROLE_BROWSER_ACTIONS_PER_MINUTE=30`
+
+The browser runners now rotate a single smoke URL per interval, apply jitter between browser actions, and back off automatically on `429`/transient upstream errors so the supervisor does not amplify temporary throttling into a restart storm.
 
 ## Startup Instructions
 

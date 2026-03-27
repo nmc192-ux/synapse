@@ -9,9 +9,13 @@ from common import (
     build_project_client,
     build_run_plan,
     default_safe_urls,
+    load_json_state,
     register_role_agent,
+    retry_with_backoff,
     role_project_alias,
     run_forever,
+    save_json_state,
+    sleep_with_jitter,
     summarize_run,
     timestamp_slug,
     write_json_artifact,
@@ -52,6 +56,15 @@ def smoke_urls(runner: str) -> list[str]:
     return [urls[1], urls[3], urls[4]]
 
 
+def next_smoke_url(runner: str) -> str:
+    state_name = f"{runner}_smoke_state.json"
+    urls = smoke_urls(runner)
+    state = load_json_state(state_name, {"index": 0})
+    index = int(state.get("index", 0)) % len(urls)
+    save_json_state(state_name, {"index": (index + 1) % len(urls)})
+    return urls[index]
+
+
 def run_once(runner: str) -> None:
     config = RUNNER_CONFIG[runner]
     project_alias = role_project_alias(runner)
@@ -67,17 +80,24 @@ def run_once(runner: str) -> None:
 
     direct_results: list[dict[str, Any]] = []
     with build_project_client(project_alias, agent_id=config["agent_id"]) as client:
-        for url in smoke_urls(runner):
-            opened = client.browser.open(url)
-            extracted = client.browser.extract("h1")
-            direct_results.append(
-                {
-                    "url": url,
-                    "session_id": opened.session_id,
-                    "title": opened.page.title if opened.page else None,
-                    "matches": [match.model_dump(mode="json") for match in extracted.matches[:3]],
-                }
-            )
+        url = next_smoke_url(runner)
+        opened = retry_with_backoff(
+            lambda: client.browser.open(url),
+            label=f"{runner}:browser.open",
+        )
+        sleep_with_jitter(1.0, jitter_seconds=0.5)
+        extracted = retry_with_backoff(
+            lambda: client.browser.extract("h1"),
+            label=f"{runner}:browser.extract",
+        )
+        direct_results.append(
+            {
+                "url": url,
+                "session_id": opened.session_id,
+                "title": opened.page.title if opened.page else None,
+                "matches": [match.model_dump(mode="json") for match in extracted.matches[:3]],
+            }
+        )
 
     submitted_runs: list[dict[str, Any]] = []
     plan = build_run_plan(

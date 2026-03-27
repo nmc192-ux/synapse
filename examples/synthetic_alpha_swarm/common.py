@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -24,6 +25,7 @@ from synapse.models.agent import (
     AgentDefinition,
     AgentExecutionLimits,
     AgentKind,
+    AgentRateLimits,
     AgentSecurityPolicy,
 )
 from synapse.models.platform import (
@@ -120,6 +122,20 @@ def optional_env(name: str, default: str | None = None) -> str | None:
         return None
     value = value.strip()
     return value or None
+
+
+def env_int(name: str, default: int) -> int:
+    raw = optional_env(name)
+    if raw is None:
+        return default
+    return int(raw)
+
+
+def env_float(name: str, default: float) -> float:
+    raw = optional_env(name)
+    if raw is None:
+        return default
+    return float(raw)
 
 
 def csv_env(name: str, default_items: list[str]) -> list[str]:
@@ -302,6 +318,24 @@ def build_admin_api() -> PlatformAPI:
     )
 
 
+def continuous_role_limits() -> AgentExecutionLimits:
+    return AgentExecutionLimits(
+        max_steps=env_int("SYNTHETIC_ALPHA_SWARM_ROLE_MAX_STEPS", 20000),
+        max_pages=env_int("SYNTHETIC_ALPHA_SWARM_ROLE_MAX_PAGES", 20000),
+        max_tool_calls=env_int("SYNTHETIC_ALPHA_SWARM_ROLE_MAX_TOOL_CALLS", 5000),
+        max_runtime_seconds=env_int("SYNTHETIC_ALPHA_SWARM_ROLE_MAX_RUNTIME_SECONDS", 2_592_000),
+        max_tokens=env_int("SYNTHETIC_ALPHA_SWARM_ROLE_MAX_TOKENS", 2_000_000),
+        max_memory_writes=env_int("SYNTHETIC_ALPHA_SWARM_ROLE_MAX_MEMORY_WRITES", 5000),
+    )
+
+
+def continuous_role_rate_limits() -> AgentRateLimits:
+    return AgentRateLimits(
+        browser_actions_per_minute=env_int("SYNTHETIC_ALPHA_SWARM_ROLE_BROWSER_ACTIONS_PER_MINUTE", 30),
+        tool_calls_per_minute=env_int("SYNTHETIC_ALPHA_SWARM_ROLE_TOOL_CALLS_PER_MINUTE", 15),
+    )
+
+
 def build_agent_definition(
     *,
     agent_id: str,
@@ -327,15 +361,9 @@ def build_agent_definition(
             dangerous_action_requires_approval=True,
             challenge_policy=challenge_policy,
             max_cross_domain_jumps=2,
+            rate_limits=continuous_role_rate_limits(),
         ),
-        limits=AgentExecutionLimits(
-            max_steps=24,
-            max_pages=8,
-            max_tool_calls=8,
-            max_runtime_seconds=180,
-            max_tokens=16000,
-            max_memory_writes=24,
-        ),
+        limits=continuous_role_limits(),
         metadata={
             "role": role,
             "synthetic_alpha": "true",
@@ -555,14 +583,60 @@ def parse_loop_args(description: str, *, default_interval: float = 300.0) -> arg
     return parser.parse_args()
 
 
+def sleep_with_jitter(base_seconds: float, jitter_seconds: float | None = None) -> None:
+    if base_seconds <= 0:
+        return
+    jitter = jitter_seconds if jitter_seconds is not None else min(1.0, max(0.25, base_seconds * 0.15))
+    delay = max(0.0, base_seconds + random.uniform(0.0, jitter))
+    time.sleep(delay)
+
+
+def is_retryable_http_error(exc: Exception) -> bool:
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return False
+    return exc.response.status_code in {429, 502, 503, 504}
+
+
+def retry_with_backoff(
+    action: Callable[[], Any],
+    *,
+    label: str,
+    attempts: int = 4,
+    base_delay_seconds: float = 5.0,
+    max_delay_seconds: float = 60.0,
+) -> Any:
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return action()
+        except Exception as exc:
+            last_error = exc
+            if attempt >= attempts or not is_retryable_http_error(exc):
+                raise
+            delay = min(max_delay_seconds, base_delay_seconds * (2 ** (attempt - 1)))
+            print({"label": label, "attempt": attempt, "retry_in_seconds": delay, "error": str(exc)})
+            sleep_with_jitter(delay, jitter_seconds=min(5.0, delay * 0.2))
+    raise RuntimeError(f"{label} failed without raising an exception") from last_error
+
+
 def run_forever(step: Callable[[], None], *, once: bool, interval_seconds: float) -> None:
+    consecutive_failures = 0
     while True:
         started_at = time.monotonic()
-        step()
-        if once:
-            return
-        elapsed = time.monotonic() - started_at
-        time.sleep(max(0.0, interval_seconds - elapsed))
+        try:
+            step()
+            consecutive_failures = 0
+            if once:
+                return
+            elapsed = time.monotonic() - started_at
+            sleep_with_jitter(max(0.0, interval_seconds - elapsed), jitter_seconds=min(30.0, interval_seconds * 0.1))
+        except Exception as exc:
+            consecutive_failures += 1
+            if once:
+                raise
+            delay = min(max(5.0, interval_seconds / 3), 300.0, 5.0 * (2 ** (consecutive_failures - 1)))
+            print({"loop_error": str(exc), "consecutive_failures": consecutive_failures, "retry_in_seconds": delay})
+            sleep_with_jitter(delay, jitter_seconds=min(10.0, delay * 0.25))
 
 
 def role_project_alias(role_name: str) -> str:

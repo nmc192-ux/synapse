@@ -1,5 +1,6 @@
 import asyncio
 
+import synapse.api.routes as api_routes
 from synapse.connectors.codex import CodexConnector
 from fastapi.testclient import TestClient
 
@@ -23,6 +24,52 @@ def test_healthcheck() -> None:
     response = client.get("/api/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_readiness_ok(monkeypatch) -> None:
+    async def fake_postgres() -> None:
+        return None
+
+    async def fake_redis() -> None:
+        return None
+
+    monkeypatch.setattr(api_routes, "_check_postgres_ready", fake_postgres)
+    monkeypatch.setattr(api_routes, "_check_redis_ready", fake_redis)
+
+    client = TestClient(app)
+    response = client.get("/api/ready")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ready",
+        "checks": {
+            "postgres": {"status": "ok"},
+            "redis": {"status": "ok"},
+        },
+    }
+
+
+def test_readiness_unavailable(monkeypatch) -> None:
+    async def fake_postgres() -> None:
+        return None
+
+    async def fake_redis() -> None:
+        raise RuntimeError("redis unavailable")
+
+    monkeypatch.setattr(api_routes, "_check_postgres_ready", fake_postgres)
+    monkeypatch.setattr(api_routes, "_check_redis_ready", fake_redis)
+
+    client = TestClient(app)
+    response = client.get("/api/ready")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "not_ready",
+        "checks": {
+            "postgres": {"status": "ok"},
+            "redis": {"status": "error", "detail": "redis unavailable"},
+        },
+    }
 
 
 def test_browser_state_serialization() -> None:

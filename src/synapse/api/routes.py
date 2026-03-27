@@ -1,6 +1,6 @@
-from typing import Annotated
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, HTTPException, Response, WebSocket, WebSocketDisconnect, status
 
 from synapse.models.a2a import (
     A2AEnvelope,
@@ -78,6 +78,7 @@ from synapse.runtime.budget import AgentBudgetLimitExceeded
 from synapse.runtime.security import SandboxPermissionError, SandboxRateLimitError
 from synapse.runtime.safety import SecurityAlertError
 from synapse.runtime.session import BrowserSession
+from synapse.config import settings
 from synapse.security.auth import AuthPrincipal, authenticate_websocket, get_authenticator, require_project_access, require_scopes
 from synapse.security.policies import Scope
 
@@ -188,6 +189,45 @@ async def _require_connection_project(
 @router.get("/health")
 async def healthcheck() -> dict[str, str]:
     return {"status": "ok"}
+
+
+async def _check_postgres_ready() -> None:
+    import asyncpg
+
+    connection = await asyncpg.connect(dsn=settings.postgres_dsn)
+    try:
+        await connection.execute("SELECT 1")
+    finally:
+        await connection.close()
+
+
+async def _check_redis_ready() -> None:
+    from redis.asyncio import Redis
+
+    client = Redis.from_url(settings.redis_url, decode_responses=True)
+    try:
+        await client.ping()
+    finally:
+        await client.aclose()
+
+
+@router.get("/ready")
+async def readiness(response: Response) -> dict[str, Any]:
+    checks: dict[str, dict[str, str]] = {}
+    is_ready = True
+
+    for name, probe in (("postgres", _check_postgres_ready), ("redis", _check_redis_ready)):
+        try:
+            await probe()
+            checks[name] = {"status": "ok"}
+        except Exception as exc:
+            is_ready = False
+            checks[name] = {"status": "error", "detail": str(exc)}
+
+    if not is_ready:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        return {"status": "not_ready", "checks": checks}
+    return {"status": "ready", "checks": checks}
 
 
 @router.post("/platform/organizations", response_model=Organization)

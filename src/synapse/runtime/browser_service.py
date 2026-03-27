@@ -27,10 +27,11 @@ from synapse.models.agent import AgentChallengePolicy
 from synapse.models.runtime_event import EventSeverity, EventType
 from synapse.models.runtime_state import BrowserSessionState
 from synapse.models.task import ExtractionRequest, NavigationRequest
+from synapse.runtime.budget import AgentBudgetLimitExceeded
 from synapse.runtime.budget_service import BudgetService
 from synapse.runtime.event_bus import EventBus
 from synapse.runtime.safety import AgentSafetyLayer, SecurityAlertError, SecurityFinding
-from synapse.runtime.security import AgentSecuritySandbox, SandboxApprovalRequiredError
+from synapse.runtime.security import AgentSecuritySandbox, SandboxApprovalRequiredError, SandboxRateLimitError
 from synapse.runtime.session import BrowserSession
 from synapse.runtime.state_store import RuntimeStateStore
 
@@ -466,8 +467,11 @@ class BrowserService:
             if not exc.metadata.get("_approval_emitted"):
                 await self._emit_approval_required(agent_id, session_id, run_id, exc)
             raise
+        except (SandboxRateLimitError, AgentBudgetLimitExceeded) as exc:
+            await self._emit_browser_error(action, agent_id, session_id, exc, run_id=run_id)
+            raise
         except Exception as exc:
-            await self._emit_browser_error(action, agent_id, session_id, exc)
+            await self._emit_browser_error(action, agent_id, session_id, exc, run_id=run_id)
             raise
 
     async def _ensure_current_page_safe(self, agent_id: str | None, session_id: str, action: str) -> None:
@@ -641,13 +645,36 @@ class BrowserService:
         agent_id: str | None,
         session_id: str | None,
         exc: Exception,
+        *,
+        run_id: str | None = None,
     ) -> None:
+        payload: dict[str, object] = {
+            "action": action,
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+        }
+        if isinstance(exc, SandboxRateLimitError):
+            payload["error_category"] = "rate_limit"
+            payload["threshold_exceeded"] = str(exc)
+        elif isinstance(exc, AgentBudgetLimitExceeded):
+            payload["error_category"] = "budget_limit"
+            payload["threshold_exceeded"] = str(exc)
+
+        if agent_id is not None:
+            try:
+                usage = await self.budget_service.get_run_budget(run_id) if run_id is not None else self.budget_service.get_usage(agent_id)
+                payload["budget_usage"] = usage.model_dump(mode="json")
+                payload["budget_limits"] = usage.limits.model_dump(mode="json")
+            except Exception:
+                pass
+
         await self.events.emit(
             EventType.BROWSER_ERROR,
+            run_id=run_id,
             agent_id=agent_id,
             session_id=session_id,
             source="browser_service",
-            payload={"action": action, "error": str(exc)},
+            payload=payload,
             severity=EventSeverity.ERROR,
         )
 

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from collections import Counter
-
 from common import (
+    FAILURE_BUCKETS,
     build_agent_definition,
     build_project_api,
+    classify_failure,
+    compute_project_metrics,
+    overall_metrics,
     parse_loop_args,
     register_role_agent,
     role_project_alias,
@@ -15,34 +17,6 @@ from common import (
 from synapse.models.agent import AgentKind
 
 
-def classify_run(run: object) -> str:
-    status = getattr(run, "status", None)
-    phase = getattr(run, "current_phase", None) or ""
-    metadata = getattr(run, "metadata", {}) or {}
-    resolved_status = getattr(status, "value", status)
-    if resolved_status == "failed":
-        if "timeout" in str(metadata).lower() or "timeout" in str(phase).lower():
-            return "timeout"
-        return "failed"
-    if resolved_status == "waiting_for_operator":
-        return "operator_pause"
-    if resolved_status == "completed":
-        return "completed"
-    return "in_progress"
-
-
-def classify_intervention(intervention: object) -> str:
-    reason = getattr(intervention, "reason", "")
-    normalized = reason.lower()
-    if "domain" in normalized:
-        return "domain_policy"
-    if "approval" in normalized or "operator" in normalized:
-        return "approval_required"
-    if "timeout" in normalized:
-        return "timeout"
-    return "other"
-
-
 def run_once() -> None:
     register_role_agent(
         role_project_alias("auditor"),
@@ -50,31 +24,40 @@ def run_once() -> None:
             agent_id="synthetic-alpha-auditor",
             kind=AgentKind.OPENCLAW,
             name="Synthetic Alpha Auditor",
-            description="Classifies run failures and intervention patterns across the synthetic-alpha swarm.",
+            description="Classifies failures, interventions, and stability issues across the synthetic-alpha swarm.",
             role="auditor",
             allowed_tools=[],
-            extra_tags=["audit", "triage"],
+            extra_tags=["audit", "triage", "continuous"],
         ),
     )
-    report: dict[str, object] = {}
+    project_reports: list[dict[str, object]] = []
     for alias in ("steady", "chaos"):
         with build_project_api(alias) as api:
             runs = api.list_runs()
             interventions = api.list_interventions()
-            run_counts = Counter(classify_run(run) for run in runs)
-            intervention_counts = Counter(classify_intervention(item) for item in interventions)
-            report[alias] = {
-                "runs_total": len(runs),
-                "interventions_total": len(interventions),
-                "run_classes": dict(run_counts),
-                "intervention_classes": dict(intervention_counts),
-            }
-    artifact = write_json_artifact(f"auditor_report_{timestamp_slug()}.json", report)
-    print({"artifact": str(artifact), "report": report})
+            audit_logs = api.list_audit_logs(api.project_id or "")
+            metrics = compute_project_metrics(alias, runs, interventions, audit_logs)
+            metrics["classified_failures"] = [
+                {
+                    "run_id": run.run_id,
+                    "failure_class": classify_failure(run, interventions),
+                    "status": run.status.value,
+                }
+                for run in runs
+                if run.status.value == "failed"
+            ]
+            project_reports.append(metrics)
+    summary = overall_metrics(project_reports)
+    summary["required_failure_buckets"] = FAILURE_BUCKETS
+    artifact = write_json_artifact(
+        f"auditor_report_{timestamp_slug()}.json",
+        {"projects": project_reports, "summary": summary},
+    )
+    print({"artifacts": artifact, "projects": len(project_reports), "summary": summary})
 
 
 def main() -> None:
-    args = parse_loop_args("Synthetic Alpha Auditor")
+    args = parse_loop_args("Synthetic Alpha Auditor", default_interval=900.0)
     run_forever(run_once, once=args.once, interval_seconds=args.interval_seconds)
 
 

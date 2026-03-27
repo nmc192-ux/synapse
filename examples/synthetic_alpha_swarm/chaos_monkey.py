@@ -1,0 +1,62 @@
+from __future__ import annotations
+
+from common import (
+    build_agent_definition,
+    build_project_api,
+    build_project_client,
+    default_safe_urls,
+    parse_loop_args,
+    register_role_agent,
+    role_project_alias,
+    run_forever,
+    timestamp_slug,
+    write_json_artifact,
+)
+from synapse.models.agent import AgentChallengePolicy, AgentKind
+
+
+def run_once() -> None:
+    register_role_agent(
+        role_project_alias("chaos-monkey"),
+        build_agent_definition(
+            agent_id="synthetic-alpha-chaos-monkey",
+            kind=AgentKind.OPENCLAW,
+            name="Synthetic Alpha ChaosMonkey",
+            description="Injects controlled safe failures against public sites and policy boundaries.",
+            role="chaos-monkey",
+            allowed_tools=[],
+            extra_tags=["chaos", "safe-failure"],
+            challenge_policy=AgentChallengePolicy.PAUSE,
+        ),
+    )
+
+    failures: list[dict[str, str]] = []
+    with build_project_client("chaos", agent_id="synthetic-alpha-chaos-monkey") as client:
+        client.browser.open(default_safe_urls()[0])
+        try:
+            client.browser.inspect("#this-selector-does-not-exist")
+        except Exception as exc:  # pragma: no cover - scaffold path
+            failures.append({"scenario": "missing-selector", "outcome": "expected-failure", "detail": str(exc)})
+
+        try:
+            client.browser.open("https://example.com")
+        except Exception as exc:  # pragma: no cover - scaffold path
+            failures.append({"scenario": "blocked-domain", "outcome": "expected-failure", "detail": str(exc)})
+
+    with build_project_api("chaos") as api:
+        workers = [worker.model_dump(mode="json") for worker in api.list_workers()]
+
+    artifact = write_json_artifact(
+        f"chaos_report_{timestamp_slug()}.json",
+        {"expected_failures": failures, "worker_snapshot": workers},
+    )
+    print({"artifact": str(artifact), "expected_failures": failures, "workers": len(workers)})
+
+
+def main() -> None:
+    args = parse_loop_args("Synthetic Alpha ChaosMonkey")
+    run_forever(run_once, once=args.once, interval_seconds=args.interval_seconds)
+
+
+if __name__ == "__main__":
+    main()

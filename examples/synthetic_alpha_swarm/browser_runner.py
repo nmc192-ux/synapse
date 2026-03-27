@@ -1,0 +1,109 @@
+from __future__ import annotations
+
+import argparse
+from typing import Any
+
+from common import (
+    build_agent_definition,
+    build_project_api,
+    build_project_client,
+    build_run_plan,
+    default_safe_urls,
+    register_role_agent,
+    role_project_alias,
+    run_forever,
+    summarize_run,
+    timestamp_slug,
+    write_json_artifact,
+)
+from synapse.models.agent import AgentKind
+from synapse.models.task import TaskRequest
+
+RUNNER_CONFIG: dict[str, dict[str, str]] = {
+    "browser-runner-1": {
+        "agent_id": "synthetic-alpha-browser-runner-1",
+        "name": "BrowserRunner-1",
+        "description": "Baseline browser runner for public docs and reference browsing in the steady project.",
+    },
+    "browser-runner-2": {
+        "agent_id": "synthetic-alpha-browser-runner-2",
+        "name": "BrowserRunner-2",
+        "description": "Chaos-lane browser runner for safe tenancy and failure exercises in the chaos project.",
+    },
+}
+
+
+def parse_args(forced_runner: str | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Synthetic Alpha Browser Runner")
+    if forced_runner is None:
+        parser.add_argument("--runner", choices=sorted(RUNNER_CONFIG), required=True)
+    parser.add_argument("--once", action="store_true", help="Run one cycle and exit.")
+    parser.add_argument("--interval-seconds", type=float, default=300.0)
+    args = parser.parse_args()
+    if forced_runner is not None:
+        args.runner = forced_runner
+    return args
+
+
+def smoke_urls(runner: str) -> list[str]:
+    urls = default_safe_urls()
+    if runner == "browser-runner-1":
+        return urls[:3]
+    return [urls[1], urls[3], urls[4]]
+
+
+def run_once(runner: str) -> None:
+    config = RUNNER_CONFIG[runner]
+    project_alias = role_project_alias(runner)
+    definition = build_agent_definition(
+        agent_id=config["agent_id"],
+        kind=AgentKind.CODEX if runner == "browser-runner-1" else AgentKind.OPENCLAW,
+        name=config["name"],
+        description=config["description"],
+        role=runner,
+        extra_tags=["browser", "synthetic-runner"],
+    )
+    register_role_agent(project_alias, definition)
+
+    direct_results: list[dict[str, Any]] = []
+    with build_project_client(project_alias, agent_id=config["agent_id"]) as client:
+        for url in smoke_urls(runner):
+            opened = client.browser.open(url)
+            extracted = client.browser.extract("h1")
+            direct_results.append(
+                {
+                    "url": url,
+                    "session_id": opened.session_id,
+                    "title": opened.page.title if opened.page else None,
+                    "matches": [match.model_dump(mode="json") for match in extracted.matches[:3]],
+                }
+            )
+
+    submitted_runs: list[dict[str, Any]] = []
+    plan = build_run_plan(
+        project_alias=project_alias,
+        agent_id=config["agent_id"],
+        label=f"{runner}-selftest",
+        goal=f"Run a deterministic browser self-test for {runner} against public safe domains.",
+        start_url=smoke_urls(runner)[0],
+        context_label=f"{project_alias}-{runner}-selftest",
+        extra_constraints={"runner": runner, "source": "browser_runner"},
+    )
+    with build_project_api(project_alias) as api:
+        run = api.create_project_run(api.project_id or "", TaskRequest.model_validate(plan["task_request"]))
+        submitted_runs.append(summarize_run(run))
+
+    artifact = write_json_artifact(
+        f"{runner}_{timestamp_slug()}.json",
+        {"runner": runner, "direct_results": direct_results, "submitted_runs": submitted_runs},
+    )
+    print({"artifact": str(artifact), "runner": runner, "submitted_runs": submitted_runs})
+
+
+def main(runner: str | None = None) -> None:
+    args = parse_args(runner)
+    run_forever(lambda: run_once(args.runner), once=args.once, interval_seconds=args.interval_seconds)
+
+
+if __name__ == "__main__":
+    main()

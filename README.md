@@ -2,6 +2,23 @@
 
 Synapse is a browser runtime for autonomous agents.
 
+## Release Status
+
+- Internal beta: supported for trusted internal teams
+- Restricted design-partner alpha: supported for trusted, supervised external partners under controlled deployment constraints
+- Public hosted platform: not supported yet
+
+Restricted alpha is intentionally narrow:
+
+- trusted users only
+- supervised runs only
+- restricted domain allowlists
+- `trusted_internal` plugins only, or tightly allowlisted `trusted_partner` plugins
+- no sensitive credentials
+- no SLA commitments
+
+Partner onboarding and operating material lives in [`/Users/jahanzebhussain/Synapse/docs/alpha`](/Users/jahanzebhussain/Synapse/docs/alpha). Start with the quickstart and deployment topology before granting external access.
+
 It provides a Python backend for:
 
 - browser navigation and extraction
@@ -118,6 +135,13 @@ with SynapseClient("http://127.0.0.1:8000", agent_id="codex") as client:
 
 Example agents are available in `examples/` for OpenClaw, Codex, and Claude Code.
 
+Restricted alpha examples are available in:
+
+- [`/Users/jahanzebhussain/Synapse/examples/alpha/openclaw_research_agent.py`](/Users/jahanzebhussain/Synapse/examples/alpha/openclaw_research_agent.py)
+- [`/Users/jahanzebhussain/Synapse/examples/alpha/codex_browser_agent.py`](/Users/jahanzebhussain/Synapse/examples/alpha/codex_browser_agent.py)
+- [`/Users/jahanzebhussain/Synapse/examples/alpha/claude_code_agent.py`](/Users/jahanzebhussain/Synapse/examples/alpha/claude_code_agent.py)
+- [`/Users/jahanzebhussain/Synapse/examples/alpha/multi_agent_delegation_demo.py`](/Users/jahanzebhussain/Synapse/examples/alpha/multi_agent_delegation_demo.py)
+
 Agent actions are sandboxed by default. Register each agent with explicit
 `allowed_domains`, `allowed_tools`, and rate limits before issuing browser or tool calls.
 If `SYNAPSE_LLM_PROVIDER` is configured, the navigation planner will use the selected
@@ -173,6 +197,23 @@ For secured deployments, set:
 - `NEXT_PUBLIC_SYNAPSE_PROJECT_ID`
 - `NEXT_PUBLIC_SYNAPSE_API_BASE_URL` when the UI is hosted separately from the API
 - `NEXT_PUBLIC_SYNAPSE_WS_URL`
+
+## Restricted Alpha Docs
+
+Design-partner alpha material lives in [`/Users/jahanzebhussain/Synapse/docs/alpha`](/Users/jahanzebhussain/Synapse/docs/alpha):
+
+- [`/Users/jahanzebhussain/Synapse/docs/alpha/quickstart.md`](/Users/jahanzebhussain/Synapse/docs/alpha/quickstart.md)
+- [`/Users/jahanzebhussain/Synapse/docs/alpha/deployment-topology.md`](/Users/jahanzebhussain/Synapse/docs/alpha/deployment-topology.md)
+- [`/Users/jahanzebhussain/Synapse/docs/alpha/security-boundaries.md`](/Users/jahanzebhussain/Synapse/docs/alpha/security-boundaries.md)
+- [`/Users/jahanzebhussain/Synapse/docs/alpha/operator-runbook.md`](/Users/jahanzebhussain/Synapse/docs/alpha/operator-runbook.md)
+- [`/Users/jahanzebhussain/Synapse/docs/alpha/plugin-policy.md`](/Users/jahanzebhussain/Synapse/docs/alpha/plugin-policy.md)
+- [`/Users/jahanzebhussain/Synapse/docs/alpha/known-limitations.md`](/Users/jahanzebhussain/Synapse/docs/alpha/known-limitations.md)
+- [`/Users/jahanzebhussain/Synapse/docs/alpha/support-and-diagnostics.md`](/Users/jahanzebhussain/Synapse/docs/alpha/support-and-diagnostics.md)
+- [`/Users/jahanzebhussain/Synapse/docs/alpha/failure-taxonomy.md`](/Users/jahanzebhussain/Synapse/docs/alpha/failure-taxonomy.md)
+
+Partner-safe templates live in [`/Users/jahanzebhussain/Synapse/config/examples`](/Users/jahanzebhussain/Synapse/config/examples).
+
+Partner-facing issue templates live in [`/Users/jahanzebhussain/Synapse/.github/ISSUE_TEMPLATE`](/Users/jahanzebhussain/Synapse/.github/ISSUE_TEMPLATE).
 
 ## Fixture Web
 

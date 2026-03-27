@@ -1,0 +1,9 @@
+trusted_internal:
+  - synapse.testing.isolated_plugin
+
+trusted_partner:
+  - partner.reporting_plugin
+
+policy:
+  - trusted_partner plugins must be reviewed and allowlisted explicitly.
+  - untrusted_external plugins remain disabled for restricted alpha.

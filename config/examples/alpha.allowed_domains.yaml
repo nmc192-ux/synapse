@@ -1,0 +1,9 @@
+allowed_domains:
+  - example.com
+  - docs.example.com
+  - partner-fixture.internal
+
+guidance:
+  - Keep the list short and explicit.
+  - Avoid wildcard internet access in restricted alpha.
+  - Remove domains that require sensitive credentials.

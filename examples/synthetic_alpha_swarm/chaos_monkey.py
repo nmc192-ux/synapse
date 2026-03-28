@@ -44,7 +44,16 @@ def run_once() -> None:
 
     failures: list[dict[str, str]] = []
     with build_role_client("chaos-monkey", agent_id="synthetic-alpha-chaos-monkey") as client:
-        retry_with_backoff(lambda: client.browser.open(default_safe_urls()[0]), label="chaos-monkey:browser.open")
+        retry_with_backoff(
+            lambda: client.browser.open(default_safe_urls()[0]),
+            label="chaos-monkey:browser.open",
+            telemetry_context={
+                "project_alias": role_project_alias("chaos-monkey"),
+                "project_id": getattr(client, "project_id", None),
+                "role": "chaos-monkey",
+                "agent_id": "synthetic-alpha-chaos-monkey",
+            },
+        )
         try:
             client.browser.inspect("#this-selector-does-not-exist")
         except Exception as exc:  # pragma: no cover - scaffold path
@@ -67,7 +76,14 @@ def run_once() -> None:
 
 def main() -> None:
     args = parse_loop_args("Synthetic Alpha ChaosMonkey")
-    run_forever(run_once, once=args.once, interval_seconds=args.interval_seconds)
+    run_forever(
+        run_once,
+        once=args.once,
+        interval_seconds=args.interval_seconds,
+        role_name="chaos-monkey",
+        agent_id="synthetic-alpha-chaos-monkey",
+        project_alias=role_project_alias("chaos-monkey"),
+    )
 
 
 if __name__ == "__main__":

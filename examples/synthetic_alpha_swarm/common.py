@@ -93,6 +93,11 @@ METRIC_KEYS = [
     "session_restore_failures",
     "duplicate_result_recoveries",
     "stale_ownership_incidents",
+    "a2a_messages_sent",
+    "a2a_messages_succeeded",
+    "a2a_messages_failed",
+    "scheduler_recovery_events",
+    "plugin_denials",
     "average_run_latency_seconds",
     "per_project_failure_rate",
 ]
@@ -178,12 +183,42 @@ def logs_dir() -> Path:
     return path
 
 
+def reports_dir() -> Path:
+    raw = optional_env("SYNTHETIC_ALPHA_SWARM_REPORTS_DIR", str(Path.home() / "synapse-logs" / "reports" / "synthetic_alpha"))
+    path = Path(raw or str(Path.home() / "synapse-logs" / "reports" / "synthetic_alpha"))
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def runtime_dir() -> Path:
     default_path = Path(__file__).resolve().parent / "runtime"
     raw = optional_env("SYNTHETIC_ALPHA_SWARM_OUTPUT_DIR", str(default_path)) or str(default_path)
     path = Path(raw)
     if not path.is_absolute():
         path = REPO_ROOT / path
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def runtime_reports_dir() -> Path:
+    path = runtime_dir() / "reports"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def telemetry_dir() -> Path:
+    raw = optional_env("SYNTHETIC_ALPHA_SWARM_TELEMETRY_DIR", str(logs_dir() / "telemetry"))
+    path = Path(raw or str(logs_dir() / "telemetry"))
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def runtime_telemetry_dir() -> Path:
+    path = runtime_dir() / "telemetry"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -249,6 +284,67 @@ def role_signing_key(role_name: str, agent_id: str) -> str:
     return optional_env(f"{prefix}_A2A_SIGNING_KEY", f"{agent_id}-verification-key") or f"{agent_id}-verification-key"
 
 
+def project_credentials_for_alias(alias: str | None) -> ProjectCredentials | None:
+    if not alias:
+        return None
+    return build_project_credentials(alias)
+
+
+def telemetry_event_file_name(timestamp: datetime | None = None) -> str:
+    current = timestamp or utc_now()
+    return f"telemetry_{current.strftime('%Y%m%d')}.jsonl"
+
+
+def append_text_line(target: Path, line: str) -> None:
+    with target.open("a", encoding="utf-8") as handle:
+        handle.write(line)
+
+
+def record_telemetry_event(
+    event_type: str,
+    *,
+    project_alias: str | None = None,
+    project_id: str | None = None,
+    role: str | None = None,
+    agent_id: str | None = None,
+    run_id: str | None = None,
+    status: str | None = None,
+    details: dict[str, Any] | None = None,
+    timestamp: datetime | None = None,
+) -> dict[str, str]:
+    current = timestamp or utc_now()
+    payload = {
+        "event_type": event_type,
+        "timestamp": current.isoformat(),
+        "project_alias": project_alias,
+        "project_id": project_id,
+        "role": role,
+        "agent_id": agent_id,
+        "run_id": run_id,
+        "status": status,
+        "details": details or {},
+    }
+    serialized = json.dumps(payload, sort_keys=True) + "\n"
+    repo_target = runtime_telemetry_dir() / telemetry_event_file_name(current)
+    log_target = telemetry_dir() / telemetry_event_file_name(current)
+    append_text_line(repo_target, serialized)
+    append_text_line(log_target, serialized)
+    return {"repo": str(repo_target), "log": str(log_target)}
+
+
+def load_telemetry_events_since(since: datetime) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    threshold = since.isoformat()
+    for candidate in sorted(runtime_telemetry_dir().glob("telemetry_*.jsonl")):
+        for line in candidate.read_text().splitlines():
+            if not line.strip():
+                continue
+            item = json.loads(line)
+            if str(item.get("timestamp", "")) >= threshold:
+                events.append(item)
+    return events
+
+
 def send_signed_role_message(
     *,
     role_name: str,
@@ -270,7 +366,52 @@ def send_signed_role_message(
             project_id=creds.project_id,
             nonce=nonce,
         )
-        return client.send_signed_a2a_message(message)
+        record_telemetry_event(
+            "a2a.sent",
+            project_alias=creds.project_alias,
+            project_id=creds.project_id,
+            role=role_name,
+            agent_id=sender_agent_id,
+            status="pending",
+            details={
+                "recipient_agent_id": recipient_agent_id,
+                "message_type": getattr(message_type, "value", str(message_type)),
+                "nonce": message.nonce,
+            },
+        )
+        try:
+            response = client.send_signed_a2a_message(message)
+        except Exception as exc:
+            record_telemetry_event(
+                "a2a.failed",
+                project_alias=creds.project_alias,
+                project_id=creds.project_id,
+                role=role_name,
+                agent_id=sender_agent_id,
+                status="failed",
+                details={
+                    "recipient_agent_id": recipient_agent_id,
+                    "message_type": getattr(message_type, "value", str(message_type)),
+                    "nonce": message.nonce,
+                    "error": str(exc),
+                },
+            )
+            raise
+        record_telemetry_event(
+            "a2a.succeeded",
+            project_alias=creds.project_alias,
+            project_id=creds.project_id,
+            role=role_name,
+            agent_id=sender_agent_id,
+            status="ok",
+            details={
+                "recipient_agent_id": recipient_agent_id,
+                "message_id": response.message_id,
+                "message_type": getattr(message_type, "value", str(message_type)),
+                "nonce": response.nonce,
+            },
+        )
+        return response
 
 
 class RoleA2AListener:
@@ -322,6 +463,20 @@ class RoleA2AListener:
                 backoff = min(backoff * 2, 30.0)
 
     def _record(self, message: AgentWireMessage) -> None:
+        creds = build_role_credentials(self.role_name)
+        record_telemetry_event(
+            "a2a.received",
+            project_alias=creds.project_alias,
+            project_id=creds.project_id,
+            role=self.role_name,
+            agent_id=self.agent_id,
+            status="received",
+            details={
+                "sender_agent_id": message.sender_agent_id,
+                "message_id": message.message_id,
+                "message_type": getattr(message.type, "value", str(message.type)),
+            },
+        )
         write_json_artifact(
             f"a2a_{self.agent_id}_{timestamp_slug()}.json",
             {
@@ -585,6 +740,22 @@ def lower_blob(payload: Any) -> str:
     return json.dumps(payload, default=str, sort_keys=True).lower()
 
 
+def classify_blob(blob: str) -> str:
+    if any(token in blob for token in ["captcha", "challenge", "turnstile"]):
+        return "challenge/captcha"
+    if any(token in blob for token in ["session restore", "session_restore", "auth", "cookie", "login"]):
+        return "auth/session issue"
+    if any(token in blob for token in ["plugin", "tool error", "github.search", "web.search"]):
+        return "plugin issue"
+    if any(token in blob for token in ["policy", "domain", "approval", "forbidden", "blocked", "denied"]):
+        return "policy denial"
+    if any(token in blob for token in ["scheduler", "lease", "ownership", "stale", "queue", "requeue", "recovered"]):
+        return "scheduler issue"
+    if any(token in blob for token in ["browser", "playwright", "page crashed", "crash", "selector"]):
+        return "browser issue"
+    return "other"
+
+
 def classify_failure(run: RunState, interventions: list[OperatorInterventionRecord] | None = None) -> str:
     blob = " ".join(
         [
@@ -593,19 +764,91 @@ def classify_failure(run: RunState, interventions: list[OperatorInterventionReco
             *(lower_blob(item.payload) + " " + item.reason.lower() for item in (interventions or []) if item.run_id == run.run_id),
         ]
     )
-    if any(token in blob for token in ["captcha", "challenge", "turnstile"]):
+    return classify_blob(blob)
+
+
+def browser_error_category_from_payload(payload: Any) -> str:
+    return classify_blob(lower_blob(payload))
+
+
+def intervention_reason_bucket(reason: str) -> str:
+    lowered = reason.strip().lower()
+    if not lowered:
+        return "unspecified"
+    if any(token in lowered for token in ["captcha", "challenge", "turnstile"]):
         return "challenge/captcha"
-    if any(token in blob for token in ["session restore", "session_restore", "auth", "cookie", "login"]):
+    if any(token in lowered for token in ["auth", "login", "session", "cookie"]):
         return "auth/session issue"
-    if any(token in blob for token in ["plugin", "tool error", "github.search", "web.search"]):
-        return "plugin issue"
-    if any(token in blob for token in ["policy", "domain", "approval", "forbidden", "blocked"]):
+    if any(token in lowered for token in ["policy", "blocked", "denied", "forbidden"]):
         return "policy denial"
-    if any(token in blob for token in ["scheduler", "lease", "ownership", "stale", "queue"]):
-        return "scheduler issue"
-    if any(token in blob for token in ["browser", "playwright", "page crashed", "crash", "selector"]):
+    if any(token in lowered for token in ["browser", "selector", "playwright"]):
         return "browser issue"
-    return "other"
+    return lowered
+
+
+def per_agent_outcomes(runs: list[RunState]) -> dict[str, dict[str, float | int]]:
+    summary: dict[str, dict[str, float | int]] = {}
+    for run in runs:
+        agent_id = run.agent_id or "unknown"
+        row = summary.setdefault(agent_id, {"runs_started": 0, "runs_completed": 0, "runs_failed": 0})
+        row["runs_started"] = int(row["runs_started"]) + 1
+        if run.status.value == "completed":
+            row["runs_completed"] = int(row["runs_completed"]) + 1
+        if run.status.value == "failed":
+            row["runs_failed"] = int(row["runs_failed"]) + 1
+    for row in summary.values():
+        started = int(row["runs_started"])
+        completed = int(row["runs_completed"])
+        failed = int(row["runs_failed"])
+        row["success_rate"] = round((completed / started), 4) if started else 0.0
+        row["failure_rate"] = round((failed / started), 4) if started else 0.0
+    return summary
+
+
+def count_by_reason(interventions: list[OperatorInterventionRecord]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in interventions:
+        bucket = intervention_reason_bucket(item.reason)
+        counts[bucket] = counts.get(bucket, 0) + 1
+    return counts
+
+
+def agents_requiring_intervention(interventions: list[OperatorInterventionRecord]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in interventions:
+        agent_id = item.agent_id or "unknown"
+        counts[agent_id] = counts.get(agent_id, 0) + 1
+    return counts
+
+
+def browser_errors_by_category(
+    runs: list[RunState],
+    audit_logs: list[dict[str, Any]],
+    telemetry_events: list[dict[str, Any]],
+) -> dict[str, int]:
+    counts = {bucket: 0 for bucket in FAILURE_BUCKETS}
+    for run in runs:
+        if run.status.value == "failed":
+            bucket = classify_blob(lower_blob(run.metadata) + " " + str(run.current_phase or "").lower())
+            counts[bucket] = counts.get(bucket, 0) + 1
+    for item in audit_logs:
+        blob = lower_blob(item)
+        if "plugin.execution" in blob:
+            continue
+        if any(token in blob for token in ["browser", "captcha", "challenge", "selector", "playwright", "policy", "auth", "session"]):
+            bucket = classify_blob(blob)
+            counts[bucket] = counts.get(bucket, 0) + 1
+    for event in telemetry_events:
+        if str(event.get("event_type")) not in {"browser.error", "browser.retry"}:
+            continue
+        bucket = browser_error_category_from_payload(event.get("details", {}))
+        counts[bucket] = counts.get(bucket, 0) + 1
+    return counts
+
+
+def count_matching_audit_logs(audit_logs: list[dict[str, Any]], *tokens: str) -> int:
+    lowered = [token.lower() for token in tokens]
+    return sum(any(token in lower_blob(item) for token in lowered) for item in audit_logs)
 
 
 def compute_project_metrics(
@@ -613,7 +856,9 @@ def compute_project_metrics(
     runs: list[RunState],
     interventions: list[OperatorInterventionRecord],
     audit_logs: list[dict[str, Any]],
+    telemetry_events: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    telemetry_events = telemetry_events or []
     started = len(runs)
     completed = sum(1 for run in runs if run.status.value == "completed")
     failed = sum(1 for run in runs if run.status.value == "failed")
@@ -627,12 +872,33 @@ def compute_project_metrics(
     session_restore_failures = sum(any(token in blob for token in ["session restore", "session_restore", "restore failed"]) for blob in run_blobs + audit_blobs)
     duplicate_result_recoveries = sum(any(token in blob for token in ["duplicate", "idempotent", "recovered duplicate"]) for blob in run_blobs + audit_blobs)
     stale_ownership_incidents = sum(any(token in blob for token in ["stale ownership", "stale", "lease expired", "ownership"]) for blob in run_blobs + audit_blobs)
+    stale_ownership_incidents += sum(1 for event in telemetry_events if str(event.get("event_type")) == "scheduler.stale_ownership")
 
     failure_rate = (failed / started) if started else 0.0
     classifications = {bucket: 0 for bucket in FAILURE_BUCKETS}
     for run in runs:
         if run.status.value == "failed":
             classifications[classify_failure(run, interventions)] += 1
+    browser_categories = browser_errors_by_category(runs, audit_logs, telemetry_events)
+    intervention_reasons = count_by_reason(interventions)
+    agent_outcomes = per_agent_outcomes(runs)
+    intervention_agents = agents_requiring_intervention(interventions)
+    a2a_sent = sum(1 for event in telemetry_events if str(event.get("event_type")) == "a2a.sent")
+    a2a_succeeded = sum(1 for event in telemetry_events if str(event.get("event_type")) == "a2a.succeeded")
+    a2a_failed = sum(1 for event in telemetry_events if str(event.get("event_type")) == "a2a.failed")
+    scheduler_recoveries = sum(1 for event in telemetry_events if str(event.get("event_type")) == "scheduler.recovered")
+    scheduler_recoveries += count_matching_audit_logs(audit_logs, "run.requeued", "run.recovered", "worker.request.recovered", "worker.result.replayed")
+    plugin_denials = sum(
+        1
+        for item in audit_logs
+        if str(item.get("action")) == "plugin.execution"
+        and (
+            bool((item.get("metadata") or {}).get("policy_violations"))
+            or "policy" in lower_blob(item.get("metadata", {}))
+            or "denied" in lower_blob(item.get("metadata", {}))
+        )
+    )
+    plugin_denials += sum(1 for event in telemetry_events if str(event.get("event_type")) == "plugin.denial")
 
     return {
         "project_alias": project_alias,
@@ -645,9 +911,18 @@ def compute_project_metrics(
         "session_restore_failures": session_restore_failures,
         "duplicate_result_recoveries": duplicate_result_recoveries,
         "stale_ownership_incidents": stale_ownership_incidents,
+        "a2a_messages_sent": a2a_sent,
+        "a2a_messages_succeeded": a2a_succeeded,
+        "a2a_messages_failed": a2a_failed,
+        "scheduler_recovery_events": scheduler_recoveries,
+        "plugin_denials": plugin_denials,
         "average_run_latency_seconds": round(sum(latencies) / len(latencies), 2) if latencies else 0.0,
         "per_project_failure_rate": round(failure_rate, 4),
         "failure_classification": classifications,
+        "browser_errors_by_category": browser_categories,
+        "intervention_count_by_reason": intervention_reasons,
+        "per_agent_outcomes": agent_outcomes,
+        "agents_requiring_intervention": intervention_agents,
     }
 
 
@@ -656,6 +931,10 @@ def overall_metrics(project_snapshots: list[dict[str, Any]]) -> dict[str, Any]:
     latencies: list[float] = []
     failure_rates: dict[str, float] = {}
     classifications = {bucket: 0 for bucket in FAILURE_BUCKETS}
+    browser_categories = {bucket: 0 for bucket in FAILURE_BUCKETS}
+    intervention_reasons: dict[str, int] = {}
+    agent_outcomes: dict[str, dict[str, float | int]] = {}
+    intervention_agents: dict[str, int] = {}
     for snapshot in project_snapshots:
         for key in totals:
             totals[key] += int(snapshot.get(key, 0))
@@ -663,9 +942,30 @@ def overall_metrics(project_snapshots: list[dict[str, Any]]) -> dict[str, Any]:
         failure_rates[str(snapshot.get("project_alias"))] = float(snapshot.get("per_project_failure_rate", 0.0))
         for bucket, count in snapshot.get("failure_classification", {}).items():
             classifications[bucket] = classifications.get(bucket, 0) + int(count)
+        for bucket, count in snapshot.get("browser_errors_by_category", {}).items():
+            browser_categories[bucket] = browser_categories.get(bucket, 0) + int(count)
+        for reason, count in snapshot.get("intervention_count_by_reason", {}).items():
+            intervention_reasons[reason] = intervention_reasons.get(reason, 0) + int(count)
+        for agent_id, values in snapshot.get("per_agent_outcomes", {}).items():
+            current = agent_outcomes.setdefault(agent_id, {"runs_started": 0, "runs_completed": 0, "runs_failed": 0})
+            current["runs_started"] = int(current["runs_started"]) + int(values.get("runs_started", 0))
+            current["runs_completed"] = int(current["runs_completed"]) + int(values.get("runs_completed", 0))
+            current["runs_failed"] = int(current["runs_failed"]) + int(values.get("runs_failed", 0))
+        for agent_id, count in snapshot.get("agents_requiring_intervention", {}).items():
+            intervention_agents[agent_id] = intervention_agents.get(agent_id, 0) + int(count)
+    for values in agent_outcomes.values():
+        started = int(values["runs_started"])
+        completed = int(values["runs_completed"])
+        failed = int(values["runs_failed"])
+        values["success_rate"] = round((completed / started), 4) if started else 0.0
+        values["failure_rate"] = round((failed / started), 4) if started else 0.0
     totals["average_run_latency_seconds"] = round(sum(latencies) / len(latencies), 2) if latencies else 0.0
     totals["per_project_failure_rate"] = failure_rates
     totals["failure_classification"] = classifications
+    totals["browser_errors_by_category"] = browser_categories
+    totals["intervention_count_by_reason"] = dict(sorted(intervention_reasons.items(), key=lambda item: (-item[1], item[0])))
+    totals["per_agent_outcomes"] = dict(sorted(agent_outcomes.items()))
+    totals["agents_requiring_intervention"] = dict(sorted(intervention_agents.items(), key=lambda item: (-item[1], item[0])))
     return totals
 
 
@@ -696,6 +996,11 @@ def filter_audit_logs_since(audit_logs: list[dict[str, Any]], since: datetime) -
     return filtered
 
 
+def filter_telemetry_events_since(telemetry_events: list[dict[str, Any]], since: datetime) -> list[dict[str, Any]]:
+    threshold = since.isoformat()
+    return [item for item in telemetry_events if str(item.get("timestamp", "")) >= threshold]
+
+
 def write_json_artifact(name: str, payload: Any) -> dict[str, str]:
     serialized = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     repo_target = runtime_dir() / name
@@ -708,6 +1013,23 @@ def write_json_artifact(name: str, payload: Any) -> dict[str, str]:
 def write_text_artifact(name: str, payload: str) -> dict[str, str]:
     repo_target = runtime_dir() / name
     log_target = logs_dir() / name
+    repo_target.write_text(payload)
+    log_target.write_text(payload)
+    return {"repo": str(repo_target), "log": str(log_target)}
+
+
+def write_report_json(name: str, payload: Any) -> dict[str, str]:
+    serialized = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    repo_target = runtime_reports_dir() / name
+    log_target = reports_dir() / name
+    repo_target.write_text(serialized)
+    log_target.write_text(serialized)
+    return {"repo": str(repo_target), "log": str(log_target)}
+
+
+def write_report_text(name: str, payload: str) -> dict[str, str]:
+    repo_target = runtime_reports_dir() / name
+    log_target = reports_dir() / name
     repo_target.write_text(payload)
     log_target.write_text(payload)
     return {"repo": str(repo_target), "log": str(log_target)}
@@ -759,13 +1081,45 @@ def retry_with_backoff(
     attempts: int = 4,
     base_delay_seconds: float = 5.0,
     max_delay_seconds: float = 60.0,
+    telemetry_context: dict[str, Any] | None = None,
 ) -> Any:
     last_error: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
-            return action()
+            result = action()
+            if telemetry_context and attempt > 1:
+                record_telemetry_event(
+                    "scheduler.recovered",
+                    project_alias=str(telemetry_context.get("project_alias") or "") or None,
+                    project_id=str(telemetry_context.get("project_id") or "") or None,
+                    role=str(telemetry_context.get("role") or "") or None,
+                    agent_id=str(telemetry_context.get("agent_id") or "") or None,
+                    run_id=str(telemetry_context.get("run_id") or "") or None,
+                    status="recovered",
+                    details={"label": label, "attempt": attempt},
+                )
+            return result
         except Exception as exc:
             last_error = exc
+            if telemetry_context and label.startswith(("browser.", "browser-runner", "chaos-monkey")):
+                status_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+                event_name = "browser.retry" if attempt < attempts and is_retryable_http_error(exc) else "browser.error"
+                record_telemetry_event(
+                    event_name,
+                    project_alias=str(telemetry_context.get("project_alias") or "") or None,
+                    project_id=str(telemetry_context.get("project_id") or "") or None,
+                    role=str(telemetry_context.get("role") or "") or None,
+                    agent_id=str(telemetry_context.get("agent_id") or "") or None,
+                    run_id=str(telemetry_context.get("run_id") or "") or None,
+                    status="retrying" if event_name == "browser.retry" else "failed",
+                    details={
+                        "label": label,
+                        "attempt": attempt,
+                        "status_code": status_code,
+                        "error": str(exc),
+                        "category": browser_error_category_from_payload({"label": label, "error": str(exc), "status_code": status_code}),
+                    },
+                )
             if attempt >= attempts or not is_retryable_http_error(exc):
                 raise
             delay = min(max_delay_seconds, base_delay_seconds * (2 ** (attempt - 1)))
@@ -774,12 +1128,31 @@ def retry_with_backoff(
     raise RuntimeError(f"{label} failed without raising an exception") from last_error
 
 
-def run_forever(step: Callable[[], None], *, once: bool, interval_seconds: float) -> None:
+def run_forever(
+    step: Callable[[], None],
+    *,
+    once: bool,
+    interval_seconds: float,
+    role_name: str | None = None,
+    agent_id: str | None = None,
+    project_alias: str | None = None,
+) -> None:
     consecutive_failures = 0
     while True:
         started_at = time.monotonic()
         try:
             step()
+            if consecutive_failures > 0:
+                creds = project_credentials_for_alias(project_alias)
+                record_telemetry_event(
+                    "scheduler.recovered",
+                    project_alias=project_alias,
+                    project_id=creds.project_id if creds else None,
+                    role=role_name,
+                    agent_id=agent_id,
+                    status="recovered",
+                    details={"consecutive_failures": consecutive_failures},
+                )
             consecutive_failures = 0
             if once:
                 return
@@ -787,6 +1160,16 @@ def run_forever(step: Callable[[], None], *, once: bool, interval_seconds: float
             sleep_with_jitter(max(0.0, interval_seconds - elapsed), jitter_seconds=min(30.0, interval_seconds * 0.1))
         except Exception as exc:
             consecutive_failures += 1
+            creds = project_credentials_for_alias(project_alias)
+            record_telemetry_event(
+                "scheduler.loop_error",
+                project_alias=project_alias,
+                project_id=creds.project_id if creds else None,
+                role=role_name,
+                agent_id=agent_id,
+                status="error",
+                details={"error": str(exc), "consecutive_failures": consecutive_failures},
+            )
             if once:
                 raise
             delay = min(max(5.0, interval_seconds / 3), 300.0, 5.0 * (2 ** (consecutive_failures - 1)))

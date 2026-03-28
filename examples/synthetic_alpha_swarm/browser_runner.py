@@ -126,14 +126,22 @@ def run_once(runner: str) -> None:
     direct_results: list[dict[str, Any]] = []
     with build_role_client(runner, agent_id=config["agent_id"]) as client:
         url = next_smoke_url(runner)
+        telemetry_context = {
+            "project_alias": project_alias,
+            "project_id": getattr(client, "project_id", None),
+            "role": runner,
+            "agent_id": config["agent_id"],
+        }
         opened = retry_with_backoff(
             lambda: client.browser.open(url),
             label=f"{runner}:browser.open",
+            telemetry_context=telemetry_context,
         )
         sleep_with_jitter(1.0, jitter_seconds=0.5)
         extracted = retry_with_backoff(
             lambda: client.browser.extract("h1"),
             label=f"{runner}:browser.extract",
+            telemetry_context=telemetry_context,
         )
         direct_results.append(
             {
@@ -167,7 +175,14 @@ def run_once(runner: str) -> None:
 
 def main(runner: str | None = None) -> None:
     args = parse_args(runner)
-    run_forever(lambda: run_once(args.runner), once=args.once, interval_seconds=args.interval_seconds)
+    run_forever(
+        lambda: run_once(args.runner),
+        once=args.once,
+        interval_seconds=args.interval_seconds,
+        role_name=args.runner,
+        agent_id=RUNNER_CONFIG[args.runner]["agent_id"],
+        project_alias=role_project_alias(args.runner),
+    )
 
 
 if __name__ == "__main__":

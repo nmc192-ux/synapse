@@ -59,14 +59,18 @@ At minimum the harness tracks:
 - runs started
 - runs completed
 - runs failed
-- intervention count
-- browser crash count
+- intervention count and intervention count by reason
+- browser crash count and browser errors by category
 - captcha/challenge count
 - session restore failures
 - duplicate-result recoveries
 - stale ownership incidents
+- A2A messages sent/succeeded/failed
+- scheduler recovery events
+- plugin denials
 - average run latency
 - per-project failure rate
+- per-agent success/failure rate
 
 ## Report Formats
 
@@ -75,18 +79,25 @@ Reporter outputs include:
 - daily report markdown
 - weekly alpha review draft markdown
 - JSON metrics snapshot
+- latest synthetic-alpha summary JSON
+- lightweight HTML dashboard for local review
 
 Daily report sections:
 
 - fleet summary
+- browser errors by category
+- intervention count by reason
 - per-project failure rate
 - failure classification
+- per-agent outcomes
 - per-project operational details
 
 Weekly review sections:
 
 - executive summary
 - key risks
+- top regressions
+- agents requiring most intervention
 - recommendations
 - project notes
 
@@ -96,8 +107,12 @@ Artifacts are mirrored to both:
 
 - repo-local runtime folder:
   - [`/Users/drj/Documents/Synapse/examples/synthetic_alpha_swarm/runtime`](/Users/drj/Documents/Synapse/examples/synthetic_alpha_swarm/runtime)
-- machine-local log folder:
+- repo-local reports folder:
+  - [`/Users/drj/Documents/Synapse/examples/synthetic_alpha_swarm/runtime/reports`](/Users/drj/Documents/Synapse/examples/synthetic_alpha_swarm/runtime/reports)
+- machine-local telemetry folder:
   - [`/Users/drj/synapse-logs/synthetic_alpha_swarm`](/Users/drj/synapse-logs/synthetic_alpha_swarm)
+- machine-local reports folder:
+  - [`/Users/drj/synapse-logs/reports/synthetic_alpha`](/Users/drj/synapse-logs/reports/synthetic_alpha)
 
 ## Config Requirements
 
@@ -120,6 +135,8 @@ Optional env vars for bootstrap:
 - `SYNTHETIC_ALPHA_SWARM_ROLE_MAX_PAGES=20000`
 - `SYNTHETIC_ALPHA_SWARM_ROLE_MAX_RUNTIME_SECONDS=2592000`
 - `SYNTHETIC_ALPHA_SWARM_ROLE_BROWSER_ACTIONS_PER_MINUTE=30`
+- `SYNTHETIC_ALPHA_SWARM_REPORTS_DIR=~/synapse-logs/reports/synthetic_alpha`
+- `SYNTHETIC_ALPHA_SWARM_TELEMETRY_DIR=~/synapse-logs/synthetic_alpha_swarm/telemetry`
 
 The browser runners now rotate a single smoke URL per interval, apply jitter between browser actions, and back off automatically on `429`/transient upstream errors so the supervisor does not amplify temporary throttling into a restart storm.
 
@@ -153,3 +170,6 @@ The reporter can emit example fixture-based artifacts for format review. Example
 - `example_daily_report.md`
 - `example_weekly_review.md`
 - `example_metrics_snapshot.json`
+- `example_dashboard.html`
+
+Use the latest timestamped files in [`/Users/drj/synapse-logs/reports/synthetic_alpha`](/Users/drj/synapse-logs/reports/synthetic_alpha) for the weekly review. The simplest weekly workflow is: open `synthetic_alpha_dashboard_latest.html`, read `weekly_alpha_review_<timestamp>.md`, then compare the top regressions and intervention-heavy agents with the matching `metrics_snapshot_<timestamp>.json`.

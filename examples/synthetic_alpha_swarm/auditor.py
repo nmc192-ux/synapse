@@ -69,7 +69,14 @@ def run_once() -> None:
 
 def main() -> None:
     args = parse_loop_args("Synthetic Alpha Auditor", default_interval=900.0)
-    run_forever(run_once, once=args.once, interval_seconds=args.interval_seconds)
+    run_forever(
+        run_once,
+        once=args.once,
+        interval_seconds=args.interval_seconds,
+        role_name="auditor",
+        agent_id="synthetic-alpha-auditor",
+        project_alias=role_project_alias("auditor"),
+    )
 
 
 if __name__ == "__main__":

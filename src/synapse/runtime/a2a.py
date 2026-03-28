@@ -382,7 +382,10 @@ class A2AHub:
                 correlation_id=envelope.message_id,
                 message=str(exc),
             )
-            await self.send(error)
+            try:
+                await self.send(error)
+            except KeyError:
+                return error
         return error
 
     async def _emit_compact_message(self, envelope: A2AEnvelope) -> None:

@@ -925,8 +925,11 @@ class RuntimeController:
         return response
 
     async def send_agent_wire_message(self, message: AgentWireMessage) -> AgentWireMessage:
-        envelope = self.a2a.from_wire_message(message)
+        envelope = self.a2a.from_wire_message(message).model_copy(update={"signature": None})
         response = await self.send_a2a(envelope)
+        if response.type == A2AMessageType.ERROR and response.sender_agent_id == "synapse":
+            detail = response.payload.get("message") if isinstance(response.payload, dict) else None
+            raise KeyError(str(detail) if detail is not None else "A2A delivery failed.")
         return self.a2a.to_wire_message(response)
 
     async def delegate_agent_task(self, request: AgentDelegateRequest) -> AgentWireMessage:

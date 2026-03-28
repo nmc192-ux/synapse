@@ -13,6 +13,8 @@ from common import (
     role_project_alias,
     run_forever,
     save_json_state,
+    send_signed_role_message,
+    start_role_a2a_listener,
     summarize_run,
     timestamp_slug,
     utc_now,
@@ -23,6 +25,13 @@ from synapse.models.task import TaskRequest
 
 DIRECTOR_AGENT_ID = "synthetic-alpha-director"
 STATE_FILE = "director_schedule_state.json"
+_A2A_LISTENER = None
+
+
+def ensure_a2a_listener() -> None:
+    global _A2A_LISTENER
+    if _A2A_LISTENER is None:
+        _A2A_LISTENER = start_role_a2a_listener("director", DIRECTOR_AGENT_ID)
 
 
 def schedule_catalog() -> dict[str, list[dict[str, object]]]:
@@ -133,7 +142,7 @@ def due_windows() -> list[str]:
 
 def run_once() -> None:
     register_role_agent(
-        role_project_alias("director"),
+        "director",
         build_agent_definition(
             agent_id=DIRECTOR_AGENT_ID,
             kind=AgentKind.OPENCLAW,
@@ -144,6 +153,7 @@ def run_once() -> None:
             extra_tags=["scheduler", "planner", "continuous"],
         ),
     )
+    ensure_a2a_listener()
     catalog = schedule_catalog()
     windows = due_windows() if env("SYNTHETIC_ALPHA_SWARM_DIRECTOR_ENABLE_SCHEDULE", "true").lower() == "true" else ["quarter_hourly", "hourly", "daily"]
     plans = [plan for window in windows for plan in catalog.get(window, [])]
@@ -155,6 +165,33 @@ def run_once() -> None:
             with build_project_api(project_alias) as api:
                 run = api.create_project_run(api.project_id or "", task_request)
                 submitted_runs.append(summarize_run(run))
+    a2a_dispatches: list[dict[str, object]] = []
+    for target_agent in ("synthetic-alpha-browser-runner-1",):
+        try:
+            dispatch = send_signed_role_message(
+                role_name="director",
+                sender_agent_id=DIRECTOR_AGENT_ID,
+                recipient_agent_id=target_agent,
+                payload={
+                    "kind": "synthetic-alpha-control",
+                    "command": "heartbeat",
+                    "issued_at": utc_now().isoformat(),
+                    "windows_triggered": windows,
+                    "submitted_run_count": len(submitted_runs),
+                },
+            )
+            a2a_dispatches.append({
+                "recipient_agent_id": target_agent,
+                "message_id": dispatch.message_id,
+                "nonce": dispatch.nonce,
+                "status": "sent",
+            })
+        except Exception as exc:
+            a2a_dispatches.append({
+                "recipient_agent_id": target_agent,
+                "status": "error",
+                "detail": str(exc),
+            })
     artifact = write_json_artifact(
         f"director_schedule_{timestamp_slug()}.json",
         {
@@ -162,6 +199,7 @@ def run_once() -> None:
             "plans": plans,
             "submitted_runs": submitted_runs,
             "schedule_enabled": True,
+            "a2a_dispatches": a2a_dispatches,
         },
     )
     print({"artifacts": artifact, "windows_triggered": windows, "submitted_runs": len(submitted_runs)})

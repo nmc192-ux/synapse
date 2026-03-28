@@ -863,6 +863,8 @@ async def send_agent_message_wire(
         return await orchestrator.send_agent_wire_message(request)
     except ValueError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/agents/delegate", response_model=AgentWireMessage)

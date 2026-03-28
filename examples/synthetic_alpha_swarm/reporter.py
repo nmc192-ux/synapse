@@ -16,6 +16,7 @@ from common import (
     register_role_agent,
     role_project_alias,
     run_forever,
+    start_role_a2a_listener,
     timestamp_slug,
     utc_now,
     window_start_for,
@@ -23,6 +24,15 @@ from common import (
     write_text_artifact,
 )
 from synapse.models.agent import AgentKind
+
+
+_A2A_LISTENER = None
+
+
+def ensure_a2a_listener() -> None:
+    global _A2A_LISTENER
+    if _A2A_LISTENER is None:
+        _A2A_LISTENER = start_role_a2a_listener("reporter", "synthetic-alpha-reporter")
 
 
 def collect_metrics(window_label: str) -> tuple[list[dict[str, object]], dict[str, object]]:
@@ -175,7 +185,7 @@ def write_example_reports() -> dict[str, dict[str, str]]:
 
 def run_once() -> None:
     register_role_agent(
-        role_project_alias("reporter"),
+        "reporter",
         build_agent_definition(
             agent_id="synthetic-alpha-reporter",
             kind=AgentKind.OPENCLAW,
@@ -186,6 +196,7 @@ def run_once() -> None:
             extra_tags=["reporting", "summaries", "continuous"],
         ),
     )
+    ensure_a2a_listener()
     daily_projects, daily_summary = collect_metrics("daily")
     weekly_projects, weekly_summary = collect_metrics("weekly")
     daily_paths = write_text_artifact(f"daily_report_{timestamp_slug()}.md", build_daily_report(daily_projects, daily_summary))

@@ -3,22 +3,32 @@ from __future__ import annotations
 from common import (
     build_agent_definition,
     build_project_api,
-    build_project_client,
+    build_role_client,
     default_safe_urls,
     parse_loop_args,
     register_role_agent,
     retry_with_backoff,
     role_project_alias,
     run_forever,
+    start_role_a2a_listener,
     timestamp_slug,
     write_json_artifact,
 )
 from synapse.models.agent import AgentChallengePolicy, AgentKind
 
 
+_A2A_LISTENER = None
+
+
+def ensure_a2a_listener() -> None:
+    global _A2A_LISTENER
+    if _A2A_LISTENER is None:
+        _A2A_LISTENER = start_role_a2a_listener("chaos-monkey", "synthetic-alpha-chaos-monkey")
+
+
 def run_once() -> None:
     register_role_agent(
-        role_project_alias("chaos-monkey"),
+        "chaos-monkey",
         build_agent_definition(
             agent_id="synthetic-alpha-chaos-monkey",
             kind=AgentKind.OPENCLAW,
@@ -30,9 +40,10 @@ def run_once() -> None:
             challenge_policy=AgentChallengePolicy.PAUSE,
         ),
     )
+    ensure_a2a_listener()
 
     failures: list[dict[str, str]] = []
-    with build_project_client("chaos", agent_id="synthetic-alpha-chaos-monkey") as client:
+    with build_role_client("chaos-monkey", agent_id="synthetic-alpha-chaos-monkey") as client:
         retry_with_backoff(lambda: client.browser.open(default_safe_urls()[0]), label="chaos-monkey:browser.open")
         try:
             client.browser.inspect("#this-selector-does-not-exist")

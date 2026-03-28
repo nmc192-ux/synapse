@@ -11,15 +11,25 @@ from common import (
     register_role_agent,
     role_project_alias,
     run_forever,
+    start_role_a2a_listener,
     timestamp_slug,
     write_json_artifact,
 )
 from synapse.models.agent import AgentKind
 
 
+_A2A_LISTENER = None
+
+
+def ensure_a2a_listener() -> None:
+    global _A2A_LISTENER
+    if _A2A_LISTENER is None:
+        _A2A_LISTENER = start_role_a2a_listener("auditor", "synthetic-alpha-auditor")
+
+
 def run_once() -> None:
     register_role_agent(
-        role_project_alias("auditor"),
+        "auditor",
         build_agent_definition(
             agent_id="synthetic-alpha-auditor",
             kind=AgentKind.OPENCLAW,
@@ -30,6 +40,7 @@ def run_once() -> None:
             extra_tags=["audit", "triage", "continuous"],
         ),
     )
+    ensure_a2a_listener()
     project_reports: list[dict[str, object]] = []
     for alias in ("steady", "chaos"):
         with build_project_api(alias) as api:

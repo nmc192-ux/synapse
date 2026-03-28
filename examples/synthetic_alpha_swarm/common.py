@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import random
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -20,6 +21,7 @@ if str(SRC_ROOT) not in sys.path:
 
 import httpx
 
+from synapse.models.a2a import A2AMessageType, AgentWireMessage
 from synapse.models.agent import (
     AgentChallengePolicy,
     AgentDefinition,
@@ -63,12 +65,12 @@ DEFAULT_SAFE_URLS = [
 ]
 
 ROLE_SCOPES: dict[str, list[str]] = {
-    "director": ["admin", "tasks:read", "tasks:write", "browser:control"],
-    "browser-runner-1": ["admin", "tasks:read", "tasks:write", "browser:control", "memory:read", "memory:write"],
-    "browser-runner-2": ["admin", "tasks:read", "tasks:write", "browser:control", "memory:read", "memory:write"],
-    "auditor": ["admin", "tasks:read"],
-    "reporter": ["admin", "tasks:read"],
-    "chaos-monkey": ["admin", "tasks:read", "tasks:write", "browser:control"],
+    "director": ["admin", "tasks:read", "tasks:write", "browser:control", "a2a:send", "a2a:receive"],
+    "browser-runner-1": ["admin", "tasks:read", "tasks:write", "browser:control", "memory:read", "memory:write", "a2a:send", "a2a:receive"],
+    "browser-runner-2": ["admin", "tasks:read", "tasks:write", "browser:control", "memory:read", "memory:write", "a2a:send", "a2a:receive"],
+    "auditor": ["admin", "tasks:read", "a2a:receive"],
+    "reporter": ["admin", "tasks:read", "a2a:receive"],
+    "chaos-monkey": ["admin", "tasks:read", "tasks:write", "browser:control", "a2a:send", "a2a:receive"],
 }
 
 FAILURE_BUCKETS = [
@@ -101,10 +103,27 @@ SCHEDULE_WINDOWS = {
     "daily": 24 * 60 * 60,
 }
 
+ROLE_ENV_PREFIXES = {
+    "director": "DIRECTOR",
+    "browser-runner-1": "BROWSERRUNNER1",
+    "browser-runner-2": "BROWSERRUNNER2",
+    "auditor": "AUDITOR",
+    "reporter": "REPORTER",
+    "chaos-monkey": "CHAOSMONKEY",
+}
+
 
 @dataclass(frozen=True)
 class ProjectCredentials:
     alias: str
+    project_id: str
+    api_key: str
+
+
+@dataclass(frozen=True)
+class RoleCredentials:
+    role: str
+    project_alias: str
     project_id: str
     api_key: str
 
@@ -186,6 +205,25 @@ def build_project_credentials(alias: str) -> ProjectCredentials:
     )
 
 
+def role_env_prefix(role_name: str) -> str:
+    try:
+        return ROLE_ENV_PREFIXES[role_name]
+    except KeyError as exc:
+        raise RuntimeError(f"Unknown synthetic-alpha role: {role_name}") from exc
+
+
+def build_role_credentials(role_name: str) -> RoleCredentials:
+    project_alias = role_project_alias(role_name)
+    project = build_project_credentials(project_alias)
+    prefix = role_env_prefix(role_name)
+    return RoleCredentials(
+        role=role_name,
+        project_alias=project_alias,
+        project_id=project.project_id,
+        api_key=optional_env(f"{prefix}_API_KEY", project.api_key) or project.api_key,
+    )
+
+
 def build_project_client(alias: str, agent_id: str | None = None) -> SynapseClient:
     creds = build_project_credentials(alias)
     return SynapseClient(
@@ -194,6 +232,114 @@ def build_project_client(alias: str, agent_id: str | None = None) -> SynapseClie
         project_id=creds.project_id,
         agent_id=agent_id,
     )
+
+
+def build_role_client(role_name: str, agent_id: str | None = None) -> SynapseClient:
+    creds = build_role_credentials(role_name)
+    return SynapseClient(
+        base_url=env("SYNTHETIC_ALPHA_SWARM_BASE_URL", "http://127.0.0.1:8000"),
+        api_key=creds.api_key,
+        project_id=creds.project_id,
+        agent_id=agent_id,
+    )
+
+
+def role_signing_key(role_name: str, agent_id: str) -> str:
+    prefix = role_env_prefix(role_name)
+    return optional_env(f"{prefix}_A2A_SIGNING_KEY", f"{agent_id}-verification-key") or f"{agent_id}-verification-key"
+
+
+def send_signed_role_message(
+    *,
+    role_name: str,
+    sender_agent_id: str,
+    recipient_agent_id: str,
+    payload: dict[str, object],
+    message_type: A2AMessageType | str = A2AMessageType.SEND_MESSAGE,
+    nonce: str | None = None,
+) -> AgentWireMessage:
+    creds = build_role_credentials(role_name)
+    with build_role_client(role_name, agent_id=sender_agent_id) as client:
+        message = client.sign_a2a_message(
+            agent_id=sender_agent_id,
+            target_agent=recipient_agent_id,
+            message_type=message_type,
+            payload=payload,
+            signing_key=role_signing_key(role_name, sender_agent_id),
+            organization_id=env("SYNTHETIC_ALPHA_SWARM_ORGANIZATION_ID"),
+            project_id=creds.project_id,
+            nonce=nonce,
+        )
+        return client.send_signed_a2a_message(message)
+
+
+class RoleA2AListener:
+    def __init__(
+        self,
+        *,
+        role_name: str,
+        agent_id: str,
+        message_handler: Callable[[AgentWireMessage], None] | None = None,
+    ) -> None:
+        self.role_name = role_name
+        self.agent_id = agent_id
+        self.message_handler = message_handler
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> "RoleA2AListener":
+        if self._thread is not None and self._thread.is_alive():
+            return self
+        self._thread = threading.Thread(target=self._run, name=f"{self.agent_id}-a2a-listener", daemon=True)
+        self._thread.start()
+        return self
+
+    def _run(self) -> None:
+        from websockets.sync.client import connect
+
+        backoff = 1.0
+        while True:
+            try:
+                with build_role_client(self.role_name, agent_id=self.agent_id) as client:
+                    url = client.build_websocket_url(path=f"/api/a2a/ws/{self.agent_id}")
+                    with connect(url, open_timeout=15, close_timeout=5) as websocket:
+                        backoff = 1.0
+                        while True:
+                            payload = websocket.recv()
+                            if not isinstance(payload, str):
+                                continue
+                            message = AgentWireMessage.model_validate(json.loads(payload))
+                            self._record(message)
+                            if self.message_handler is not None:
+                                self.message_handler(message)
+            except Exception as exc:  # pragma: no cover - long-running runtime path
+                print({
+                    "role": self.role_name,
+                    "agent_id": self.agent_id,
+                    "a2a_listener_error": str(exc),
+                    "retry_in_seconds": round(backoff, 2),
+                })
+                sleep_with_jitter(backoff, jitter_seconds=min(5.0, backoff * 0.25))
+                backoff = min(backoff * 2, 30.0)
+
+    def _record(self, message: AgentWireMessage) -> None:
+        write_json_artifact(
+            f"a2a_{self.agent_id}_{timestamp_slug()}.json",
+            {
+                "role": self.role_name,
+                "agent_id": self.agent_id,
+                "received_at": utc_now().isoformat(),
+                "message": message.model_dump(mode="json"),
+            },
+        )
+
+
+def start_role_a2a_listener(
+    role_name: str,
+    agent_id: str,
+    *,
+    message_handler: Callable[[AgentWireMessage], None] | None = None,
+) -> RoleA2AListener:
+    return RoleA2AListener(role_name=role_name, agent_id=agent_id, message_handler=message_handler).start()
 
 
 class PlatformAPI:
@@ -309,6 +455,15 @@ def build_project_api(alias: str) -> PlatformAPI:
     )
 
 
+def build_role_api(role_name: str) -> PlatformAPI:
+    creds = build_role_credentials(role_name)
+    return PlatformAPI(
+        base_url=env("SYNTHETIC_ALPHA_SWARM_BASE_URL", "http://127.0.0.1:8000"),
+        api_key=creds.api_key,
+        project_id=creds.project_id,
+    )
+
+
 def build_admin_api() -> PlatformAPI:
     return PlatformAPI(
         base_url=env("SYNTHETIC_ALPHA_SWARM_BASE_URL", "http://127.0.0.1:8000"),
@@ -372,9 +527,9 @@ def build_agent_definition(
     )
 
 
-def register_role_agent(alias: str, definition: AgentDefinition) -> AgentDefinition:
-    with build_project_api(alias) as api:
-        return api.register_agent(definition)
+def register_role_agent(role_name: str, definition: AgentDefinition) -> AgentDefinition:
+    with build_role_client(role_name, agent_id=definition.agent_id) as client:
+        return client.register_agent(definition)
 
 
 def build_run_plan(

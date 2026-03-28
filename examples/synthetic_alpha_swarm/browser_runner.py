@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import argparse
 from typing import Any
+from uuid import uuid4
 
 from common import (
     build_agent_definition,
     build_project_api,
-    build_project_client,
+    build_role_client,
     build_run_plan,
     default_safe_urls,
     load_json_state,
@@ -15,9 +16,12 @@ from common import (
     role_project_alias,
     run_forever,
     save_json_state,
+    send_signed_role_message,
     sleep_with_jitter,
+    start_role_a2a_listener,
     summarize_run,
     timestamp_slug,
+    utc_now,
     write_json_artifact,
 )
 from synapse.models.agent import AgentKind
@@ -35,6 +39,46 @@ RUNNER_CONFIG: dict[str, dict[str, str]] = {
         "description": "Chaos-lane browser runner for safe tenancy and failure exercises in the chaos project.",
     },
 }
+
+_A2A_LISTENERS: dict[str, object] = {}
+
+
+def ensure_a2a_listener(runner: str) -> None:
+    if runner in _A2A_LISTENERS:
+        return
+
+    config = RUNNER_CONFIG[runner]
+    agent_id = config["agent_id"]
+
+    def _handle(message) -> None:
+        if str(message.type) != 'A2AMessageType.SEND_MESSAGE' and getattr(message.type, 'value', '') != 'SEND_MESSAGE':
+            return
+        payload = dict(message.payload)
+        if payload.get('kind') != 'synthetic-alpha-control':
+            return
+        write_json_artifact(
+            f"{runner}_a2a_control_{timestamp_slug()}.json",
+            {
+                'runner': runner,
+                'agent_id': agent_id,
+                'received_at': utc_now().isoformat(),
+                'message': message.model_dump(mode='json'),
+            },
+        )
+        send_signed_role_message(
+            role_name=runner,
+            sender_agent_id=agent_id,
+            recipient_agent_id='synthetic-alpha-director',
+            payload={
+                'kind': 'synthetic-alpha-control-ack',
+                'source_role': runner,
+                'received_message_id': message.message_id,
+                'received_at': utc_now().isoformat(),
+            },
+            nonce=f"{runner}-ack-{uuid4().hex}",
+        )
+
+    _A2A_LISTENERS[runner] = start_role_a2a_listener(runner, agent_id, message_handler=_handle)
 
 
 def parse_args(forced_runner: str | None = None) -> argparse.Namespace:
@@ -76,10 +120,11 @@ def run_once(runner: str) -> None:
         role=runner,
         extra_tags=["browser", "synthetic-runner"],
     )
-    register_role_agent(project_alias, definition)
+    register_role_agent(runner, definition)
+    ensure_a2a_listener(runner)
 
     direct_results: list[dict[str, Any]] = []
-    with build_project_client(project_alias, agent_id=config["agent_id"]) as client:
+    with build_role_client(runner, agent_id=config["agent_id"]) as client:
         url = next_smoke_url(runner)
         opened = retry_with_backoff(
             lambda: client.browser.open(url),

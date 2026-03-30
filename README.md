@@ -215,6 +215,16 @@ Partner-safe templates live in [`/Users/jahanzebhussain/Synapse/config/examples`
 
 Partner-facing issue templates live in [`/Users/jahanzebhussain/Synapse/.github/ISSUE_TEMPLATE`](/Users/jahanzebhussain/Synapse/.github/ISSUE_TEMPLATE).
 
+## Development Plan
+
+The current multi-phase development plan for taking Synapse from restricted
+alpha toward broader external alpha and eventually public hosted readiness lives
+in [`/Users/jahanzebhussain/Synapse/docs/architecture/development-plan.md`](/Users/jahanzebhussain/Synapse/docs/architecture/development-plan.md).
+
+The plan is intentionally reliability-first. The current priority is browser
+reliability, request health visibility, and using the synthetic-alpha harness as
+the real release gate for expansion decisions.
+
 ## Fixture Web
 
 Synapse includes a controlled fixture web app for reproducible browsing benchmarks.

@@ -216,14 +216,16 @@ class EventDrivenAgentLoop:
                 )
                 self.sandbox.consume_browser_action(task.agent_id)
                 result = await self.browser.open(task.session_id, action.url)
+                result_page = self._result_page(result)
                 self.sandbox.record_navigation(
                     task.agent_id,
                     run_id=task.run_id,
                     previous_url=current_url,
-                    current_url=getattr(result.page, "url", action.url),
+                    current_url=result_page.url if result_page is not None else action.url,
                 )
-                await self._ensure_page_safe(task, result.page, "browser.open")
-                return result.model_dump(mode="json")
+                if result_page is not None:
+                    await self._ensure_page_safe(task, result_page, "browser.open")
+                return self._result_payload(result)
             except SandboxApprovalRequiredError as exc:
                 await self._emit_approval_required(task, exc)
                 raise
@@ -235,8 +237,10 @@ class EventDrivenAgentLoop:
             self.sandbox.consume_browser_action(task.agent_id)
             await self._ensure_current_page_safe(task, "browser.click")
             result = await self.browser.click(task.session_id, action.selector)
-            await self._ensure_page_safe(task, result.page, "browser.click")
-            return result.model_dump(mode="json")
+            result_page = self._result_page(result)
+            if result_page is not None:
+                await self._ensure_page_safe(task, result_page, "browser.click")
+            return self._result_payload(result)
 
         if action.type == AgentActionType.TYPE:
             if not action.selector:
@@ -245,8 +249,10 @@ class EventDrivenAgentLoop:
             self.sandbox.consume_browser_action(task.agent_id)
             await self._ensure_current_page_safe(task, "browser.type")
             result = await self.browser.type(task.session_id, action.selector, action.text or "")
-            await self._ensure_page_safe(task, result.page, "browser.type")
-            return result.model_dump(mode="json")
+            result_page = self._result_page(result)
+            if result_page is not None:
+                await self._ensure_page_safe(task, result_page, "browser.type")
+            return self._result_payload(result)
 
         if action.type == AgentActionType.EXTRACT:
             if not action.selector:
@@ -255,8 +261,10 @@ class EventDrivenAgentLoop:
             self.sandbox.consume_browser_action(task.agent_id)
             await self._ensure_current_page_safe(task, "browser.extract")
             result = await self.browser.extract(task.session_id, action.selector, action.attribute)
-            await self._ensure_page_safe(task, result.page, "browser.extract")
-            return result.model_dump(mode="json")
+            result_page = self._result_page(result)
+            if result_page is not None:
+                await self._ensure_page_safe(task, result_page, "browser.extract")
+            return self._result_payload(result)
 
         if action.type == AgentActionType.SCREENSHOT:
             try:
@@ -265,8 +273,10 @@ class EventDrivenAgentLoop:
                 self.sandbox.consume_browser_action(task.agent_id)
                 await self._ensure_current_page_safe(task, "browser.screenshot")
                 result = await self.browser.screenshot(task.session_id)
-                await self._ensure_page_safe(task, result.page, "browser.screenshot")
-                return result.model_dump(mode="json")
+                result_page = self._result_page(result)
+                if result_page is not None:
+                    await self._ensure_page_safe(task, result_page, "browser.screenshot")
+                return self._result_payload(result)
             except SandboxApprovalRequiredError as exc:
                 await self._emit_approval_required(task, exc)
                 raise
@@ -364,6 +374,28 @@ class EventDrivenAgentLoop:
         if isinstance(page, dict):
             return StructuredPageModel.model_validate(page)
         return None
+
+    @classmethod
+    def _result_page(cls, result: object) -> StructuredPageModel | None:
+        page = getattr(result, "page", None)
+        if isinstance(page, StructuredPageModel):
+            return page
+        if isinstance(page, dict):
+            return StructuredPageModel.model_validate(page)
+        if isinstance(result, dict):
+            return cls._page_from_result(result)
+        return None
+
+    @staticmethod
+    def _result_payload(result: object) -> dict[str, object]:
+        if isinstance(result, dict):
+            return result
+        model_dump = getattr(result, "model_dump", None)
+        if callable(model_dump):
+            payload = model_dump(mode="json")
+            if isinstance(payload, dict):
+                return payload
+        return {}
 
     async def _store_observation_memory(
         self,

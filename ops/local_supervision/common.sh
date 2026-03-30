@@ -93,7 +93,25 @@ kickstart_label() {
 print_service_status() {
   local label="$1"
   if is_launchd_loaded "${label}"; then
-    echo "${label}: loaded"
+    local info
+    info="$(launchctl print "${LAUNCHD_DOMAIN}/${label}" 2>/dev/null || true)"
+    local state pid last_signal
+    state="$(printf '%s\n' "${info}" | awk -F'= ' '/^[[:space:]]*state = / {print $2; exit}')"
+    pid="$(printf '%s\n' "${info}" | awk -F'= ' '/^[[:space:]]*pid = / {print $2; exit}')"
+    last_signal="$(printf '%s\n' "${info}" | awk -F'= ' '/^[[:space:]]*last terminating signal = / {print $2; exit}')"
+    if [[ "${state}" == "running" ]]; then
+      if [[ -n "${pid}" ]]; then
+        echo "${label}: running (pid ${pid})"
+      else
+        echo "${label}: running"
+      fi
+    else
+      if [[ -n "${last_signal}" ]]; then
+        echo "${label}: loaded (${state:-unknown}, last signal: ${last_signal})"
+      else
+        echo "${label}: loaded (${state:-unknown})"
+      fi
+    fi
   else
     echo "${label}: not loaded"
   fi

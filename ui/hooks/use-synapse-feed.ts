@@ -50,8 +50,20 @@ export function useSynapseFeed(): DashboardFeed {
       const interval = window.setInterval(() => {
         void hydrateDashboard(auth);
       }, 30000);
+      const refresh = () => {
+        void hydrateDashboard(auth);
+      };
+      const onVisibilityChange = () => {
+        if (document.visibilityState === "visible") {
+          refresh();
+        }
+      };
+      window.addEventListener("focus", refresh);
+      document.addEventListener("visibilitychange", onVisibilityChange);
       return () => {
         window.clearInterval(interval);
+        window.removeEventListener("focus", refresh);
+        document.removeEventListener("visibilitychange", onVisibilityChange);
       };
     }
     const socket = new WebSocket(buildSynapseWebSocketUrl(defaultSocketUrl, auth));
@@ -97,8 +109,8 @@ export function useSynapseFeed(): DashboardFeed {
         handleAuthFailure(failed.status);
         return;
       }
-      const runs = ((await runsResponse.json()) as Record<string, unknown>[]).slice(0, 24);
-      const agents = ((await agentsResponse.json()) as Record<string, unknown>[]).slice(0, 24);
+      const runs = sortRunsByRecency((await runsResponse.json()) as Record<string, unknown>[]).slice(0, 24);
+      const agents = sortAgentsByRecency((await agentsResponse.json()) as Record<string, unknown>[]).slice(0, 24);
       const interventions = (await interventionsResponse.json()) as Record<string, unknown>[];
       const requestHealth = await loadRequestHealth(apiRoot, headers, runs);
       setState(buildStateFromSnapshot(runs, agents, interventions, requestHealth));
@@ -608,9 +620,7 @@ function buildStateFromSnapshot(
   interventions: Record<string, unknown>[],
   requestHealth: RequestHealthItem[],
 ): DashboardState {
-  const sortedRuns = [...runs].sort((left, right) =>
-    String(right.updated_at ?? right.started_at ?? "").localeCompare(String(left.updated_at ?? left.started_at ?? "")),
-  );
+  const sortedRuns = sortRunsByRecency(runs);
   const latestRun = sortedRuns[0];
   const latestMetadata =
     latestRun && latestRun.metadata && typeof latestRun.metadata === "object"
@@ -694,6 +704,18 @@ function buildStateFromSnapshot(
         : [],
     },
   };
+}
+
+function sortRunsByRecency(runs: Record<string, unknown>[]): Record<string, unknown>[] {
+  return [...runs].sort((left, right) =>
+    String(right.updated_at ?? right.started_at ?? "").localeCompare(String(left.updated_at ?? left.started_at ?? "")),
+  );
+}
+
+function sortAgentsByRecency(agents: Record<string, unknown>[]): Record<string, unknown>[] {
+  return [...agents].sort((left, right) =>
+    String(right.last_seen_at ?? right.updated_at ?? "").localeCompare(String(left.last_seen_at ?? left.updated_at ?? "")),
+  );
 }
 
 async function loadRequestHealth(
@@ -818,5 +840,7 @@ function toRequestHealthItem(value: Record<string, unknown> | null | undefined):
     progressAgeSeconds: typeof value.progress_age_seconds === "number" ? value.progress_age_seconds : null,
     executionAgeSeconds: typeof value.execution_age_seconds === "number" ? value.execution_age_seconds : null,
     totalAgeSeconds: typeof value.total_age_seconds === "number" ? value.total_age_seconds : 0,
+    hasResult: Boolean(value.has_result),
+    active: Boolean(value.is_active),
   };
 }

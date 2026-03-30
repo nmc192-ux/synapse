@@ -15,7 +15,7 @@ from synapse.runtime.event_bus import EventBus
 from synapse.runtime.memory_service import MemoryService
 from synapse.runtime.registry import AgentRegistry
 from synapse.runtime.run_store import RunStore
-from synapse.runtime.scheduler import RunLease, RunScheduler
+from synapse.runtime.scheduler import NoBrowserWorkersAvailable, RunAssignmentDeferred, RunLease, RunScheduler
 from synapse.runtime.state_store import InMemoryRuntimeStateStore
 from synapse.runtime.task_runtime import TaskRuntime
 from synapse.transports.websocket_manager import WebSocketManager
@@ -157,7 +157,7 @@ def test_scheduler_requeues_when_no_workers_available() -> None:
         run = await run_store.create_run(task_id="task-1", agent_id="agent-1")
 
         async with bus.subscribe("scheduler-test") as queue:
-            with pytest.raises(RuntimeError):
+            with pytest.raises(NoBrowserWorkersAvailable):
                 await scheduler.assign_run(run.run_id)
             event_types = { (await queue.get()).event_type, (await queue.get()).event_type }
             assert EventType.WORKER_UNAVAILABLE in event_types
@@ -169,39 +169,20 @@ def test_scheduler_requeues_when_no_workers_available() -> None:
     asyncio.run(scenario())
 
 
-def test_scheduler_skips_draining_workers() -> None:
+def test_scheduler_defers_runs_waiting_for_retry_backoff() -> None:
     async def scenario() -> None:
         store = InMemoryRuntimeStateStore()
         run_store = RunStore(store)
         bus = EventBus(WebSocketManager(state_store=store))
-        bus.set_context_resolver(lambda event: _event_context())
-        scheduler = RunScheduler(
-            run_store,
-            _StubWorkerPool(
-                [
-                    BrowserWorkerState(
-                        worker_id="worker-draining",
-                        queue_name="q1",
-                        status=WorkerRuntimeStatus.IDLE,
-                        active_sessions=0,
-                        metadata={"drain_state": "draining"},
-                    ),
-                    BrowserWorkerState(
-                        worker_id="worker-ready",
-                        queue_name="q2",
-                        status=WorkerRuntimeStatus.IDLE,
-                        active_sessions=1,
-                    ),
-                ]
-            ),
-            bus,
-            cleanup_interval_seconds=60,
+        scheduler = RunScheduler(run_store, _StubWorkerPool([]), bus, cleanup_interval_seconds=60)
+        run = await run_store.create_run(task_id="task-backoff", agent_id="agent-1")
+        await run_store.update_metadata(
+            run.run_id,
+            {"next_retry_at": (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat()},
         )
-        run = await run_store.create_run(task_id="task-drain", agent_id="agent-1")
 
-        lease = await scheduler.assign_run(run.run_id)
-
-        assert lease.worker_id == "worker-ready"
+        with pytest.raises(RunAssignmentDeferred):
+            await scheduler.assign_run(run.run_id)
 
     asyncio.run(scenario())
 
@@ -234,18 +215,15 @@ def test_scheduler_requeues_expired_leases() -> None:
 
         async with bus.subscribe("scheduler-recovery") as queue:
             await scheduler.cleanup_expired_leases()
-            event_types = { (await queue.get()).event_type, (await queue.get()).event_type, (await queue.get()).event_type }
+            event_types = {(await queue.get()).event_type, (await queue.get()).event_type}
             assert EventType.RUN_REQUEUED in event_types
             assert EventType.RUN_RECOVERED in event_types
-            assert EventType.RUN_ASSIGNED in event_types
 
         persisted = await run_store.get(run.run_id)
-        assert persisted.metadata["assigned_worker_id"] == "worker-1"
-        assert persisted.metadata["assignment_attempts"] >= 2
+        assert persisted.status == RunStatus.PENDING
+        assert persisted.metadata["assigned_worker_id"] is None
         lease = await run_store.get_lease(run.run_id)
-        assert lease is not None
-        assert lease.worker_id == "worker-1"
-        assert lease.token > 1
+        assert lease is None
 
     asyncio.run(scenario())
 
@@ -316,6 +294,47 @@ def test_scheduler_uses_exponential_backoff_metadata() -> None:
         await scheduler.requeue_run(run.run_id, reason="retry", attempts=3, reassign=False)
         persisted = await run_store.get(run.run_id)
         assert persisted.metadata["retry_backoff_seconds"] == 0.04
+
+    asyncio.run(scenario())
+
+
+def test_task_runtime_returns_pending_result_when_assignment_is_deferred() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        bus = EventBus(WebSocketManager(state_store=store))
+        bus.set_context_resolver(lambda event: _event_context())
+        registry = AgentRegistry()
+        registry.register(
+            AgentDefinition(
+                agent_id="agent-1",
+                name="Agent 1",
+                kind=AgentKind.CUSTOM,
+                system_prompt="test",
+                project_id="project-1",
+            )
+        )
+        scheduler = RunScheduler(run_store, _StubWorkerPool([]), bus, cleanup_interval_seconds=60)
+        browser_service = _StubBrowserService()
+        runtime = TaskRuntime(
+            registry,
+            browser_service,
+            _StubToolService(),
+            MemoryService(_StubMemoryManager()),
+            _StubTaskManager(),
+            CheckpointService(None, browser_service, bus),
+            run_store,
+            bus,
+            _StubSafety(),
+            scheduler=scheduler,
+        )
+        result = await runtime.execute_task(
+            TaskRequest(task_id="task-pending", agent_id="agent-1", goal="wait for capacity")
+        )
+
+        assert result.status == TaskStatus.PENDING
+        assert result.message == "No browser workers available."
+        assert result.artifacts["retry_backoff_seconds"] is not None
 
     asyncio.run(scenario())
 

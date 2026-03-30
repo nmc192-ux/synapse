@@ -116,6 +116,8 @@ export type RequestHealthItem = {
   progressAgeSeconds?: number | null;
   executionAgeSeconds?: number | null;
   totalAgeSeconds: number;
+  hasResult?: boolean;
+  active?: boolean;
 };
 
 export type DashboardState = {

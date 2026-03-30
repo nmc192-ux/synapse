@@ -13,7 +13,7 @@ from synapse.runtime.memory_service import MemoryService
 from synapse.runtime.planning import NavigationPlanner
 from synapse.runtime.registry import AgentRegistry
 from synapse.runtime.run_store import RunStore
-from synapse.runtime.scheduler import RunScheduler
+from synapse.runtime.scheduler import NoBrowserWorkersAvailable, RunAssignmentDeferred, RunScheduler
 from synapse.runtime.safety import AgentSafetyLayer, SecurityAlertError, SecurityFinding
 from synapse.runtime.task_manager import TaskExecutionManager
 from synapse.runtime.tool_service import ToolService
@@ -71,7 +71,23 @@ class TaskRuntime:
         delegated = await self._delegate_if_needed(request, run)
         if delegated is not None:
             return delegated
-        lease = await self.scheduler.assign_run(run.run_id) if self.scheduler is not None else None
+        lease = None
+        if self.scheduler is not None:
+            try:
+                lease = await self.scheduler.assign_run(run.run_id)
+            except (RunAssignmentDeferred, NoBrowserWorkersAvailable) as exc:
+                pending_run = await self.run_store.get(run.run_id)
+                return TaskResult(
+                    task_id=request.task_id,
+                    run_id=run.run_id,
+                    status=TaskStatus.PENDING,
+                    message=str(exc),
+                    artifacts={
+                        "run_id": run.run_id,
+                        "retry_backoff_seconds": pending_run.metadata.get("retry_backoff_seconds"),
+                        "next_retry_at": pending_run.metadata.get("next_retry_at"),
+                    },
+                )
         sandbox = getattr(self.browser_service, "sandbox", None)
         if hasattr(sandbox, "set_run_policy"):
             sandbox.set_run_policy(run.run_id, run.metadata.get("security_policy"))

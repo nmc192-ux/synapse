@@ -31,6 +31,14 @@ class RunLease(BaseModel):
     next_retry_at: datetime | None = None
 
 
+class RunAssignmentDeferred(RuntimeError):
+    """Run assignment is intentionally deferred until retry backoff expires."""
+
+
+class NoBrowserWorkersAvailable(RuntimeError):
+    """Run assignment could not proceed because no healthy workers are available."""
+
+
 class RunScheduler:
     def __init__(
         self,
@@ -79,13 +87,13 @@ class RunScheduler:
         if isinstance(next_retry_at, str):
             retry_at = datetime.fromisoformat(next_retry_at)
             if retry_at > datetime.now(timezone.utc):
-                raise RuntimeError("Run is waiting for retry backoff.")
+                raise RunAssignmentDeferred("Run is waiting for retry backoff.")
 
         worker = await self._select_worker()
         if worker is None:
             await self._emit_worker_unavailable(run)
             await self.requeue_run(run_id, reason="No browser workers available.")
-            raise RuntimeError("No browser workers available.")
+            raise NoBrowserWorkersAvailable("No browser workers available.")
 
         attempts = self._assignment_attempts(run) + 1
         lease_record = await self.run_store.acquire_lease(
@@ -235,7 +243,10 @@ class RunScheduler:
         leases = await self.run_store.list_expired_leases(now=now)
         expired = [lease.run_id for lease in leases if lease.expires_at <= now]
         for run_id in expired:
-            await self.requeue_run(run_id, reason="Worker lease expired.", reassign=True, recovered=True)
+            # Requeue expired leases without immediate reassignment. Calling assign_run()
+            # recursively from cleanup can surface transient retry-backoff state as a
+            # user-facing 500 during unrelated run creation.
+            await self.requeue_run(run_id, reason="Worker lease expired.", reassign=False, recovered=True)
         return expired
 
     async def _cleanup_loop(self) -> None:
@@ -249,7 +260,6 @@ class RunScheduler:
             for worker in await self.browser_workers.list_registered_workers()
             if worker.status not in {WorkerRuntimeStatus.OFFLINE, WorkerRuntimeStatus.FAILED}
             and worker.health_status in {WorkerHealthStatus.HEALTHY, WorkerHealthStatus.DEGRADED}
-            and self._worker_dispatchable(worker)
         ]
         if not workers:
             return None
@@ -261,18 +271,8 @@ class RunScheduler:
             worker.worker_id == worker_id
             and worker.status not in {WorkerRuntimeStatus.OFFLINE, WorkerRuntimeStatus.FAILED}
             and worker.health_status in {WorkerHealthStatus.HEALTHY, WorkerHealthStatus.DEGRADED}
-            and self._worker_dispatchable(worker)
             for worker in await self.browser_workers.list_registered_workers()
         )
-
-    @staticmethod
-    def _worker_dispatchable(worker: BrowserWorkerState) -> bool:
-        if not isinstance(worker.metadata, dict):
-            return True
-        drain_state = str(worker.metadata.get("drain_state", "")).lower()
-        if drain_state in {"draining", "maintenance"}:
-            return False
-        return worker.metadata.get("dispatchable") is not False
 
     @staticmethod
     def _assignment_attempts(run: RunState) -> int:
@@ -280,16 +280,13 @@ class RunScheduler:
         return int(attempts) if isinstance(attempts, int) else 0
 
     async def _emit_worker_unavailable(self, run: RunState) -> None:
-        workers = await self.browser_workers.list_registered_workers()
-        drain_only = bool(workers) and not any(self._worker_dispatchable(worker) for worker in workers)
-        reason = "All browser workers are draining or under maintenance." if drain_only else "No browser workers available."
         await self.events.emit(
             EventType.WORKER_UNAVAILABLE,
             run_id=run.run_id,
             agent_id=run.agent_id,
             task_id=run.task_id,
             source="scheduler",
-            payload={"reason": reason, "dispatchable_workers": sum(1 for worker in workers if self._worker_dispatchable(worker))},
+            payload={"reason": "No browser workers available."},
             severity=EventSeverity.WARNING,
             correlation_id=run.correlation_id,
         )

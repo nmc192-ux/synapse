@@ -122,6 +122,35 @@ class _TenantIsolationOrchestrator:
         run = self.runs[run_id]
         return [{"run_id": run.run_id, "project_id": run.project_id, "task_id": run.task_id}]
 
+    async def list_worker_request_health(self, run_id: str, *, session_id: str | None = None, status: str | None = None):
+        run = self.runs[run_id]
+        records = [
+            {
+                "request": {
+                    "action_id": f"action-{run.run_id}",
+                    "request_id": f"request-{run.run_id}",
+                    "run_id": run.run_id,
+                    "worker_id": f"worker-{run.run_id}",
+                    "action": "open",
+                    "session_id": session_id or f"session-{run.run_id}",
+                    "status": status or "running",
+                    "payload": {},
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                },
+                "result": None,
+                "health_state": status or "running",
+                "has_result": False,
+                "is_active": True,
+                "total_age_seconds": 1.0,
+                "execution_age_seconds": 1.0,
+                "progress_age_seconds": 0.5,
+            }
+        ]
+        if session_id is not None:
+            records = [record for record in records if record["request"]["session_id"] == session_id]
+        return records
+
     async def list_sessions(self, agent_id: str | None = None):
         sessions = list(self.sessions.values())
         if agent_id is not None:
@@ -221,6 +250,9 @@ def test_cross_project_run_and_event_access_is_denied() -> None:
 
     denied_events = client.get("/api/runs/run-b/events", headers=headers)
     assert denied_events.status_code == 403
+
+    denied_worker_requests = client.get("/api/runs/run-b/worker-requests", headers=headers)
+    assert denied_worker_requests.status_code == 403
 
 
 def test_cross_project_session_profile_and_checkpoint_access_is_denied() -> None:

@@ -165,6 +165,17 @@ class BrowserTaskResultRecord(BaseModel):
         return self
 
 
+class BrowserTaskRequestHealthView(BaseModel):
+    request: BrowserTaskRequestRecord
+    result: BrowserTaskResultRecord | None = None
+    health_state: str
+    has_result: bool = False
+    is_active: bool = False
+    total_age_seconds: float = 0.0
+    execution_age_seconds: float | None = None
+    progress_age_seconds: float | None = None
+
+
 class BrowserSessionOwnershipRecord(BaseModel):
     session_id: str
     worker_id: str

@@ -51,6 +51,7 @@ from synapse.models.run import RunGraph, RunState, RunStatus
 from synapse.models.runtime_state import (
     BrowserNetworkEntry,
     BrowserSessionState,
+    BrowserTaskRequestHealthView,
     BrowserTraceEntry,
     BrowserWorkerState,
     ConnectionState,
@@ -462,6 +463,15 @@ class RuntimeController:
         if self.state_store is None:
             return []
         return await self.state_store.get_runtime_events(run_id=run_id, limit=200)
+
+    async def list_worker_request_health(
+        self,
+        run_id: str,
+        *,
+        session_id: str | None = None,
+        status: str | None = None,
+    ) -> list[BrowserTaskRequestHealthView]:
+        return await self.run_store.list_worker_request_health(run_id=run_id, session_id=session_id, status=status)
 
     async def _resolve_event_context(self, event) -> dict[str, object]:
         resolved: dict[str, object] = {}

@@ -10,6 +10,7 @@ from synapse.config import Settings
 from synapse.models.agent import AgentDefinition, AgentKind
 from synapse.models.run import RunStatus
 from synapse.models.runtime_event import EventType
+from synapse.models.runtime_state import BrowserTaskRequestRecord, BrowserTaskResultRecord
 from synapse.models.task import TaskRequest, TaskResult, TaskStatus
 from synapse.runtime.budget import AgentBudgetManager
 from synapse.runtime.a2a import A2AHub
@@ -243,6 +244,31 @@ def test_run_api_endpoints() -> None:
             task_id="task-2",
             payload={"ok": True},
         )
+        await orchestrator.run_store.save_worker_request(
+            BrowserTaskRequestRecord(
+                action_id="action-1",
+                request_id="request-1",
+                run_id=run.run_id,
+                worker_id="controller-1:browser-worker-1",
+                action="open",
+                session_id="session-1",
+                task_id="task-2",
+                agent_id="agent-1",
+                status="slow",
+            )
+        )
+        await orchestrator.run_store.save_worker_result(
+            BrowserTaskResultRecord(
+                action_id="action-1",
+                request_id="request-1",
+                run_id=run.run_id,
+                worker_id="controller-1:browser-worker-1",
+                action="open",
+                session_id="session-1",
+                success=True,
+                payload={"url": "https://example.com"},
+            )
+        )
         return orchestrator
 
     orchestrator = asyncio.run(scenario())
@@ -271,6 +297,17 @@ def test_run_api_endpoints() -> None:
     events_response = client.get(f"/api/runs/{run_id}/events", headers=headers)
     assert events_response.status_code == 200
     assert any(event["run_id"] == run_id for event in events_response.json())
+
+    worker_requests_response = client.get(f"/api/runs/{run_id}/worker-requests", headers=headers)
+    assert worker_requests_response.status_code == 200
+    worker_requests = worker_requests_response.json()
+    assert len(worker_requests) == 1
+    assert worker_requests[0]["request"]["action_id"] == "action-1"
+    assert worker_requests[0]["health_state"] == "completed"
+    assert worker_requests[0]["has_result"] is True
+    assert worker_requests[0]["is_active"] is False
+    assert worker_requests[0]["total_age_seconds"] >= 0
+    assert worker_requests[0]["result"]["payload"]["url"] == "https://example.com"
 
     timeline_response = client.get(f"/api/runs/{run_id}/timeline", headers=headers)
     assert timeline_response.status_code == 200

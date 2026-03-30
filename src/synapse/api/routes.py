@@ -56,6 +56,7 @@ from synapse.models.run import RunGraph, RunState
 from synapse.models.runtime_state import (
     BrowserNetworkEntry,
     BrowserSessionState,
+    BrowserTaskRequestHealthView,
     BrowserTraceEntry,
     BrowserWorkerState,
     ConnectionState,
@@ -1283,6 +1284,22 @@ async def get_run_events(
 ) -> list[dict[str, object]]:
     await _require_run_project(principal, orchestrator, run_id)
     return await orchestrator.get_run_events(run_id)
+
+
+@router.get("/runs/{run_id}/worker-requests", response_model=list[BrowserTaskRequestHealthView])
+async def list_run_worker_requests(
+    run_id: str,
+    principal: TasksReadPrincipal,
+    session_id: str | None = None,
+    status: str | None = None,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> list[BrowserTaskRequestHealthView]:
+    await _require_run_project(principal, orchestrator, run_id)
+    if session_id is not None:
+        session = await _require_session_project(principal, orchestrator, session_id)
+        if session.run_id != run_id:
+            raise HTTPException(status_code=400, detail="Session does not belong to this run.")
+    return await orchestrator.list_worker_request_health(run_id, session_id=session_id, status=status)
 
 
 @router.get("/runs/{run_id}/timeline", response_model=RunTimeline)

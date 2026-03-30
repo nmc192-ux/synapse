@@ -8,6 +8,7 @@ from synapse.models.runtime_event import RunReplayView, RunTimeline, RunTimeline
 from synapse.models.runtime_state import (
     BrowserNetworkEntry,
     BrowserSessionOwnershipRecord,
+    BrowserTaskRequestHealthView,
     OperatorInterventionRecord,
     OperatorInterventionState,
     BrowserTaskRequestRecord,
@@ -395,6 +396,19 @@ class RunStore:
         )
         return [BrowserTaskRequestRecord.model_validate(row) for row in rows]
 
+    async def list_worker_request_health(
+        self,
+        *,
+        run_id: str,
+        session_id: str | None = None,
+        status: str | None = None,
+    ) -> list[BrowserTaskRequestHealthView]:
+        requests = await self.list_worker_requests(run_id=run_id, session_id=session_id, status=status)
+        results = await self.list_worker_results(run_id=run_id, session_id=session_id)
+        results_by_action_id = {result.action_id: result for result in results}
+        now = datetime.now(timezone.utc)
+        return [self._build_worker_request_health(request, results_by_action_id.get(request.action_id), now=now) for request in requests]
+
     async def save_worker_result(self, result: BrowserTaskResultRecord) -> BrowserTaskResultRecord:
         existing = await self.get_worker_result(result.run_id, result.action_id)
         if existing is not None:
@@ -422,6 +436,43 @@ class RunStore:
             return []
         rows = await self.state_store.list_worker_results(run_id=run_id, worker_id=worker_id, session_id=session_id)
         return [BrowserTaskResultRecord.model_validate(row) for row in rows]
+
+    def _build_worker_request_health(
+        self,
+        request: BrowserTaskRequestRecord,
+        result: BrowserTaskResultRecord | None,
+        *,
+        now: datetime | None = None,
+    ) -> BrowserTaskRequestHealthView:
+        reference = now or datetime.now(timezone.utc)
+        total_age_seconds = max((reference - request.created_at).total_seconds(), 0.0)
+        execution_anchor = request.started_at or request.dispatched_at
+        execution_age_seconds = None
+        if execution_anchor is not None:
+            end = request.completed_at or result.completed_at if result is not None else None
+            execution_reference = end or reference
+            execution_age_seconds = max((execution_reference - execution_anchor).total_seconds(), 0.0)
+        progress_anchor = request.last_progress_at or request.started_at or request.dispatched_at
+        progress_age_seconds = None
+        if progress_anchor is not None:
+            end = request.completed_at or result.completed_at if result is not None else None
+            progress_reference = end or reference
+            progress_age_seconds = max((progress_reference - progress_anchor).total_seconds(), 0.0)
+
+        health_state = request.status
+        if result is not None and health_state not in {"completed", "failed"}:
+            health_state = "completed" if result.success else "failed"
+
+        return BrowserTaskRequestHealthView(
+            request=request,
+            result=result,
+            health_state=health_state,
+            has_result=result is not None,
+            is_active=health_state in {"queued", "dispatched", "running", "slow", "stuck", "recovered"},
+            total_age_seconds=round(total_age_seconds, 3),
+            execution_age_seconds=round(execution_age_seconds, 3) if execution_age_seconds is not None else None,
+            progress_age_seconds=round(progress_age_seconds, 3) if progress_age_seconds is not None else None,
+        )
 
     async def validate_fencing_token(self, run_id: str | None, worker_id: str, token: int | None) -> bool:
         if run_id is None or token is None:

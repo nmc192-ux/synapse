@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -22,6 +23,7 @@ from common import (
     sleep_with_jitter,
     start_role_a2a_listener,
     summarize_run,
+    sync_project_runtime_events,
     timestamp_slug,
     utc_now,
     write_json_artifact,
@@ -178,6 +180,7 @@ def run_once(runner: str) -> None:
         f"{runner}_{timestamp_slug()}.json",
         {"runner": runner, "direct_results": direct_results, "submitted_runs": submitted_runs},
     )
+    sync_project_runtime_events(project_alias, utc_now() - timedelta(minutes=15))
     print({"artifact": str(artifact), "runner": runner, "submitted_runs": submitted_runs})
 
 

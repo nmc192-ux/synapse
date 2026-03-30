@@ -239,6 +239,7 @@ def test_browser_runner_starts_project_runtime_listener(monkeypatch) -> None:
     spec.loader.exec_module(browser_runner)
 
     calls: list[tuple[str, str]] = []
+    synced: list[tuple[str, object]] = []
     monkeypatch.setattr(
         browser_runner,
         "register_role_agent",
@@ -253,6 +254,11 @@ def test_browser_runner_starts_project_runtime_listener(monkeypatch) -> None:
         browser_runner,
         "ensure_project_runtime_listener",
         lambda project_alias: calls.append(("runtime", project_alias)),
+    )
+    monkeypatch.setattr(
+        browser_runner,
+        "sync_project_runtime_events",
+        lambda project_alias, since: synced.append((project_alias, since)) or 0,
     )
     monkeypatch.setattr(browser_runner, "env_bool", lambda name, default=False: False)
     monkeypatch.setattr(
@@ -287,3 +293,4 @@ def test_browser_runner_starts_project_runtime_listener(monkeypatch) -> None:
     browser_runner.run_once("browser-runner-1")
 
     assert ("runtime", "steady") in calls
+    assert synced and synced[0][0] == "steady"

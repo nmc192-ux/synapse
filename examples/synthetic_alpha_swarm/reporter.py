@@ -18,6 +18,7 @@ from common import (
     role_project_alias,
     run_forever,
     safe_list_audit_logs,
+    sync_project_runtime_events,
     start_role_a2a_listener,
     timestamp_slug,
     utc_now,
@@ -45,6 +46,8 @@ def ensure_runtime_listeners() -> None:
 def collect_metrics(window_label: str) -> tuple[list[dict[str, object]], dict[str, object]]:
     snapshots: list[dict[str, object]] = []
     since = window_start_for(window_label)
+    for alias in ("steady", "chaos"):
+        sync_project_runtime_events(alias, since)
     telemetry_events = load_telemetry_events_since(since)
     for alias in ("steady", "chaos"):
         with build_project_api(alias) as api:

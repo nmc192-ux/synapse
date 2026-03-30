@@ -726,6 +726,10 @@ class PlatformAPI:
         response = self._request("GET", "/api/runs")
         return [RunState.model_validate(item) for item in response.json()]
 
+    def get_run_events(self, run_id: str) -> list[dict[str, Any]]:
+        response = self._request("GET", f"/api/runs/{run_id}/events")
+        return list(response.json())
+
     def get_agent_status(self, agent_id: str) -> dict[str, object]:
         response = self._request("GET", f"/api/agents/{agent_id}/status")
         return dict(response.json())
@@ -1234,6 +1238,40 @@ def filter_audit_logs_since(audit_logs: list[dict[str, Any]], since: datetime) -
 def filter_telemetry_events_since(telemetry_events: list[dict[str, Any]], since: datetime) -> list[dict[str, Any]]:
     threshold = since.isoformat()
     return [item for item in telemetry_events if str(item.get("timestamp", "")) >= threshold]
+
+
+def sync_project_runtime_events(project_alias: str, since: datetime) -> int:
+    recorded = 0
+    with build_project_api(project_alias) as api:
+        runs = filter_runs_since(api.list_runs(), since)
+        for run in runs:
+            try:
+                events = api.get_run_events(run.run_id)
+            except (httpx.HTTPStatusError, PermissionError) as exc:
+                record_telemetry_event(
+                    "runtime_events.unavailable",
+                    project_alias=project_alias,
+                    project_id=api.project_id,
+                    run_id=run.run_id,
+                    status="degraded",
+                    details={"error": str(exc)},
+                )
+                continue
+            for event in events:
+                timestamp = event.get("timestamp")
+                if isinstance(timestamp, str):
+                    try:
+                        event_time = datetime.fromisoformat(timestamp)
+                    except ValueError:
+                        event_time = None
+                    if event_time is not None and event_time < since:
+                        continue
+                telemetry = normalize_runtime_event_to_telemetry(event, project_alias=project_alias)
+                if telemetry is None:
+                    continue
+                record_telemetry_event(**telemetry)
+                recorded += 1
+    return recorded
 
 
 def write_json_artifact(name: str, payload: Any) -> dict[str, str]:

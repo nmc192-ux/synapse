@@ -234,3 +234,66 @@ def test_reporter_run_once_starts_project_runtime_listeners(monkeypatch, tmp_pat
     reporter.run_once()
 
     assert listener_calls == ['steady', 'chaos']
+
+
+def test_sync_project_runtime_events_records_mapped_worker_events(monkeypatch) -> None:
+    recorded: list[tuple[str, dict[str, object]]] = []
+
+    class _API:
+        project_id = "project-1"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def list_runs(self):
+            return [
+                common.RunState(
+                    run_id='run-1',
+                    task_id='task-1',
+                    agent_id='agent-1',
+                    project_id='project-1',
+                    status='running',
+                    started_at=datetime(2026, 3, 28, 0, 0, tzinfo=timezone.utc),
+                    updated_at=datetime(2026, 3, 28, 0, 1, tzinfo=timezone.utc),
+                )
+            ]
+
+        def get_run_events(self, run_id: str):
+            assert run_id == 'run-1'
+            return [
+                {
+                    'event_id': 'evt-1',
+                    'event_type': 'worker.request.slow',
+                    'timestamp': '2026-03-28T00:00:30+00:00',
+                    'project_id': 'project-1',
+                    'run_id': 'run-1',
+                    'severity': 'warning',
+                    'payload': {'worker_id': 'worker-1', 'request_id': 'request-1', 'age_seconds': 6.0},
+                },
+                {
+                    'event_id': 'evt-2',
+                    'event_type': 'task.updated',
+                    'timestamp': '2026-03-28T00:00:31+00:00',
+                    'project_id': 'project-1',
+                    'run_id': 'run-1',
+                    'payload': {},
+                },
+            ]
+
+    monkeypatch.setattr(common, 'build_project_api', lambda alias: _API())
+    monkeypatch.setattr(
+        common,
+        'record_telemetry_event',
+        lambda event_type, **kwargs: recorded.append((event_type, kwargs)) or {},
+    )
+
+    count = common.sync_project_runtime_events('steady', datetime(2026, 3, 28, 0, 0, tzinfo=timezone.utc))
+
+    assert count == 1
+    assert recorded[0][0] == 'browser.request_slow'
+    assert recorded[0][1]['project_alias'] == 'steady'
+    assert recorded[0][1]['run_id'] == 'run-1'
+    assert recorded[0][1]['details']['event_id'] == 'evt-1'

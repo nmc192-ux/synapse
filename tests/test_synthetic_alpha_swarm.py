@@ -214,6 +214,34 @@ def test_build_project_admin_api_prefers_alias_specific_admin_key(monkeypatch) -
     }
 
 
+def test_platform_api_get_run_worker_requests_passes_query_params(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _request(method: str, path: str, **kwargs):
+        captured["method"] = method
+        captured["path"] = path
+        captured["params"] = kwargs.get("params")
+
+        class _Response:
+            def json(self):
+                return [{"health_state": "slow"}]
+
+        return _Response()
+
+    api = common.PlatformAPI(base_url="http://127.0.0.1:8000", api_key="key", project_id="project-1")
+    monkeypatch.setattr(api, "_request", _request)
+
+    payload = api.get_run_worker_requests("run-1", session_id="session-1", status="slow")
+
+    assert payload == [{"health_state": "slow"}]
+    assert captured == {
+        "method": "GET",
+        "path": "/api/runs/run-1/worker-requests",
+        "params": {"session_id": "session-1", "status": "slow"},
+    }
+    api.close()
+
+
 def test_director_schedule_catalog_uses_chaos_browser_runner_identity() -> None:
     director_path = REPO_ROOT / "examples" / "synthetic_alpha_swarm" / "director.py"
     sys.path.insert(0, str(director_path.parent))
@@ -260,6 +288,11 @@ def test_browser_runner_starts_project_runtime_listener(monkeypatch) -> None:
         "sync_project_runtime_events",
         lambda project_alias, since: synced.append((project_alias, since)) or 0,
     )
+    monkeypatch.setattr(
+        browser_runner,
+        "sync_project_request_health",
+        lambda project_alias, since: synced.append((f"{project_alias}:request-health", since)) or 0,
+    )
     monkeypatch.setattr(browser_runner, "env_bool", lambda name, default=False: False)
     monkeypatch.setattr(
         browser_runner,
@@ -294,3 +327,4 @@ def test_browser_runner_starts_project_runtime_listener(monkeypatch) -> None:
 
     assert ("runtime", "steady") in calls
     assert synced and synced[0][0] == "steady"
+    assert any(alias == "steady:request-health" for alias, _ in synced)

@@ -7,14 +7,19 @@ from common import (
     build_project_api,
     classify_failure,
     compute_project_metrics,
+    filter_telemetry_events_since,
+    load_telemetry_events_since,
     overall_metrics,
     parse_loop_args,
     register_role_agent,
     role_project_alias,
     run_forever,
     safe_list_audit_logs,
+    sync_project_request_health,
+    sync_project_runtime_events,
     start_role_a2a_listener,
     timestamp_slug,
+    window_start_for,
     write_json_artifact,
 )
 from synapse.models.agent import AgentKind
@@ -43,14 +48,28 @@ def run_once() -> None:
         ),
     )
     ensure_a2a_listener()
+    since = window_start_for("daily")
     project_reports: list[dict[str, object]] = []
+    for alias in ("steady", "chaos"):
+        sync_project_runtime_events(alias, since)
+        sync_project_request_health(alias, since)
+    telemetry_events = load_telemetry_events_since(since)
     for alias in ("steady", "chaos"):
         with build_project_api(alias) as api:
             runs = api.list_runs()
             interventions = api.list_interventions()
         with build_project_admin_api(alias) as admin_api:
             audit_logs = safe_list_audit_logs(admin_api, admin_api.project_id or "")
-            metrics = compute_project_metrics(alias, runs, interventions, audit_logs)
+            metrics = compute_project_metrics(
+                alias,
+                runs,
+                interventions,
+                audit_logs,
+                filter_telemetry_events_since(
+                    [event for event in telemetry_events if str(event.get("project_alias")) == alias],
+                    since,
+                ),
+            )
             metrics["classified_failures"] = [
                 {
                     "run_id": run.run_id,

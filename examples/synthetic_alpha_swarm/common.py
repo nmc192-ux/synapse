@@ -370,6 +370,15 @@ def record_telemetry_event(
     return {"repo": str(repo_target), "log": str(log_target)}
 
 
+def telemetry_dedupe_key(event_type: str, details: dict[str, Any] | None = None) -> str | None:
+    details = details if isinstance(details, dict) else {}
+    for key in ("event_id", "dedupe_key"):
+        value = details.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 def normalize_runtime_event_to_telemetry(
     event: dict[str, Any],
     *,
@@ -400,6 +409,33 @@ def normalize_runtime_event_to_telemetry(
         value = payload.get(key)
         if value is not None:
             details[key] = value
+    request_id = payload.get("request_id")
+    action_id = payload.get("action_id")
+    run_id = event.get("run_id")
+    if source_type == "worker.request.slow":
+        details["request_signal_key"] = request_health_dedupe_key(
+            str(run_id) if run_id is not None else None,
+            str(request_id) if request_id is not None else None,
+            str(action_id) if action_id is not None else None,
+            "slow",
+            str(payload.get("status") or payload.get("age_seconds") or payload.get("updated_at") or ""),
+        )
+    elif source_type == "worker.request.stuck":
+        details["request_signal_key"] = request_health_dedupe_key(
+            str(run_id) if run_id is not None else None,
+            str(request_id) if request_id is not None else None,
+            str(action_id) if action_id is not None else None,
+            "stuck",
+            str(payload.get("status") or payload.get("age_seconds") or payload.get("updated_at") or ""),
+        )
+    elif source_type == "worker.request.recovered":
+        details["request_signal_key"] = request_health_dedupe_key(
+            str(run_id) if run_id is not None else None,
+            str(request_id) if request_id is not None else None,
+            str(action_id) if action_id is not None else None,
+            "recovered",
+            str(payload.get("status") or payload.get("age_seconds") or payload.get("updated_at") or ""),
+        )
     severity = event.get("severity")
     status = str(severity).lower() if isinstance(severity, str) else None
     timestamp = event.get("timestamp")
@@ -418,6 +454,131 @@ def normalize_runtime_event_to_telemetry(
         "details": details,
         "timestamp": parsed_timestamp,
     }
+
+
+def request_health_delay_reason(reason: str | None) -> bool:
+    lowered = (reason or "").strip().lower()
+    return any(token in lowered for token in ("slow", "delay", "stuck", "timeout", "retry", "backoff"))
+
+
+def request_health_dedupe_key(
+    run_id: str | None,
+    request_id: str | None,
+    action_id: str | None,
+    health_state: str,
+    marker: str | None,
+    *,
+    suffix: str | None = None,
+) -> str:
+    stable_id = action_id or request_id or "unknown-request"
+    stable_marker = marker or "unknown-marker"
+    base = f"{run_id or 'unknown-run'}:{stable_id}:{health_state}:{stable_marker}"
+    return f"{base}:{suffix}" if suffix else base
+
+
+def normalize_worker_request_health_to_telemetry(
+    health_view: dict[str, Any],
+    *,
+    project_alias: str,
+    project_id: str | None,
+    run_id: str,
+) -> list[dict[str, Any]]:
+    request = health_view.get("request")
+    request = request if isinstance(request, dict) else {}
+    result = health_view.get("result")
+    result = result if isinstance(result, dict) else {}
+    health_state = str(health_view.get("health_state") or "").strip().lower()
+    if not health_state:
+        return []
+
+    status_reason = request.get("status_reason")
+    request_id = str(request.get("request_id") or "") or None
+    action_id = str(request.get("action_id") or "") or None
+    worker_id = str(request.get("worker_id") or result.get("worker_id") or "") or None
+    action = str(request.get("action") or result.get("action") or "") or None
+    session_id = str(request.get("session_id") or result.get("session_id") or "") or None
+    marker = str(
+        request.get("updated_at")
+        or request.get("completed_at")
+        or result.get("completed_at")
+        or request.get("started_at")
+        or request.get("created_at")
+        or ""
+    ) or None
+    status_value = str(request.get("status") or result.get("status") or health_state or "observed")
+    timestamp_raw = request.get("updated_at") or request.get("completed_at") or result.get("completed_at")
+    parsed_timestamp = None
+    if isinstance(timestamp_raw, str):
+        try:
+            parsed_timestamp = datetime.fromisoformat(timestamp_raw)
+        except ValueError:
+            parsed_timestamp = None
+
+    details = {
+        "request_id": request_id,
+        "action_id": action_id,
+        "action": action,
+        "worker_id": worker_id,
+        "session_id": session_id,
+        "health_state": health_state,
+        "has_result": bool(health_view.get("has_result")),
+        "is_active": bool(health_view.get("is_active")),
+        "total_age_seconds": health_view.get("total_age_seconds"),
+        "execution_age_seconds": health_view.get("execution_age_seconds"),
+        "progress_age_seconds": health_view.get("progress_age_seconds"),
+        "status_reason": status_reason,
+        "updated_at": request.get("updated_at"),
+        "completed_at": request.get("completed_at") or result.get("completed_at"),
+    }
+
+    events: list[dict[str, Any]] = []
+    mapped_type = {
+        "slow": "browser.request_health.slow",
+        "stuck": "browser.request_health.stuck",
+        "recovered": "browser.request_health.recovered",
+    }.get(health_state)
+    if mapped_type is not None:
+        event_details = dict(details)
+        event_details["dedupe_key"] = request_health_dedupe_key(run_id, request_id, action_id, health_state, marker)
+        events.append(
+            {
+                "event_type": mapped_type,
+                "project_alias": project_alias,
+                "project_id": project_id,
+                "run_id": run_id,
+                "status": status_value,
+                "details": event_details,
+                "timestamp": parsed_timestamp,
+            }
+        )
+
+    completed_after_slow = bool(health_view.get("has_result")) and (
+        health_state in {"slow", "recovered"}
+        or request_health_delay_reason(status_reason)
+        or (isinstance(details["total_age_seconds"], (int, float)) and float(details["total_age_seconds"]) >= 30.0)
+    )
+    if completed_after_slow:
+        event_details = dict(details)
+        event_details["dedupe_key"] = request_health_dedupe_key(
+            run_id,
+            request_id,
+            action_id,
+            "completed_after_slow",
+            marker,
+            suffix="completed-after-slow",
+        )
+        events.append(
+            {
+                "event_type": "browser.request_health.completed_after_slow",
+                "project_alias": project_alias,
+                "project_id": project_id,
+                "run_id": run_id,
+                "status": status_value,
+                "details": event_details,
+                "timestamp": parsed_timestamp,
+            }
+        )
+    return events
 
 
 def load_telemetry_events_since(since: datetime) -> list[dict[str, Any]]:
@@ -728,6 +889,21 @@ class PlatformAPI:
 
     def get_run_events(self, run_id: str) -> list[dict[str, Any]]:
         response = self._request("GET", f"/api/runs/{run_id}/events")
+        return list(response.json())
+
+    def get_run_worker_requests(
+        self,
+        run_id: str,
+        *,
+        session_id: str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, str] = {}
+        if session_id:
+            params["session_id"] = session_id
+        if status:
+            params["status"] = status
+        response = self._request("GET", f"/api/runs/{run_id}/worker-requests", params=params or None)
         return list(response.json())
 
     def get_agent_status(self, agent_id: str) -> dict[str, object]:
@@ -1052,13 +1228,15 @@ def browser_errors_by_category(
         event_type = str(event.get("event_type"))
         if event_type in {"browser.error", "browser.retry"}:
             bucket = browser_error_category_from_payload(event.get("details", {}))
-        elif event_type == "browser.request_slow":
-            bucket = "browser issue"
-        elif event_type == "browser.request_stuck":
-            bucket = "scheduler issue"
-        else:
-            continue
-        counts[bucket] = counts.get(bucket, 0) + 1
+            counts[bucket] = counts.get(bucket, 0) + 1
+    counts["browser issue"] = counts.get("browser issue", 0) + count_unique_request_signals(
+        telemetry_events,
+        {"browser.request_slow", "browser.request_health.slow", "browser.request_health.completed_after_slow"},
+    )
+    counts["scheduler issue"] = counts.get("scheduler issue", 0) + count_unique_request_signals(
+        telemetry_events,
+        {"browser.request_stuck", "browser.request_health.stuck", "browser.request_health.recovered"},
+    )
     return counts
 
 
@@ -1076,11 +1254,135 @@ def count_unique_telemetry_events(telemetry_events: list[dict[str, Any]], *event
             continue
         details = event.get("details")
         details = details if isinstance(details, dict) else {}
-        event_id = details.get("event_id")
+        event_id = telemetry_dedupe_key(str(event.get("event_type")), details)
         if isinstance(event_id, str) and event_id:
             if event_id in seen_ids:
                 continue
             seen_ids.add(event_id)
+        count += 1
+    return count
+
+
+def unique_telemetry_events(telemetry_events: list[dict[str, Any]], *event_types: str) -> list[dict[str, Any]]:
+    wanted = set(event_types)
+    seen_ids: set[str] = set()
+    unique: list[dict[str, Any]] = []
+    for event in telemetry_events:
+        if wanted and str(event.get("event_type")) not in wanted:
+            continue
+        details = event.get("details")
+        details = details if isinstance(details, dict) else {}
+        event_id = telemetry_dedupe_key(str(event.get("event_type")), details)
+        if isinstance(event_id, str) and event_id:
+            if event_id in seen_ids:
+                continue
+            seen_ids.add(event_id)
+        unique.append(event)
+    return unique
+
+
+def count_stale_ownership_incidents(
+    run_blobs: list[str],
+    audit_blobs: list[str],
+    telemetry_events: list[dict[str, Any]],
+) -> int:
+    explicit_tokens = [
+        "stale ownership",
+        "ownership stale",
+        "worker.ownership.stale",
+        "lease expired",
+        "worker lease expired",
+    ]
+    total = sum(any(token in blob for token in explicit_tokens) for blob in run_blobs + audit_blobs)
+    total += count_unique_telemetry_events(telemetry_events, "scheduler.stale_ownership")
+    total += count_unique_telemetry_events(
+        [
+            event
+            for event in telemetry_events
+            if str(event.get("event_type")) == "scheduler.loop_error"
+            and any(token in lower_blob(event.get("details", {})) for token in explicit_tokens)
+        ],
+        "scheduler.loop_error",
+    )
+    return total
+
+
+def request_health_summary(telemetry_events: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {
+        "slow": 0,
+        "stuck": 0,
+        "recovered": 0,
+        "completed_after_slow": 0,
+        "unresolved": 0,
+    }
+    for event in unique_telemetry_events(
+        telemetry_events,
+        "browser.request_health.slow",
+        "browser.request_health.stuck",
+        "browser.request_health.recovered",
+        "browser.request_health.completed_after_slow",
+    ):
+        event_type = str(event.get("event_type"))
+        details = event.get("details")
+        details = details if isinstance(details, dict) else {}
+        if event_type == "browser.request_health.slow":
+            counts["slow"] += 1
+        elif event_type == "browser.request_health.stuck":
+            counts["stuck"] += 1
+            if details.get("is_active") and not details.get("has_result"):
+                counts["unresolved"] += 1
+        elif event_type == "browser.request_health.recovered":
+            counts["recovered"] += 1
+        elif event_type == "browser.request_health.completed_after_slow":
+            counts["completed_after_slow"] += 1
+    return counts
+
+
+def request_signal_identity(event: dict[str, Any]) -> str | None:
+    event_type = str(event.get("event_type") or "")
+    details = event.get("details")
+    details = details if isinstance(details, dict) else {}
+    signal_key = details.get("request_signal_key")
+    if isinstance(signal_key, str) and signal_key:
+        return signal_key
+    dedupe_key = details.get("dedupe_key")
+    if isinstance(dedupe_key, str) and dedupe_key:
+        return dedupe_key
+    run_id = event.get("run_id")
+    action_id = details.get("action_id")
+    request_id = details.get("request_id")
+    marker = details.get("updated_at") or details.get("completed_at") or details.get("status_reason")
+    if event_type in {"browser.request_slow", "browser.request_health.slow"}:
+        return request_health_dedupe_key(str(run_id) if run_id is not None else None, request_id, action_id, "slow", str(marker or ""))
+    if event_type in {"browser.request_stuck", "browser.request_health.stuck"}:
+        return request_health_dedupe_key(str(run_id) if run_id is not None else None, request_id, action_id, "stuck", str(marker or ""))
+    if event_type in {"scheduler.request_recovered", "browser.request_health.recovered"}:
+        return request_health_dedupe_key(str(run_id) if run_id is not None else None, request_id, action_id, "recovered", str(marker or ""))
+    return None
+
+
+def count_unique_request_signals(telemetry_events: list[dict[str, Any]], event_types: set[str]) -> int:
+    count = 0
+    seen_signals: set[str] = set()
+    seen_events: set[str] = set()
+    for event in telemetry_events:
+        event_type = str(event.get("event_type") or "")
+        if event_type not in event_types:
+            continue
+        signal_id = request_signal_identity(event)
+        if signal_id:
+            if signal_id in seen_signals:
+                continue
+            seen_signals.add(signal_id)
+            count += 1
+            continue
+        details = event.get("details")
+        details = details if isinstance(details, dict) else {}
+        event_id = telemetry_dedupe_key(event_type, details)
+        if event_id:
+            if event_id in seen_events:
+                continue
+            seen_events.add(event_id)
         count += 1
     return count
 
@@ -1106,8 +1408,7 @@ def compute_project_metrics(
     session_restore_failures = sum(any(token in blob for token in ["session restore", "session_restore", "restore failed"]) for blob in run_blobs + audit_blobs)
     duplicate_result_recoveries = sum(any(token in blob for token in ["duplicate", "idempotent", "recovered duplicate"]) for blob in run_blobs + audit_blobs)
     duplicate_result_recoveries += count_unique_telemetry_events(telemetry_events, "scheduler.result_replayed")
-    stale_ownership_incidents = sum(is_stale_ownership_signal(blob) for blob in run_blobs + audit_blobs)
-    stale_ownership_incidents += count_unique_telemetry_events(telemetry_events, "scheduler.stale_ownership")
+    stale_ownership_incidents = count_stale_ownership_incidents(run_blobs, audit_blobs, telemetry_events)
 
     failure_rate = (failed / started) if started else 0.0
     classifications = {bucket: 0 for bucket in FAILURE_BUCKETS}
@@ -1121,11 +1422,11 @@ def compute_project_metrics(
     a2a_sent = sum(1 for event in telemetry_events if str(event.get("event_type")) == "a2a.sent")
     a2a_succeeded = sum(1 for event in telemetry_events if str(event.get("event_type")) == "a2a.succeeded")
     a2a_failed = sum(1 for event in telemetry_events if str(event.get("event_type")) == "a2a.failed")
-    scheduler_recoveries = count_unique_telemetry_events(
+    scheduler_recoveries = count_unique_request_signals(
         telemetry_events,
-        "scheduler.recovered",
-        "scheduler.request_recovered",
+        {"scheduler.request_recovered", "browser.request_health.recovered"},
     )
+    scheduler_recoveries += count_unique_telemetry_events(telemetry_events, "scheduler.recovered")
     scheduler_recoveries += count_matching_audit_logs(audit_logs, "run.requeued", "run.recovered", "worker.request.recovered", "worker.result.replayed")
     plugin_denials = sum(
         1
@@ -1138,6 +1439,7 @@ def compute_project_metrics(
         )
     )
     plugin_denials += sum(1 for event in telemetry_events if str(event.get("event_type")) == "plugin.denial")
+    request_health = request_health_summary(telemetry_events)
 
     return {
         "project_alias": project_alias,
@@ -1157,6 +1459,7 @@ def compute_project_metrics(
         "plugin_denials": plugin_denials,
         "average_run_latency_seconds": round(sum(latencies) / len(latencies), 2) if latencies else 0.0,
         "per_project_failure_rate": round(failure_rate, 4),
+        "request_health_summary": request_health,
         "failure_classification": classifications,
         "browser_errors_by_category": browser_categories,
         "intervention_count_by_reason": intervention_reasons,
@@ -1174,6 +1477,13 @@ def overall_metrics(project_snapshots: list[dict[str, Any]]) -> dict[str, Any]:
     intervention_reasons: dict[str, int] = {}
     agent_outcomes: dict[str, dict[str, float | int]] = {}
     intervention_agents: dict[str, int] = {}
+    request_health_totals = {
+        "slow": 0,
+        "stuck": 0,
+        "recovered": 0,
+        "completed_after_slow": 0,
+        "unresolved": 0,
+    }
     for snapshot in project_snapshots:
         for key in totals:
             totals[key] += int(snapshot.get(key, 0))
@@ -1192,6 +1502,8 @@ def overall_metrics(project_snapshots: list[dict[str, Any]]) -> dict[str, Any]:
             current["runs_failed"] = int(current["runs_failed"]) + int(values.get("runs_failed", 0))
         for agent_id, count in snapshot.get("agents_requiring_intervention", {}).items():
             intervention_agents[agent_id] = intervention_agents.get(agent_id, 0) + int(count)
+        for key, count in snapshot.get("request_health_summary", {}).items():
+            request_health_totals[key] = request_health_totals.get(key, 0) + int(count)
     for values in agent_outcomes.values():
         started = int(values["runs_started"])
         completed = int(values["runs_completed"])
@@ -1205,6 +1517,7 @@ def overall_metrics(project_snapshots: list[dict[str, Any]]) -> dict[str, Any]:
     totals["intervention_count_by_reason"] = dict(sorted(intervention_reasons.items(), key=lambda item: (-item[1], item[0])))
     totals["per_agent_outcomes"] = dict(sorted(agent_outcomes.items()))
     totals["agents_requiring_intervention"] = dict(sorted(intervention_agents.items(), key=lambda item: (-item[1], item[0])))
+    totals["request_health_summary"] = request_health_totals
     return totals
 
 
@@ -1271,6 +1584,51 @@ def sync_project_runtime_events(project_alias: str, since: datetime) -> int:
                     continue
                 record_telemetry_event(**telemetry)
                 recorded += 1
+    return recorded
+
+
+def sync_project_request_health(project_alias: str, since: datetime) -> int:
+    recorded = 0
+    existing = load_telemetry_events_since(since)
+    seen_keys = {
+        key
+        for event in existing
+        for key in [telemetry_dedupe_key(str(event.get("event_type") or ""), event.get("details") if isinstance(event.get("details"), dict) else {})]
+        if key
+    }
+    with build_project_api(project_alias) as api:
+        runs = filter_runs_since(api.list_runs(), since)
+        for run in runs:
+            try:
+                health_views = api.get_run_worker_requests(run.run_id)
+            except (httpx.HTTPStatusError, PermissionError) as exc:
+                record_telemetry_event(
+                    "worker_request_health.unavailable",
+                    project_alias=project_alias,
+                    project_id=api.project_id,
+                    run_id=run.run_id,
+                    status="degraded",
+                    details={"error": str(exc)},
+                )
+                continue
+            for view in health_views:
+                normalized = normalize_worker_request_health_to_telemetry(
+                    view,
+                    project_alias=project_alias,
+                    project_id=api.project_id,
+                    run_id=run.run_id,
+                )
+                for telemetry in normalized:
+                    dedupe_key = telemetry_dedupe_key(
+                        str(telemetry.get("event_type") or ""),
+                        telemetry.get("details") if isinstance(telemetry.get("details"), dict) else {},
+                    )
+                    if dedupe_key and dedupe_key in seen_keys:
+                        continue
+                    if dedupe_key:
+                        seen_keys.add(dedupe_key)
+                    record_telemetry_event(**telemetry)
+                    recorded += 1
     return recorded
 
 

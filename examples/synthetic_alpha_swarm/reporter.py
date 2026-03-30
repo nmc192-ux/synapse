@@ -18,6 +18,7 @@ from common import (
     role_project_alias,
     run_forever,
     safe_list_audit_logs,
+    sync_project_request_health,
     sync_project_runtime_events,
     start_role_a2a_listener,
     timestamp_slug,
@@ -48,6 +49,7 @@ def collect_metrics(window_label: str) -> tuple[list[dict[str, object]], dict[st
     since = window_start_for(window_label)
     for alias in ("steady", "chaos"):
         sync_project_runtime_events(alias, since)
+        sync_project_request_health(alias, since)
     telemetry_events = load_telemetry_events_since(since)
     for alias in ("steady", "chaos"):
         with build_project_api(alias) as api:
@@ -87,6 +89,13 @@ def build_daily_report(projects: list[dict[str, object]], summary: dict[str, obj
         f"- Plugin denials: {summary['plugin_denials']}",
         f"- Average run latency (s): {summary['average_run_latency_seconds']}",
         "",
+        "## Durable Request Health",
+        f"- Slow requests observed: {summary['request_health_summary']['slow']}",
+        f"- Stuck requests observed: {summary['request_health_summary']['stuck']}",
+        f"- Recovered requests observed: {summary['request_health_summary']['recovered']}",
+        f"- Completed after slow/stuck: {summary['request_health_summary']['completed_after_slow']}",
+        f"- Unresolved active requests: {summary['request_health_summary']['unresolved']}",
+        "",
         "## Browser Errors By Category",
     ]
     for bucket, count in summary["browser_errors_by_category"].items():
@@ -125,6 +134,7 @@ def build_daily_report(projects: list[dict[str, object]], summary: dict[str, obj
                 f"- Plugin denials: {project['plugin_denials']}",
                 f"- Average run latency (s): {project['average_run_latency_seconds']}",
                 f"- Failure rate: {project['per_project_failure_rate']:.2%}",
+                f"- Request health slow/stuck/recovered/completed-after-slow/unresolved: {project['request_health_summary']['slow']}/{project['request_health_summary']['stuck']}/{project['request_health_summary']['recovered']}/{project['request_health_summary']['completed_after_slow']}/{project['request_health_summary']['unresolved']}",
             ]
         )
     return "\n".join(lines).strip() + "\n"
@@ -145,6 +155,7 @@ def build_weekly_review(projects: list[dict[str, object]], summary: dict[str, ob
         f"- Total interventions this week: {summary['intervention_count']}",
         f"- Total A2A failures this week: {summary['a2a_messages_failed']}",
         f"- Mean run latency (s): {summary['average_run_latency_seconds']}",
+        f"- Active unresolved request-health signals: {summary['request_health_summary']['unresolved']}",
         "",
         "## Key Risks",
         f"- Browser issues: {summary['failure_classification'].get('browser issue', 0)}",
@@ -159,6 +170,13 @@ def build_weekly_review(projects: list[dict[str, object]], summary: dict[str, ob
         "",
         "## Agents Requiring Most Intervention",
         *[f"- {agent_id}: {count} interventions" for agent_id, count in intervention_heavy],
+        "",
+        "## Durable Request Health",
+        f"- Slow: {summary['request_health_summary']['slow']}",
+        f"- Stuck: {summary['request_health_summary']['stuck']}",
+        f"- Recovered: {summary['request_health_summary']['recovered']}",
+        f"- Completed after slow/stuck: {summary['request_health_summary']['completed_after_slow']}",
+        f"- Unresolved: {summary['request_health_summary']['unresolved']}",
         "",
         "## Recommendations",
         "- Increase attention on the highest-volume failure bucket before widening alpha scope.",
@@ -188,6 +206,7 @@ def build_dashboard_html(daily_summary: dict[str, object], weekly_summary: dict[
         "<div class='grid'>"
         f"<section class='card'><h2>Daily Summary</h2><p>Runs started: {daily_summary['runs_started']}</p><p>Runs failed: {daily_summary['runs_failed']}</p><p>A2A failures: {daily_summary['a2a_messages_failed']}</p><p>Avg latency: {daily_summary['average_run_latency_seconds']}s</p></section>"
         f"<section class='card'><h2>Weekly Summary</h2><p>Runs started: {weekly_summary['runs_started']}</p><p>Runs failed: {weekly_summary['runs_failed']}</p><p>Interventions: {weekly_summary['intervention_count']}</p><p>Plugin denials: {weekly_summary['plugin_denials']}</p></section>"
+        f"<section class='card'><h2>Request Health</h2><p>Slow: {daily_summary['request_health_summary']['slow']}</p><p>Stuck: {daily_summary['request_health_summary']['stuck']}</p><p>Recovered: {daily_summary['request_health_summary']['recovered']}</p><p>Completed after slow: {daily_summary['request_health_summary']['completed_after_slow']}</p><p>Unresolved: {daily_summary['request_health_summary']['unresolved']}</p></section>"
         f"<section class='card'><h2>Top Failure Categories</h2><ul>{top_failures}</ul></section>"
         f"<section class='card'><h2>Agents Requiring Intervention</h2><ul>{top_agents}</ul></section>"
         "</div></body></html>"
@@ -213,6 +232,13 @@ def fixture_project_summary(project_alias: str, started: int, completed: int, fa
         "plugin_denials": 0 if project_alias == "steady" else 1,
         "average_run_latency_seconds": 43.8 if project_alias == "steady" else 51.2,
         "per_project_failure_rate": 0.125 if project_alias == "steady" else 0.2143,
+        "request_health_summary": {
+            "slow": 2 if project_alias == "steady" else 1,
+            "stuck": 1,
+            "recovered": 1 if project_alias == "steady" else 0,
+            "completed_after_slow": 1,
+            "unresolved": 0 if project_alias == "steady" else 1,
+        },
         "failure_classification": {
             "browser issue": 2 if project_alias == "steady" else 1,
             "scheduler issue": 1 if project_alias == "steady" else 2,

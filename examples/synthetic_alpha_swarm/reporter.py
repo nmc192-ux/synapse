@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from common import (
     FAILURE_BUCKETS,
+    assess_project_alpha_gate,
     build_agent_definition,
     build_project_admin_api,
     build_project_api,
@@ -66,11 +67,20 @@ def collect_metrics(window_label: str) -> tuple[list[dict[str, object]], dict[st
 
 
 def build_daily_report(projects: list[dict[str, object]], summary: dict[str, object]) -> str:
+    alpha_gate = summary["alpha_gate"]
     lines = [
         "# Synthetic Alpha Daily Report",
         "",
         f"Generated: {utc_now().isoformat()}",
         f"Window start: {window_start_for('daily').isoformat()}",
+        "",
+        "## Alpha Gate Recommendation",
+        f"- Recommendation: {alpha_gate['recommendation']}",
+        f"- Safe degraded recoveries: {alpha_gate['safe_degraded_recoveries']}",
+        f"- Unsafe failures: {alpha_gate['unsafe_failures']}",
+        f"- Manual interventions: {alpha_gate['manual_interventions']}",
+        "- Reasons:",
+        *[f"  - {reason}" for reason in alpha_gate["reasons"]],
         "",
         "## Fleet Summary",
         f"- Runs started: {summary['runs_started']}",
@@ -116,10 +126,13 @@ def build_daily_report(projects: list[dict[str, object]], summary: dict[str, obj
     for agent_id, count in summary["agents_requiring_intervention"].items():
         lines.append(f"- {agent_id}: {count}")
     for project in projects:
+        project_gate = project["alpha_gate"]
         lines.extend(
             [
                 "",
                 f"## Project {project['project_alias']}",
+                f"- Alpha gate recommendation: {project_gate['recommendation']}",
+                f"- Alpha gate safe degraded / unsafe / manual: {project_gate['safe_degraded_recoveries']}/{project_gate['unsafe_failures']}/{project_gate['manual_interventions']}",
                 f"- Runs started: {project['runs_started']}",
                 f"- Runs completed: {project['runs_completed']}",
                 f"- Runs failed: {project['runs_failed']}",
@@ -135,12 +148,14 @@ def build_daily_report(projects: list[dict[str, object]], summary: dict[str, obj
                 f"- Average run latency (s): {project['average_run_latency_seconds']}",
                 f"- Failure rate: {project['per_project_failure_rate']:.2%}",
                 f"- Request health slow/stuck/recovered/completed-after-slow/unresolved: {project['request_health_summary']['slow']}/{project['request_health_summary']['stuck']}/{project['request_health_summary']['recovered']}/{project['request_health_summary']['completed_after_slow']}/{project['request_health_summary']['unresolved']}",
+                f"- Alpha gate reasons: {', '.join(project_gate['reasons'])}",
             ]
         )
     return "\n".join(lines).strip() + "\n"
 
 
 def build_weekly_review(projects: list[dict[str, object]], summary: dict[str, object]) -> str:
+    alpha_gate = summary["alpha_gate"]
     top_regressions = sorted(summary["failure_classification"].items(), key=lambda item: (-item[1], item[0]))[:3]
     intervention_heavy = list(summary["agents_requiring_intervention"].items())[:5]
     lines = [
@@ -150,6 +165,7 @@ def build_weekly_review(projects: list[dict[str, object]], summary: dict[str, ob
         f"Window start: {window_start_for('weekly').isoformat()}",
         "",
         "## Executive Summary",
+        f"- Alpha gate recommendation: {alpha_gate['recommendation']}",
         f"- Total runs started this week: {summary['runs_started']}",
         f"- Total failures this week: {summary['runs_failed']}",
         f"- Total interventions this week: {summary['intervention_count']}",
@@ -179,31 +195,33 @@ def build_weekly_review(projects: list[dict[str, object]], summary: dict[str, ob
         f"- Unresolved: {summary['request_health_summary']['unresolved']}",
         "",
         "## Recommendations",
-        "- Increase attention on the highest-volume failure bucket before widening alpha scope.",
-        "- Review hourly session-restore and delegated-run workloads for repeat regressions.",
-        "- Keep chaos scenarios focused on policy-safe and auth-safe boundary conditions.",
+        *[f"- {reason}" for reason in alpha_gate["reasons"]],
         "",
         "## Project Notes",
     ]
     for project in projects:
+        project_gate = project["alpha_gate"]
         lines.append(
-            f"- {project['project_alias']}: failure rate {project['per_project_failure_rate']:.2%}, avg latency {project['average_run_latency_seconds']}s, interventions {project['intervention_count']}"
+            f"- {project['project_alias']}: recommendation {project_gate['recommendation']}, failure rate {project['per_project_failure_rate']:.2%}, avg latency {project['average_run_latency_seconds']}s, interventions {project['intervention_count']}"
         )
     return "\n".join(lines).strip() + "\n"
 
 
 def build_dashboard_html(daily_summary: dict[str, object], weekly_summary: dict[str, object]) -> str:
+    daily_gate = daily_summary["alpha_gate"]
     top_failures = "".join(
         f"<li><strong>{bucket}</strong>: {count}</li>" for bucket, count in daily_summary["failure_classification"].items()
     )
     top_agents = "".join(
         f"<li><strong>{agent}</strong>: {count} interventions</li>" for agent, count in daily_summary["agents_requiring_intervention"].items()
     )
+    gate_reasons = "".join(f"<li>{reason}</li>" for reason in daily_gate["reasons"])
     return (
         "<!doctype html><html><head><meta charset='utf-8'><title>Synthetic Alpha Review</title>"
         "<style>body{font-family:ui-sans-serif,system-ui;margin:32px;background:#f5f0e8;color:#17212b}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px}.card{background:white;border-radius:16px;padding:18px;box-shadow:0 10px 30px rgba(0,0,0,.08)}h1,h2{margin:0 0 12px}ul{padding-left:18px}</style></head><body>"
         f"<h1>Synthetic Alpha Review</h1><p>Generated {utc_now().isoformat()}</p>"
         "<div class='grid'>"
+        f"<section class='card'><h2>Alpha Gate</h2><p>Recommendation: {daily_gate['recommendation']}</p><p>Safe degraded: {daily_gate['safe_degraded_recoveries']}</p><p>Unsafe: {daily_gate['unsafe_failures']}</p><p>Manual: {daily_gate['manual_interventions']}</p><ul>{gate_reasons}</ul></section>"
         f"<section class='card'><h2>Daily Summary</h2><p>Runs started: {daily_summary['runs_started']}</p><p>Runs failed: {daily_summary['runs_failed']}</p><p>A2A failures: {daily_summary['a2a_messages_failed']}</p><p>Avg latency: {daily_summary['average_run_latency_seconds']}s</p></section>"
         f"<section class='card'><h2>Weekly Summary</h2><p>Runs started: {weekly_summary['runs_started']}</p><p>Runs failed: {weekly_summary['runs_failed']}</p><p>Interventions: {weekly_summary['intervention_count']}</p><p>Plugin denials: {weekly_summary['plugin_denials']}</p></section>"
         f"<section class='card'><h2>Request Health</h2><p>Slow: {daily_summary['request_health_summary']['slow']}</p><p>Stuck: {daily_summary['request_health_summary']['stuck']}</p><p>Recovered: {daily_summary['request_health_summary']['recovered']}</p><p>Completed after slow: {daily_summary['request_health_summary']['completed_after_slow']}</p><p>Unresolved: {daily_summary['request_health_summary']['unresolved']}</p></section>"
@@ -214,7 +232,7 @@ def build_dashboard_html(daily_summary: dict[str, object], weekly_summary: dict[
 
 
 def fixture_project_summary(project_alias: str, started: int, completed: int, failed: int, interventions: int) -> dict[str, object]:
-    return {
+    snapshot = {
         "project_alias": project_alias,
         "runs_started": started,
         "runs_completed": completed,
@@ -273,6 +291,8 @@ def fixture_project_summary(project_alias: str, started: int, completed: int, fa
         },
         "agents_requiring_intervention": {f"synthetic-alpha-{project_alias}-agent": interventions},
     }
+    snapshot["alpha_gate"] = assess_project_alpha_gate(snapshot)
+    return snapshot
 
 
 def write_example_reports() -> dict[str, dict[str, str]]:

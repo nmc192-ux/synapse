@@ -102,6 +102,19 @@ METRIC_KEYS = [
     "per_project_failure_rate",
 ]
 
+ALPHA_GATE_THRESHOLDS = {
+    "hold_failure_rate": 0.15,
+    "hold_unresolved_requests": 1,
+    "hold_stale_ownership_incidents": 5,
+    "hold_browser_crash_count": 3,
+    "hold_plugin_denials": 1,
+    "continue_failure_rate": 0.05,
+    "continue_average_latency_seconds": 120.0,
+    "continue_scheduler_recoveries": 5,
+    "expand_average_latency_seconds": 75.0,
+    "expand_stale_ownership_incidents": 1,
+}
+
 SCHEDULE_WINDOWS = {
     "quarter_hourly": 15 * 60,
     "hourly": 60 * 60,
@@ -1440,8 +1453,7 @@ def compute_project_metrics(
     )
     plugin_denials += sum(1 for event in telemetry_events if str(event.get("event_type")) == "plugin.denial")
     request_health = request_health_summary(telemetry_events)
-
-    return {
+    snapshot = {
         "project_alias": project_alias,
         "runs_started": started,
         "runs_completed": completed,
@@ -1466,6 +1478,77 @@ def compute_project_metrics(
         "per_agent_outcomes": agent_outcomes,
         "agents_requiring_intervention": intervention_agents,
     }
+    snapshot["alpha_gate"] = assess_project_alpha_gate(snapshot)
+    return snapshot
+
+
+def assess_project_alpha_gate(snapshot: dict[str, Any]) -> dict[str, Any]:
+    request_health = snapshot.get("request_health_summary", {})
+    unresolved = int(request_health.get("unresolved", 0))
+    stuck = int(request_health.get("stuck", 0))
+    recovered = int(request_health.get("recovered", 0))
+    completed_after_slow = int(request_health.get("completed_after_slow", 0))
+    safe_degraded_recoveries = (
+        int(snapshot.get("scheduler_recovery_events", 0))
+        + int(snapshot.get("duplicate_result_recoveries", 0))
+        + recovered
+        + completed_after_slow
+    )
+    unsafe_failures = (
+        int(snapshot.get("runs_failed", 0))
+        + int(snapshot.get("plugin_denials", 0))
+        + unresolved
+        + max(0, stuck - recovered)
+    )
+    reasons: list[str] = []
+    recommendation = "continue"
+    failure_rate = float(snapshot.get("per_project_failure_rate", 0.0))
+    stale_ownership = int(snapshot.get("stale_ownership_incidents", 0))
+    browser_crash_count = int(snapshot.get("browser_crash_count", 0))
+    plugin_denials = int(snapshot.get("plugin_denials", 0))
+    average_latency = float(snapshot.get("average_run_latency_seconds", 0.0))
+    scheduler_recoveries = int(snapshot.get("scheduler_recovery_events", 0))
+
+    if plugin_denials >= int(ALPHA_GATE_THRESHOLDS["hold_plugin_denials"]):
+        reasons.append("plugin policy denials observed")
+    if unresolved >= int(ALPHA_GATE_THRESHOLDS["hold_unresolved_requests"]):
+        reasons.append("unresolved browser request health signals observed")
+    if failure_rate >= float(ALPHA_GATE_THRESHOLDS["hold_failure_rate"]):
+        reasons.append("failure rate exceeded restricted alpha hold threshold")
+    if stale_ownership >= int(ALPHA_GATE_THRESHOLDS["hold_stale_ownership_incidents"]):
+        reasons.append("stale ownership incidents exceeded hold threshold")
+    if browser_crash_count >= int(ALPHA_GATE_THRESHOLDS["hold_browser_crash_count"]):
+        reasons.append("browser crash count exceeded hold threshold")
+
+    if reasons:
+        recommendation = "hold"
+    else:
+        if (
+            failure_rate <= float(ALPHA_GATE_THRESHOLDS["continue_failure_rate"])
+            and average_latency <= float(ALPHA_GATE_THRESHOLDS["expand_average_latency_seconds"])
+            and stale_ownership <= int(ALPHA_GATE_THRESHOLDS["expand_stale_ownership_incidents"])
+            and unresolved == 0
+            and plugin_denials == 0
+        ):
+            recommendation = "expand"
+            reasons.append("request health and reliability signals are within expansion thresholds")
+        else:
+            if average_latency > float(ALPHA_GATE_THRESHOLDS["continue_average_latency_seconds"]):
+                reasons.append("average latency remains above continue target")
+            if scheduler_recoveries > int(ALPHA_GATE_THRESHOLDS["continue_scheduler_recoveries"]):
+                reasons.append("scheduler recovery rate remains elevated")
+            if stale_ownership > 0:
+                reasons.append("stale ownership still requires monitoring")
+            if not reasons:
+                reasons.append("restricted alpha reliability remains within continue thresholds")
+
+    return {
+        "recommendation": recommendation,
+        "safe_degraded_recoveries": safe_degraded_recoveries,
+        "unsafe_failures": unsafe_failures,
+        "manual_interventions": int(snapshot.get("intervention_count", 0)),
+        "reasons": reasons,
+    }
 
 
 def overall_metrics(project_snapshots: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1484,6 +1567,7 @@ def overall_metrics(project_snapshots: list[dict[str, Any]]) -> dict[str, Any]:
         "completed_after_slow": 0,
         "unresolved": 0,
     }
+    alpha_gate_projects: dict[str, dict[str, Any]] = {}
     for snapshot in project_snapshots:
         for key in totals:
             totals[key] += int(snapshot.get(key, 0))
@@ -1504,6 +1588,7 @@ def overall_metrics(project_snapshots: list[dict[str, Any]]) -> dict[str, Any]:
             intervention_agents[agent_id] = intervention_agents.get(agent_id, 0) + int(count)
         for key, count in snapshot.get("request_health_summary", {}).items():
             request_health_totals[key] = request_health_totals.get(key, 0) + int(count)
+        alpha_gate_projects[str(snapshot.get("project_alias"))] = dict(snapshot.get("alpha_gate", {}))
     for values in agent_outcomes.values():
         started = int(values["runs_started"])
         completed = int(values["runs_completed"])
@@ -1518,7 +1603,42 @@ def overall_metrics(project_snapshots: list[dict[str, Any]]) -> dict[str, Any]:
     totals["per_agent_outcomes"] = dict(sorted(agent_outcomes.items()))
     totals["agents_requiring_intervention"] = dict(sorted(intervention_agents.items(), key=lambda item: (-item[1], item[0])))
     totals["request_health_summary"] = request_health_totals
+    totals["alpha_gate"] = assess_overall_alpha_gate(project_snapshots, alpha_gate_projects)
     return totals
+
+
+def assess_overall_alpha_gate(
+    project_snapshots: list[dict[str, Any]],
+    project_assessments: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    assessments = project_assessments or {
+        str(snapshot.get("project_alias")): dict(snapshot.get("alpha_gate", {}))
+        for snapshot in project_snapshots
+    }
+    recommendations = [str(assessment.get("recommendation", "continue")) for assessment in assessments.values()]
+    if any(item == "hold" for item in recommendations):
+        recommendation = "hold"
+    elif recommendations and all(item == "expand" for item in recommendations):
+        recommendation = "expand"
+    else:
+        recommendation = "continue"
+    safe_degraded_recoveries = sum(int(assessment.get("safe_degraded_recoveries", 0)) for assessment in assessments.values())
+    unsafe_failures = sum(int(assessment.get("unsafe_failures", 0)) for assessment in assessments.values())
+    manual_interventions = sum(int(assessment.get("manual_interventions", 0)) for assessment in assessments.values())
+    reasons: list[str] = []
+    for alias, assessment in sorted(assessments.items()):
+        for reason in assessment.get("reasons", []):
+            reasons.append(f"{alias}: {reason}")
+    if not reasons:
+        reasons.append("all projects remain within current restricted alpha thresholds")
+    return {
+        "recommendation": recommendation,
+        "safe_degraded_recoveries": safe_degraded_recoveries,
+        "unsafe_failures": unsafe_failures,
+        "manual_interventions": manual_interventions,
+        "reasons": reasons,
+        "projects": assessments,
+    }
 
 
 def window_start_for(label: str, now: datetime | None = None) -> datetime:

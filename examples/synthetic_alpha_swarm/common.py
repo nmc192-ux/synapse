@@ -382,6 +382,9 @@ def normalize_runtime_event_to_telemetry(
     payload = event.get("payload")
     payload = payload if isinstance(payload, dict) else {}
     details: dict[str, Any] = {"source_event_type": source_type}
+    event_id = event.get("event_id")
+    if isinstance(event_id, str) and event_id:
+        details["event_id"] = event_id
     for key in (
         "worker_id",
         "request_id",
@@ -607,6 +610,13 @@ class ProjectRuntimeEventListener:
             try:
                 with build_project_client(self.project_alias) as client:
                     url = client.build_websocket_url("/api/ws")
+                    record_telemetry_event(
+                        "runtime_feed.connected",
+                        project_alias=self.project_alias,
+                        project_id=creds.project_id,
+                        status="connected",
+                        details={"channel": "/api/ws"},
+                    )
                     with connect(url, open_timeout=15, close_timeout=5, ping_interval=None) as websocket:
                         backoff = 1.0
                         while True:
@@ -1053,6 +1063,24 @@ def count_matching_audit_logs(audit_logs: list[dict[str, Any]], *tokens: str) ->
     return sum(any(token in lower_blob(item) for token in lowered) for item in audit_logs)
 
 
+def count_unique_telemetry_events(telemetry_events: list[dict[str, Any]], *event_types: str) -> int:
+    wanted = set(event_types)
+    seen_ids: set[str] = set()
+    count = 0
+    for event in telemetry_events:
+        if str(event.get("event_type")) not in wanted:
+            continue
+        details = event.get("details")
+        details = details if isinstance(details, dict) else {}
+        event_id = details.get("event_id")
+        if isinstance(event_id, str) and event_id:
+            if event_id in seen_ids:
+                continue
+            seen_ids.add(event_id)
+        count += 1
+    return count
+
+
 def compute_project_metrics(
     project_alias: str,
     runs: list[RunState],
@@ -1073,11 +1101,9 @@ def compute_project_metrics(
     captcha_challenge_count = sum(any(token in blob for token in ["captcha", "challenge", "turnstile"]) for blob in run_blobs + intervention_blobs)
     session_restore_failures = sum(any(token in blob for token in ["session restore", "session_restore", "restore failed"]) for blob in run_blobs + audit_blobs)
     duplicate_result_recoveries = sum(any(token in blob for token in ["duplicate", "idempotent", "recovered duplicate"]) for blob in run_blobs + audit_blobs)
-    duplicate_result_recoveries += sum(
-        1 for event in telemetry_events if str(event.get("event_type")) == "scheduler.result_replayed"
-    )
+    duplicate_result_recoveries += count_unique_telemetry_events(telemetry_events, "scheduler.result_replayed")
     stale_ownership_incidents = sum(is_stale_ownership_signal(blob) for blob in run_blobs + audit_blobs)
-    stale_ownership_incidents += sum(1 for event in telemetry_events if str(event.get("event_type")) == "scheduler.stale_ownership")
+    stale_ownership_incidents += count_unique_telemetry_events(telemetry_events, "scheduler.stale_ownership")
 
     failure_rate = (failed / started) if started else 0.0
     classifications = {bucket: 0 for bucket in FAILURE_BUCKETS}
@@ -1091,10 +1117,10 @@ def compute_project_metrics(
     a2a_sent = sum(1 for event in telemetry_events if str(event.get("event_type")) == "a2a.sent")
     a2a_succeeded = sum(1 for event in telemetry_events if str(event.get("event_type")) == "a2a.succeeded")
     a2a_failed = sum(1 for event in telemetry_events if str(event.get("event_type")) == "a2a.failed")
-    scheduler_recoveries = sum(
-        1
-        for event in telemetry_events
-        if str(event.get("event_type")) in {"scheduler.recovered", "scheduler.request_recovered"}
+    scheduler_recoveries = count_unique_telemetry_events(
+        telemetry_events,
+        "scheduler.recovered",
+        "scheduler.request_recovered",
     )
     scheduler_recoveries += count_matching_audit_logs(audit_logs, "run.requeued", "run.recovered", "worker.request.recovered", "worker.result.replayed")
     plugin_denials = sum(

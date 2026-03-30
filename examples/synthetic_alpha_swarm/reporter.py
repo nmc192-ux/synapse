@@ -6,6 +6,7 @@ from common import (
     build_project_admin_api,
     build_project_api,
     compute_project_metrics,
+    ensure_project_runtime_listener,
     filter_audit_logs_since,
     filter_interventions_since,
     filter_runs_since,
@@ -34,6 +35,11 @@ def ensure_a2a_listener() -> None:
     global _A2A_LISTENER
     if _A2A_LISTENER is None:
         _A2A_LISTENER = start_role_a2a_listener("reporter", "synthetic-alpha-reporter")
+
+
+def ensure_runtime_listeners() -> None:
+    for alias in ("steady", "chaos"):
+        ensure_project_runtime_listener(alias)
 
 
 def collect_metrics(window_label: str) -> tuple[list[dict[str, object]], dict[str, object]]:
@@ -267,6 +273,7 @@ def run_once() -> None:
         ),
     )
     ensure_a2a_listener()
+    ensure_runtime_listeners()
     daily_projects, daily_summary = collect_metrics("daily")
     weekly_projects, weekly_summary = collect_metrics("weekly")
     slug = timestamp_slug()

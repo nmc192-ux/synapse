@@ -130,6 +130,7 @@ def test_record_and_load_telemetry_events(monkeypatch, tmp_path) -> None:
 def test_normalize_runtime_event_to_telemetry_maps_worker_lifecycle_events() -> None:
     telemetry = common.normalize_runtime_event_to_telemetry(
         {
+            'event_id': 'event-1',
             'event_type': 'worker.request.stuck',
             'timestamp': '2026-03-28T00:00:00+00:00',
             'project_id': 'project-1',
@@ -152,9 +153,57 @@ def test_normalize_runtime_event_to_telemetry_maps_worker_lifecycle_events() -> 
     assert telemetry['project_id'] == 'project-1'
     assert telemetry['run_id'] == 'run-1'
     assert telemetry['status'] == 'warning'
+    assert telemetry['details']['event_id'] == 'event-1'
     assert telemetry['details']['source_event_type'] == 'worker.request.stuck'
     assert telemetry['details']['worker_id'] == 'controller-1:browser-worker-1'
     assert telemetry['details']['age_seconds'] == 12.5
+
+
+def test_compute_project_metrics_dedupes_runtime_feed_events_by_event_id() -> None:
+    telemetry_events = [
+        {
+            'event_type': 'scheduler.request_recovered',
+            'project_alias': 'steady',
+            'timestamp': '2026-03-28T00:00:34+00:00',
+            'details': {'event_id': 'evt-1'},
+        },
+        {
+            'event_type': 'scheduler.request_recovered',
+            'project_alias': 'steady',
+            'timestamp': '2026-03-28T00:00:35+00:00',
+            'details': {'event_id': 'evt-1'},
+        },
+        {
+            'event_type': 'scheduler.result_replayed',
+            'project_alias': 'steady',
+            'timestamp': '2026-03-28T00:00:36+00:00',
+            'details': {'event_id': 'evt-2'},
+        },
+        {
+            'event_type': 'scheduler.result_replayed',
+            'project_alias': 'steady',
+            'timestamp': '2026-03-28T00:00:37+00:00',
+            'details': {'event_id': 'evt-2'},
+        },
+        {
+            'event_type': 'scheduler.stale_ownership',
+            'project_alias': 'steady',
+            'timestamp': '2026-03-28T00:00:38+00:00',
+            'details': {'event_id': 'evt-3'},
+        },
+        {
+            'event_type': 'scheduler.stale_ownership',
+            'project_alias': 'steady',
+            'timestamp': '2026-03-28T00:00:39+00:00',
+            'details': {'event_id': 'evt-3'},
+        },
+    ]
+
+    metrics = common.compute_project_metrics('steady', [], [], [], telemetry_events)
+
+    assert metrics['scheduler_recovery_events'] == 1
+    assert metrics['duplicate_result_recoveries'] == 1
+    assert metrics['stale_ownership_incidents'] == 1
 
 
 def test_reporter_outputs_include_review_sections(monkeypatch, tmp_path) -> None:
@@ -170,3 +219,18 @@ def test_reporter_outputs_include_review_sections(monkeypatch, tmp_path) -> None
     assert 'Agents Requiring Intervention' in daily_report
     assert 'Top Regressions' in weekly_report
     assert 'Synthetic Alpha Review' in dashboard
+
+
+def test_reporter_run_once_starts_project_runtime_listeners(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv('SYNTHETIC_ALPHA_SWARM_OUTPUT_DIR', str(tmp_path / 'runtime'))
+    monkeypatch.setenv('SYNTHETIC_ALPHA_SWARM_REPORTS_DIR', str(tmp_path / 'reports'))
+
+    listener_calls: list[str] = []
+    monkeypatch.setattr(reporter, 'register_role_agent', lambda *args, **kwargs: None)
+    monkeypatch.setattr(reporter, 'ensure_a2a_listener', lambda: None)
+    monkeypatch.setattr(reporter, 'ensure_project_runtime_listener', lambda alias: listener_calls.append(alias))
+    monkeypatch.setattr(reporter, 'collect_metrics', lambda window: ([], {'runs_started': 0, 'runs_completed': 0, 'runs_failed': 0, 'intervention_count': 0, 'browser_crash_count': 0, 'captcha_challenge_count': 0, 'session_restore_failures': 0, 'duplicate_result_recoveries': 0, 'stale_ownership_incidents': 0, 'a2a_messages_sent': 0, 'a2a_messages_succeeded': 0, 'a2a_messages_failed': 0, 'scheduler_recovery_events': 0, 'plugin_denials': 0, 'average_run_latency_seconds': 0.0, 'browser_errors_by_category': {bucket: 0 for bucket in reporter.FAILURE_BUCKETS}, 'intervention_count_by_reason': {}, 'per_project_failure_rate': {}, 'failure_classification': {bucket: 0 for bucket in reporter.FAILURE_BUCKETS}, 'per_agent_outcomes': {}, 'agents_requiring_intervention': {}}))
+
+    reporter.run_once()
+
+    assert listener_calls == ['steady', 'chaos']

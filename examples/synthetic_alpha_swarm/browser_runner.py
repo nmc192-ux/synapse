@@ -10,6 +10,7 @@ from common import (
     build_role_client,
     build_run_plan,
     default_safe_urls,
+    ensure_project_runtime_listener,
     env_bool,
     load_json_state,
     register_role_agent,
@@ -123,6 +124,7 @@ def run_once(runner: str) -> None:
     )
     register_role_agent(runner, definition)
     ensure_a2a_listener(runner)
+    ensure_project_runtime_listener(project_alias)
 
     direct_results: list[dict[str, Any]] = []
     if env_bool("SYNTHETIC_ALPHA_SWARM_DIRECT_BROWSER_SMOKE", False):

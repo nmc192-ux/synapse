@@ -227,3 +227,63 @@ def test_director_schedule_catalog_uses_chaos_browser_runner_identity() -> None:
     chaos_agent_ids = {plan["task_request"].agent_id for plan in plans if plan["project_alias"] == "chaos"}
 
     assert chaos_agent_ids == {"synthetic-alpha-chaos-browser-runner-2"}
+
+
+def test_browser_runner_starts_project_runtime_listener(monkeypatch) -> None:
+    browser_runner_path = REPO_ROOT / "examples" / "synthetic_alpha_swarm" / "browser_runner.py"
+    sys.path.insert(0, str(browser_runner_path.parent))
+    spec = importlib.util.spec_from_file_location("synthetic_alpha_swarm_browser_runner_runtime", browser_runner_path)
+    browser_runner = importlib.util.module_from_spec(spec)
+    assert spec is not None and spec.loader is not None
+    sys.modules[spec.name] = browser_runner
+    spec.loader.exec_module(browser_runner)
+
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        browser_runner,
+        "register_role_agent",
+        lambda role_name, definition: calls.append(("register", role_name)) or definition,
+    )
+    monkeypatch.setattr(
+        browser_runner,
+        "ensure_a2a_listener",
+        lambda role_name: calls.append(("a2a", role_name)),
+    )
+    monkeypatch.setattr(
+        browser_runner,
+        "ensure_project_runtime_listener",
+        lambda project_alias: calls.append(("runtime", project_alias)),
+    )
+    monkeypatch.setattr(browser_runner, "env_bool", lambda name, default=False: False)
+    monkeypatch.setattr(
+        browser_runner,
+        "build_project_api",
+        lambda alias: type(
+            "_API",
+            (),
+            {
+                "__enter__": lambda self: self,
+                "__exit__": lambda self, *_args: None,
+                "project_id": f"{alias}-project",
+                "create_project_run": lambda self, project_id, request: request,
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        browser_runner,
+        "build_run_plan",
+        lambda **kwargs: {
+            "task_request": browser_runner.TaskRequest(
+                task_id="task-1",
+                agent_id=kwargs["agent_id"],
+                goal="goal",
+                start_url="https://example.com",
+            )
+        },
+    )
+    monkeypatch.setattr(browser_runner, "summarize_run", lambda run: {"run": "ok"})
+    monkeypatch.setattr(browser_runner, "write_json_artifact", lambda *args, **kwargs: Path("/tmp/browser-runner.json"))
+
+    browser_runner.run_once("browser-runner-1")
+
+    assert ("runtime", "steady") in calls

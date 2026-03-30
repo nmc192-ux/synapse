@@ -117,6 +117,16 @@ ROLE_ENV_PREFIXES = {
     "chaos-monkey": "CHAOSMONKEY",
 }
 
+RUNTIME_EVENT_TELEMETRY_MAP: dict[str, str] = {
+    "worker.request.running": "browser.request_running",
+    "worker.request.slow": "browser.request_slow",
+    "worker.request.stuck": "browser.request_stuck",
+    "worker.request.recovered": "scheduler.request_recovered",
+    "worker.result.replayed": "scheduler.result_replayed",
+    "worker.ownership.stale": "scheduler.stale_ownership",
+    "run.dispatch.reconciled": "scheduler.recovered",
+}
+
 DEFAULT_SYNTHETIC_ALPHA_CLIENT_TIMEOUT_SECONDS = 180.0
 STALE_OWNERSHIP_TOKENS = (
     "worker.ownership.stale",
@@ -125,6 +135,8 @@ STALE_OWNERSHIP_TOKENS = (
     "stale session ownership",
     "no browser worker assigned to session",
 )
+
+_RUNTIME_EVENT_LISTENERS: dict[str, "ProjectRuntimeEventListener"] = {}
 
 
 @dataclass(frozen=True)
@@ -358,6 +370,53 @@ def record_telemetry_event(
     return {"repo": str(repo_target), "log": str(log_target)}
 
 
+def normalize_runtime_event_to_telemetry(
+    event: dict[str, Any],
+    *,
+    project_alias: str,
+) -> dict[str, Any] | None:
+    source_type = str(event.get("event_type") or "")
+    mapped_type = RUNTIME_EVENT_TELEMETRY_MAP.get(source_type)
+    if mapped_type is None:
+        return None
+    payload = event.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    details: dict[str, Any] = {"source_event_type": source_type}
+    for key in (
+        "worker_id",
+        "request_id",
+        "action_id",
+        "action",
+        "queue_name",
+        "fencing_token",
+        "status",
+        "age_seconds",
+        "controller_id",
+        "recovered",
+    ):
+        value = payload.get(key)
+        if value is not None:
+            details[key] = value
+    severity = event.get("severity")
+    status = str(severity).lower() if isinstance(severity, str) else None
+    timestamp = event.get("timestamp")
+    parsed_timestamp = None
+    if isinstance(timestamp, str):
+        try:
+            parsed_timestamp = datetime.fromisoformat(timestamp)
+        except ValueError:
+            parsed_timestamp = None
+    return {
+        "event_type": mapped_type,
+        "project_alias": project_alias,
+        "project_id": str(event.get("project_id")) if event.get("project_id") is not None else None,
+        "run_id": str(event.get("run_id")) if event.get("run_id") is not None else None,
+        "status": status,
+        "details": details,
+        "timestamp": parsed_timestamp,
+    }
+
+
 def load_telemetry_events_since(since: datetime) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     threshold = since.isoformat()
@@ -521,6 +580,61 @@ def start_role_a2a_listener(
     message_handler: Callable[[AgentWireMessage], None] | None = None,
 ) -> RoleA2AListener:
     return RoleA2AListener(role_name=role_name, agent_id=agent_id, message_handler=message_handler).start()
+
+
+class ProjectRuntimeEventListener:
+    def __init__(self, *, project_alias: str) -> None:
+        self.project_alias = project_alias
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> "ProjectRuntimeEventListener":
+        if self._thread is not None and self._thread.is_alive():
+            return self
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"{self.project_alias}-runtime-event-listener",
+            daemon=True,
+        )
+        self._thread.start()
+        return self
+
+    def _run(self) -> None:
+        from websockets.sync.client import connect
+
+        backoff = 1.0
+        while True:
+            creds = build_project_credentials(self.project_alias)
+            try:
+                with build_project_client(self.project_alias) as client:
+                    url = client.build_websocket_url("/api/ws")
+                    with connect(url, open_timeout=15, close_timeout=5, ping_interval=None) as websocket:
+                        backoff = 1.0
+                        while True:
+                            payload = websocket.recv()
+                            if not isinstance(payload, str):
+                                continue
+                            event = json.loads(payload)
+                            telemetry = normalize_runtime_event_to_telemetry(event, project_alias=self.project_alias)
+                            if telemetry is None:
+                                continue
+                            record_telemetry_event(**telemetry)
+            except Exception as exc:  # pragma: no cover - long-running runtime path
+                record_telemetry_event(
+                    "runtime_feed.error",
+                    project_alias=self.project_alias,
+                    project_id=creds.project_id,
+                    status="degraded",
+                    details={"error": str(exc)},
+                )
+                sleep_with_jitter(backoff, jitter_seconds=min(5.0, backoff * 0.25))
+                backoff = min(backoff * 2, 30.0)
+
+
+def ensure_project_runtime_listener(project_alias: str) -> None:
+    listener = _RUNTIME_EVENT_LISTENERS.get(project_alias)
+    if listener is None:
+        listener = ProjectRuntimeEventListener(project_alias=project_alias).start()
+        _RUNTIME_EVENT_LISTENERS[project_alias] = listener
 
 
 class PlatformAPI:
@@ -921,9 +1035,15 @@ def browser_errors_by_category(
             bucket = classify_blob(blob)
             counts[bucket] = counts.get(bucket, 0) + 1
     for event in telemetry_events:
-        if str(event.get("event_type")) not in {"browser.error", "browser.retry"}:
+        event_type = str(event.get("event_type"))
+        if event_type in {"browser.error", "browser.retry"}:
+            bucket = browser_error_category_from_payload(event.get("details", {}))
+        elif event_type == "browser.request_slow":
+            bucket = "browser issue"
+        elif event_type == "browser.request_stuck":
+            bucket = "scheduler issue"
+        else:
             continue
-        bucket = browser_error_category_from_payload(event.get("details", {}))
         counts[bucket] = counts.get(bucket, 0) + 1
     return counts
 
@@ -953,6 +1073,9 @@ def compute_project_metrics(
     captcha_challenge_count = sum(any(token in blob for token in ["captcha", "challenge", "turnstile"]) for blob in run_blobs + intervention_blobs)
     session_restore_failures = sum(any(token in blob for token in ["session restore", "session_restore", "restore failed"]) for blob in run_blobs + audit_blobs)
     duplicate_result_recoveries = sum(any(token in blob for token in ["duplicate", "idempotent", "recovered duplicate"]) for blob in run_blobs + audit_blobs)
+    duplicate_result_recoveries += sum(
+        1 for event in telemetry_events if str(event.get("event_type")) == "scheduler.result_replayed"
+    )
     stale_ownership_incidents = sum(is_stale_ownership_signal(blob) for blob in run_blobs + audit_blobs)
     stale_ownership_incidents += sum(1 for event in telemetry_events if str(event.get("event_type")) == "scheduler.stale_ownership")
 
@@ -968,7 +1091,11 @@ def compute_project_metrics(
     a2a_sent = sum(1 for event in telemetry_events if str(event.get("event_type")) == "a2a.sent")
     a2a_succeeded = sum(1 for event in telemetry_events if str(event.get("event_type")) == "a2a.succeeded")
     a2a_failed = sum(1 for event in telemetry_events if str(event.get("event_type")) == "a2a.failed")
-    scheduler_recoveries = sum(1 for event in telemetry_events if str(event.get("event_type")) == "scheduler.recovered")
+    scheduler_recoveries = sum(
+        1
+        for event in telemetry_events
+        if str(event.get("event_type")) in {"scheduler.recovered", "scheduler.request_recovered"}
+    )
     scheduler_recoveries += count_matching_audit_logs(audit_logs, "run.requeued", "run.recovered", "worker.request.recovered", "worker.result.replayed")
     plugin_denials = sum(
         1

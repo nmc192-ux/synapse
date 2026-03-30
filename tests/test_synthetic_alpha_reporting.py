@@ -56,6 +56,10 @@ def test_compute_project_metrics_includes_telemetry_and_agent_rates() -> None:
         {'event_type': 'a2a.succeeded', 'project_alias': 'steady', 'timestamp': '2026-03-28T00:00:31+00:00', 'details': {}},
         {'event_type': 'browser.error', 'project_alias': 'steady', 'timestamp': '2026-03-28T00:00:32+00:00', 'details': {'error': 'captcha challenge'}},
         {'event_type': 'scheduler.recovered', 'project_alias': 'steady', 'timestamp': '2026-03-28T00:00:33+00:00', 'details': {}},
+        {'event_type': 'scheduler.request_recovered', 'project_alias': 'steady', 'timestamp': '2026-03-28T00:00:34+00:00', 'details': {}},
+        {'event_type': 'scheduler.result_replayed', 'project_alias': 'steady', 'timestamp': '2026-03-28T00:00:35+00:00', 'details': {}},
+        {'event_type': 'browser.request_slow', 'project_alias': 'steady', 'timestamp': '2026-03-28T00:00:36+00:00', 'details': {}},
+        {'event_type': 'browser.request_stuck', 'project_alias': 'steady', 'timestamp': '2026-03-28T00:00:37+00:00', 'details': {}},
     ]
 
     metrics = common.compute_project_metrics('steady', [run], [intervention], audit_logs, telemetry_events)
@@ -64,9 +68,12 @@ def test_compute_project_metrics_includes_telemetry_and_agent_rates() -> None:
     assert metrics['a2a_messages_sent'] == 1
     assert metrics['a2a_messages_succeeded'] == 1
     assert metrics['a2a_messages_failed'] == 0
-    assert metrics['scheduler_recovery_events'] == 2
+    assert metrics['scheduler_recovery_events'] == 3
+    assert metrics['duplicate_result_recoveries'] == 1
     assert metrics['plugin_denials'] == 1
     assert metrics['browser_errors_by_category']['challenge/captcha'] >= 1
+    assert metrics['browser_errors_by_category']['browser issue'] >= 1
+    assert metrics['browser_errors_by_category']['scheduler issue'] >= 1
     assert metrics['intervention_count_by_reason']['challenge/captcha'] == 1
     assert metrics['per_agent_outcomes']['synthetic-alpha-browser-runner-1']['failure_rate'] == 1.0
 
@@ -118,6 +125,36 @@ def test_record_and_load_telemetry_events(monkeypatch, tmp_path) -> None:
     assert len(events) == 1
     assert events[0]['event_type'] == 'a2a.sent'
     assert events[0]['project_alias'] == 'steady'
+
+
+def test_normalize_runtime_event_to_telemetry_maps_worker_lifecycle_events() -> None:
+    telemetry = common.normalize_runtime_event_to_telemetry(
+        {
+            'event_type': 'worker.request.stuck',
+            'timestamp': '2026-03-28T00:00:00+00:00',
+            'project_id': 'project-1',
+            'run_id': 'run-1',
+            'severity': 'warning',
+            'payload': {
+                'worker_id': 'controller-1:browser-worker-1',
+                'request_id': 'request-1',
+                'action_id': 'action-1',
+                'action': 'open',
+                'age_seconds': 12.5,
+            },
+        },
+        project_alias='steady',
+    )
+
+    assert telemetry is not None
+    assert telemetry['event_type'] == 'browser.request_stuck'
+    assert telemetry['project_alias'] == 'steady'
+    assert telemetry['project_id'] == 'project-1'
+    assert telemetry['run_id'] == 'run-1'
+    assert telemetry['status'] == 'warning'
+    assert telemetry['details']['source_event_type'] == 'worker.request.stuck'
+    assert telemetry['details']['worker_id'] == 'controller-1:browser-worker-1'
+    assert telemetry['details']['age_seconds'] == 12.5
 
 
 def test_reporter_outputs_include_review_sections(monkeypatch, tmp_path) -> None:

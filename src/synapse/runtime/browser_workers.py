@@ -586,17 +586,65 @@ class BrowserWorkerPool:
         if request is None or self._run_store is None:
             return
         now = datetime.now(timezone.utc)
-        if request.status not in {"dispatched", "running", "slow"}:
+        if request.status not in {"dispatched", "running", "slow", "stuck", "recovered"}:
             return
-        await self._run_store.save_worker_request(
-            request.model_copy(
-                update={
+        updates: dict[str, object] = {
+            "worker_id": worker_id,
+            "last_progress_at": now,
+            "updated_at": now,
+        }
+        emitted_event: tuple[EventType, dict[str, object]] | None = None
+        if request.status == "slow":
+            updates["status"] = "running"
+            updates["status_reason"] = "request resumed after slow progress gap"
+            emitted_event = (
+                EventType.WORKER_REQUEST_RUNNING,
+                {
                     "worker_id": worker_id,
-                    "last_progress_at": now,
-                    "updated_at": now,
-                }
+                    "action_id": request.action_id,
+                    "request_id": request.request_id,
+                    "action": request.action,
+                    "resumed": True,
+                    "previous_status": "slow",
+                },
             )
-        )
+        elif request.status == "stuck":
+            updates["status"] = "recovered"
+            updates["recovered_at"] = now
+            updates["status_reason"] = "request resumed after stalled progress gap"
+            emitted_event = (
+                EventType.WORKER_REQUEST_RECOVERED,
+                {
+                    "worker_id": worker_id,
+                    "action_id": request.action_id,
+                    "request_id": request.request_id,
+                    "action": request.action,
+                    "previous_status": "stuck",
+                },
+            )
+        elif request.status == "recovered":
+            updates["status"] = "running"
+            updates["status_reason"] = "request resumed after controller recovery"
+            emitted_event = (
+                EventType.WORKER_REQUEST_RUNNING,
+                {
+                    "worker_id": worker_id,
+                    "action_id": request.action_id,
+                    "request_id": request.request_id,
+                    "action": request.action,
+                    "resumed": True,
+                    "previous_status": "recovered",
+                },
+            )
+        await self._run_store.save_worker_request(request.model_copy(update=updates))
+        if emitted_event is not None:
+            event_type, payload = emitted_event
+            await self._emit_worker_event(
+                event_type,
+                run_id=request.run_id,
+                session_id=request.session_id,
+                payload=payload,
+            )
 
     async def _accept_result(self, result: BrowserTaskResult) -> bool:
         if self._run_store is None:
@@ -635,6 +683,7 @@ class BrowserWorkerPool:
         request = await self._run_store.get_worker_request(result.run_id, result.action_id)
         if request is not None:
             now = datetime.now(timezone.utc)
+            completion_reason = self._completion_status_reason(request, success=result.success, error=result.error)
             await self._run_store.save_worker_request(
                 request.model_copy(
                     update={
@@ -642,7 +691,7 @@ class BrowserWorkerPool:
                         "completed_at": now,
                         "last_progress_at": now,
                         "updated_at": now,
-                        "status_reason": result.error if not result.success else None,
+                        "status_reason": completion_reason,
                     }
                 )
             )
@@ -771,7 +820,7 @@ class BrowserWorkerPool:
         if self._run_store is None:
             return
         request = await self._request_record(item_or_request)
-        if request is None or request.status not in {"dispatched", "running", "slow"}:
+        if request is None or request.status not in {"dispatched", "running", "slow", "recovered"}:
             return
         anchor = request.last_progress_at or request.started_at or request.dispatched_at or request.created_at
         age_seconds = (datetime.now(timezone.utc) - anchor).total_seconds()
@@ -811,6 +860,31 @@ class BrowserWorkerPool:
         if isinstance(item_or_request, BrowserTaskRequestRecord):
             return item_or_request
         return await self._load_existing_request(item_or_request.run_id, item_or_request.action_id)
+
+    def _completion_status_reason(
+        self,
+        request: BrowserTaskRequestRecord,
+        *,
+        success: bool,
+        error: str | None,
+    ) -> str | None:
+        if not success:
+            return error or request.status_reason
+        if request.status == "slow":
+            return "completed after slow progress gap"
+        if request.status == "stuck":
+            return "completed after stalled progress gap"
+        if request.status == "recovered":
+            return "completed after controller recovery delay"
+        if isinstance(request.status_reason, str) and request.status_reason:
+            lowered = request.status_reason.lower()
+            if "slow" in lowered:
+                return "completed after slow progress gap"
+            if "stall" in lowered or "stuck" in lowered:
+                return "completed after stalled progress gap"
+            if "recover" in lowered:
+                return "completed after controller recovery delay"
+        return None
 
     async def _persist_session_ownership(
         self,

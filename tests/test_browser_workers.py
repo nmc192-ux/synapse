@@ -611,6 +611,156 @@ def test_browser_worker_pool_marks_request_stuck_when_progress_stalls() -> None:
     asyncio.run(scenario())
 
 
+def test_browser_worker_pool_progress_recovers_slow_request() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        sockets = WebSocketManager(state_store=store)
+        bus = EventBus(sockets)
+        bus.set_context_resolver(lambda event: _event_context())
+        controller_id = "controller-progress-slow"
+        worker_id = f"{controller_id}:browser-worker-1"
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            heartbeat_interval_seconds=0.2,
+            lease_timeout_seconds=0.3,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id=controller_id,
+        )
+        pool.set_event_publisher(bus.publish)
+        await pool.start()
+        try:
+            now = datetime.now(timezone.utc)
+            await run_store.save_worker_request(
+                BrowserTaskRequestRecord(
+                    action_id="action-slow",
+                    request_id="request-slow",
+                    run_id="run-1",
+                    worker_id=worker_id,
+                    action="open",
+                    session_id="s1",
+                    status="slow",
+                    status_reason="request exceeded 0.10s without a durable result",
+                    payload={"session_id": "s1", "url": "https://example.com/slow"},
+                    dispatched_at=now - timedelta(seconds=0.3),
+                    started_at=now - timedelta(seconds=0.25),
+                    last_progress_at=now - timedelta(seconds=0.2),
+                )
+            )
+            async with sockets.subscribe("slow-recovered", organization_id="org-1", project_id="project-1") as queue:
+                await pool._on_request_progress(
+                    worker_id,
+                    BrowserTaskEnvelope(
+                        action_id="action-slow",
+                        request_id="request-slow",
+                        run_id="run-1",
+                        session_id="s1",
+                        action="open",
+                    ),
+                )
+                event = await asyncio.wait_for(queue.get(), timeout=0.2)
+                assert event.event_type == EventType.WORKER_REQUEST_RUNNING
+                assert event.payload["previous_status"] == "slow"
+                assert event.payload["resumed"] is True
+        finally:
+            await pool.stop()
+
+        stored = await run_store.get_worker_request("run-1", "action-slow")
+        assert stored is not None
+        assert stored.status == "running"
+        assert stored.status_reason == "request resumed after slow progress gap"
+
+    asyncio.run(scenario())
+
+
+def test_browser_worker_pool_progress_recovers_stuck_request_and_preserves_completion_reason() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        sockets = WebSocketManager(state_store=store)
+        bus = EventBus(sockets)
+        bus.set_context_resolver(lambda event: _event_context())
+        controller_id = "controller-progress-stuck"
+        worker_id = f"{controller_id}:browser-worker-1"
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            heartbeat_interval_seconds=0.2,
+            lease_timeout_seconds=0.05,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id=controller_id,
+        )
+        pool.set_event_publisher(bus.publish)
+        await pool.start()
+        try:
+            stale_time = datetime.now(timezone.utc) - timedelta(seconds=1)
+            await run_store.save_lease(
+                RunLeaseRecord(
+                    run_id="run-1",
+                    worker_id=worker_id,
+                    token=2,
+                    acquired_at=stale_time,
+                    expires_at=datetime.now(timezone.utc) + timedelta(seconds=5),
+                )
+            )
+            await run_store.save_worker_request(
+                BrowserTaskRequestRecord(
+                    action_id="action-stuck-progress",
+                    request_id="request-stuck-progress",
+                    run_id="run-1",
+                    worker_id=worker_id,
+                    action="open",
+                    session_id="s1",
+                    status="stuck",
+                    status_reason="request exceeded 0.05s without a durable result",
+                    payload={"session_id": "s1", "url": "https://example.com/stuck"},
+                    dispatched_at=stale_time,
+                    started_at=stale_time,
+                    last_progress_at=stale_time,
+                )
+            )
+            async with sockets.subscribe("stuck-recovered", organization_id="org-1", project_id="project-1") as queue:
+                await pool._on_request_progress(
+                    worker_id,
+                    BrowserTaskEnvelope(
+                        action_id="action-stuck-progress",
+                        request_id="request-stuck-progress",
+                        run_id="run-1",
+                        session_id="s1",
+                        action="open",
+                    ),
+                )
+                event = await asyncio.wait_for(queue.get(), timeout=0.2)
+                assert event.event_type == EventType.WORKER_REQUEST_RECOVERED
+                assert event.payload["previous_status"] == "stuck"
+
+            await pool._handle_result(
+                BrowserTaskResult(
+                    action_id="action-stuck-progress",
+                    request_id="request-stuck-progress",
+                    run_id="run-1",
+                    worker_id=worker_id,
+                    action="open",
+                    session_id="s1",
+                    success=True,
+                    payload={"ok": True},
+                    fencing_token=2,
+                )
+            )
+        finally:
+            await pool.stop()
+
+        stored = await run_store.get_worker_request("run-1", "action-stuck-progress")
+        assert stored is not None
+        assert stored.status == "completed"
+        assert stored.status_reason == "completed after controller recovery delay"
+
+    asyncio.run(scenario())
+
+
 async def _collect_browser_events(queue: asyncio.Queue, *, expected: int) -> list:
     events = []
     seen = set()

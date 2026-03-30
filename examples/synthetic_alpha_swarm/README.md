@@ -38,7 +38,7 @@ The director now operates in recurring tiers:
 
 Schedule state is persisted in:
 
-- [`/Users/drj/Documents/Synapse/examples/synthetic_alpha_swarm/runtime/director_schedule_state.json`](/Users/drj/Documents/Synapse/examples/synthetic_alpha_swarm/runtime/director_schedule_state.json)
+- `examples/synthetic_alpha_swarm/runtime/director_schedule_state.json`
 
 ## Safe Domain Defaults
 
@@ -106,17 +106,17 @@ Weekly review sections:
 Artifacts are mirrored to both:
 
 - repo-local runtime folder:
-  - [`/Users/drj/Documents/Synapse/examples/synthetic_alpha_swarm/runtime`](/Users/drj/Documents/Synapse/examples/synthetic_alpha_swarm/runtime)
+  - `examples/synthetic_alpha_swarm/runtime`
 - repo-local reports folder:
-  - [`/Users/drj/Documents/Synapse/examples/synthetic_alpha_swarm/runtime/reports`](/Users/drj/Documents/Synapse/examples/synthetic_alpha_swarm/runtime/reports)
+  - `examples/synthetic_alpha_swarm/runtime/reports`
 - machine-local telemetry folder:
-  - [`/Users/drj/synapse-logs/synthetic_alpha_swarm`](/Users/drj/synapse-logs/synthetic_alpha_swarm)
+  - `~/synapse-logs/synthetic_alpha_swarm`
 - machine-local reports folder:
-  - [`/Users/drj/synapse-logs/reports/synthetic_alpha`](/Users/drj/synapse-logs/reports/synthetic_alpha)
+  - `~/synapse-logs/reports/synthetic_alpha`
 
 ## Config Requirements
 
-Copy [`/Users/drj/Documents/Synapse/examples/synthetic_alpha_swarm/.env.example`](/Users/drj/Documents/Synapse/examples/synthetic_alpha_swarm/.env.example) into your shell environment before running the roles.
+Copy `examples/synthetic_alpha_swarm/.env.example` into your shell environment before running the roles.
 
 Required env vars for normal role startup:
 
@@ -133,12 +133,14 @@ Optional env vars for bootstrap:
 - `SYNTHETIC_ALPHA_SWARM_DIRECTOR_ENABLE_SCHEDULE=true`
 - `SYNTHETIC_ALPHA_SWARM_DIRECTOR_SUBMIT_RUNS=true`
 - `SYNTHETIC_ALPHA_SWARM_STEADY_ADMIN_API_KEY` and `SYNTHETIC_ALPHA_SWARM_CHAOS_ADMIN_API_KEY` for project-scoped admin reads such as audit logs
-- `SYNTHETIC_ALPHA_SWARM_CLIENT_TIMEOUT_SECONDS=60` for slower local browser open/extract cycles
 - `SYNTHETIC_ALPHA_SWARM_ROLE_MAX_PAGES=20000`
 - `SYNTHETIC_ALPHA_SWARM_ROLE_MAX_RUNTIME_SECONDS=2592000`
 - `SYNTHETIC_ALPHA_SWARM_ROLE_BROWSER_ACTIONS_PER_MINUTE=30`
 - `SYNTHETIC_ALPHA_SWARM_REPORTS_DIR=~/synapse-logs/reports/synthetic_alpha`
 - `SYNTHETIC_ALPHA_SWARM_TELEMETRY_DIR=~/synapse-logs/synthetic_alpha_swarm/telemetry`
+- `SYNTHETIC_ALPHA_SWARM_CLIENT_TIMEOUT_SECONDS=180`
+
+The client timeout should stay comfortably above the durable browser-dispatch recovery window. The default swarm examples now use `180` seconds so transient worker recovery does not get misclassified as a browser-runner failure in the harness.
 
 The browser runners now rotate a single smoke URL per interval, apply jitter between browser actions, and back off automatically on `429`/transient upstream errors so the supervisor does not amplify temporary throttling into a restart storm.
 
@@ -176,4 +178,4 @@ The reporter can emit example fixture-based artifacts for format review. Example
 - `example_metrics_snapshot.json`
 - `example_dashboard.html`
 
-Use the latest timestamped files in [`/Users/drj/synapse-logs/reports/synthetic_alpha`](/Users/drj/synapse-logs/reports/synthetic_alpha) for the weekly review. The simplest weekly workflow is: open `synthetic_alpha_dashboard_latest.html`, read `weekly_alpha_review_<timestamp>.md`, then compare the top regressions and intervention-heavy agents with the matching `metrics_snapshot_<timestamp>.json`.
+Use the latest timestamped files in `~/synapse-logs/reports/synthetic_alpha` for the weekly review. The simplest weekly workflow is: open `synthetic_alpha_dashboard_latest.html`, read `weekly_alpha_review_<timestamp>.md`, then compare the top regressions and intervention-heavy agents with the matching `metrics_snapshot_<timestamp>.json`.

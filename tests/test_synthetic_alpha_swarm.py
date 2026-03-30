@@ -4,7 +4,8 @@ from pathlib import Path
 
 import httpx
 
-SWARM_COMMON_PATH = Path("/Users/drj/Documents/Synapse/examples/synthetic_alpha_swarm/common.py")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SWARM_COMMON_PATH = REPO_ROOT / "examples" / "synthetic_alpha_swarm" / "common.py"
 spec = importlib.util.spec_from_file_location("synthetic_alpha_swarm_common", SWARM_COMMON_PATH)
 common = importlib.util.module_from_spec(spec)
 assert spec is not None and spec.loader is not None
@@ -68,6 +69,76 @@ def test_retry_with_backoff_does_not_retry_non_retryable_http_error(monkeypatch)
         raise AssertionError("expected HTTPStatusError")
 
 
+def test_retry_with_backoff_retries_timeout_errors(monkeypatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(common.time, "sleep", lambda delay: sleeps.append(delay))
+    monkeypatch.setattr(common.random, "uniform", lambda a, b: 0.0)
+
+    attempts = {"count": 0}
+
+    def action() -> str:
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise httpx.ReadTimeout("timed out waiting for browser result")
+        return "ok"
+
+    result = common.retry_with_backoff(action, label="browser-runner-1:browser.open", attempts=4, base_delay_seconds=2.0)
+
+    assert result == "ok"
+    assert attempts["count"] == 3
+    assert sleeps == [2.0, 4.0]
+
+
+def test_retry_with_backoff_retries_stale_ownership_errors(monkeypatch) -> None:
+    sleeps: list[float] = []
+    telemetry: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(common.time, "sleep", lambda delay: sleeps.append(delay))
+    monkeypatch.setattr(common.random, "uniform", lambda a, b: 0.0)
+    monkeypatch.setattr(
+        common,
+        "record_telemetry_event",
+        lambda event_type, **kwargs: telemetry.append((event_type, kwargs)) or {},
+    )
+
+    attempts = {"count": 0}
+
+    def action() -> str:
+        attempts["count"] += 1
+        if attempts["count"] < 2:
+            raise KeyError("No browser worker assigned to session: s-stale")
+        return "ok"
+
+    result = common.retry_with_backoff(
+        action,
+        label="browser-runner-1:browser.open",
+        attempts=3,
+        base_delay_seconds=1.0,
+        telemetry_context={"project_alias": "steady", "project_id": "project-1", "role": "browser-runner-1", "agent_id": "synthetic-alpha-browser-runner-1"},
+    )
+
+    assert result == "ok"
+    assert attempts["count"] == 2
+    assert sleeps == [1.0]
+    assert any(event_type == "scheduler.stale_ownership" for event_type, _ in telemetry)
+
+
+def test_build_role_client_uses_extended_default_timeout(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _Client:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(common, "SynapseClient", _Client)
+    monkeypatch.setattr(common, "build_role_credentials", lambda role_name: common.RoleCredentials(role=role_name, project_alias="steady", project_id="project-1", api_key="key-1"))
+    monkeypatch.setattr(common, "env", lambda name, default=None: "http://127.0.0.1:8000")
+    monkeypatch.setattr(common, "optional_env", lambda name, default=None: None)
+
+    common.build_role_client("browser-runner-1", agent_id="agent-1")
+
+    assert captured["timeout"] == common.DEFAULT_SYNTHETIC_ALPHA_CLIENT_TIMEOUT_SECONDS
+
+
 def test_register_role_agent_falls_back_to_admin_for_agent_bootstrap(monkeypatch) -> None:
     definition = common.build_agent_definition(
         agent_id="synthetic-alpha-browser-runner-2",
@@ -113,7 +184,7 @@ def test_register_role_agent_falls_back_to_admin_for_agent_bootstrap(monkeypatch
 
 
 def test_build_project_admin_api_prefers_alias_specific_admin_key(monkeypatch) -> None:
-    captured: dict[str, str | None] = {}
+    captured: dict[str, object] = {}
 
     class _PlatformAPI:
         def __init__(self, *, base_url, api_key=None, bearer_token=None, project_id=None, timeout=30.0):
@@ -121,6 +192,7 @@ def test_build_project_admin_api_prefers_alias_specific_admin_key(monkeypatch) -
             captured["api_key"] = api_key
             captured["bearer_token"] = bearer_token
             captured["project_id"] = project_id
+            captured["timeout"] = timeout
 
     monkeypatch.setattr(common, "PlatformAPI", _PlatformAPI)
     monkeypatch.setattr(common, "build_project_credentials", lambda alias: common.ProjectCredentials(alias=alias, project_id="project-chaos", api_key="shared-key"))
@@ -138,11 +210,12 @@ def test_build_project_admin_api_prefers_alias_specific_admin_key(monkeypatch) -
         "api_key": "chaos-admin-key",
         "bearer_token": None,
         "project_id": "project-chaos",
+        "timeout": common.DEFAULT_SYNTHETIC_ALPHA_CLIENT_TIMEOUT_SECONDS,
     }
 
 
 def test_director_schedule_catalog_uses_chaos_browser_runner_identity() -> None:
-    director_path = Path("/Users/drj/Documents/Synapse/examples/synthetic_alpha_swarm/director.py")
+    director_path = REPO_ROOT / "examples" / "synthetic_alpha_swarm" / "director.py"
     sys.path.insert(0, str(director_path.parent))
     spec = importlib.util.spec_from_file_location("synthetic_alpha_swarm_director", director_path)
     director = importlib.util.module_from_spec(spec)

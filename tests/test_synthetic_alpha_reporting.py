@@ -3,7 +3,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-SWARM_COMMON_PATH = Path('/Users/drj/Documents/Synapse/examples/synthetic_alpha_swarm/common.py')
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SWARM_COMMON_PATH = REPO_ROOT / 'examples' / 'synthetic_alpha_swarm' / 'common.py'
 COMMON_SPEC = importlib.util.spec_from_file_location('synthetic_alpha_swarm_common_reporting', SWARM_COMMON_PATH)
 common = importlib.util.module_from_spec(COMMON_SPEC)
 assert COMMON_SPEC is not None and COMMON_SPEC.loader is not None
@@ -11,7 +12,7 @@ sys.modules[COMMON_SPEC.name] = common
 sys.modules["common"] = common
 COMMON_SPEC.loader.exec_module(common)
 
-REPORTER_PATH = Path('/Users/drj/Documents/Synapse/examples/synthetic_alpha_swarm/reporter.py')
+REPORTER_PATH = REPO_ROOT / 'examples' / 'synthetic_alpha_swarm' / 'reporter.py'
 REPORTER_SPEC = importlib.util.spec_from_file_location('synthetic_alpha_swarm_reporter_reporting', REPORTER_PATH)
 reporter = importlib.util.module_from_spec(REPORTER_SPEC)
 assert REPORTER_SPEC is not None and REPORTER_SPEC.loader is not None
@@ -68,6 +69,35 @@ def test_compute_project_metrics_includes_telemetry_and_agent_rates() -> None:
     assert metrics['browser_errors_by_category']['challenge/captcha'] >= 1
     assert metrics['intervention_count_by_reason']['challenge/captcha'] == 1
     assert metrics['per_agent_outcomes']['synthetic-alpha-browser-runner-1']['failure_rate'] == 1.0
+
+
+def test_compute_project_metrics_counts_only_explicit_stale_ownership_signals() -> None:
+    run = common.RunState(
+        run_id='run-2',
+        task_id='task-2',
+        agent_id='synthetic-alpha-browser-runner-1',
+        project_id='project-1',
+        status='completed',
+        started_at=datetime(2026, 3, 28, 0, 0, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 3, 28, 0, 1, tzinfo=timezone.utc),
+        completed_at=datetime(2026, 3, 28, 0, 1, tzinfo=timezone.utc),
+        current_phase='completed',
+        metadata={'ownership': 'project-owner-user'},
+    )
+    audit_logs = [
+        {
+            'timestamp': '2026-03-28T00:01:00+00:00',
+            'action': 'worker.audit',
+            'metadata': {'owner_user_id': 'user-1', 'note': 'ownership metadata updated'},
+        }
+    ]
+    telemetry_events = [
+        {'event_type': 'scheduler.stale_ownership', 'project_alias': 'steady', 'timestamp': '2026-03-28T00:00:33+00:00', 'details': {}},
+    ]
+
+    metrics = common.compute_project_metrics('steady', [run], [], audit_logs, telemetry_events)
+
+    assert metrics['stale_ownership_incidents'] == 1
 
 
 def test_record_and_load_telemetry_events(monkeypatch, tmp_path) -> None:

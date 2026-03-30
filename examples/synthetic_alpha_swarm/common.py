@@ -117,6 +117,15 @@ ROLE_ENV_PREFIXES = {
     "chaos-monkey": "CHAOSMONKEY",
 }
 
+DEFAULT_SYNTHETIC_ALPHA_CLIENT_TIMEOUT_SECONDS = 180.0
+STALE_OWNERSHIP_TOKENS = (
+    "worker.ownership.stale",
+    "stale ownership",
+    "ownership stale",
+    "stale session ownership",
+    "no browser worker assigned to session",
+)
+
 
 @dataclass(frozen=True)
 class ProjectCredentials:
@@ -216,8 +225,9 @@ def runtime_reports_dir() -> Path:
 
 
 def telemetry_dir() -> Path:
-    raw = optional_env("SYNTHETIC_ALPHA_SWARM_TELEMETRY_DIR", str(logs_dir() / "telemetry"))
-    path = Path(raw or str(logs_dir() / "telemetry"))
+    default_path = Path.home() / "synapse-logs" / "synthetic_alpha_swarm" / "telemetry"
+    raw = optional_env("SYNTHETIC_ALPHA_SWARM_TELEMETRY_DIR", str(default_path))
+    path = Path(raw or str(default_path))
     if not path.is_absolute():
         path = REPO_ROOT / path
     path.mkdir(parents=True, exist_ok=True)
@@ -270,7 +280,7 @@ def build_project_client(alias: str, agent_id: str | None = None) -> SynapseClie
     creds = build_project_credentials(alias)
     return SynapseClient(
         base_url=env("SYNTHETIC_ALPHA_SWARM_BASE_URL", "http://127.0.0.1:8000"),
-        timeout=env_float("SYNTHETIC_ALPHA_SWARM_CLIENT_TIMEOUT_SECONDS", 60.0),
+        timeout=swarm_client_timeout_seconds(),
         api_key=creds.api_key,
         project_id=creds.project_id,
         agent_id=agent_id,
@@ -281,10 +291,17 @@ def build_role_client(role_name: str, agent_id: str | None = None) -> SynapseCli
     creds = build_role_credentials(role_name)
     return SynapseClient(
         base_url=env("SYNTHETIC_ALPHA_SWARM_BASE_URL", "http://127.0.0.1:8000"),
-        timeout=env_float("SYNTHETIC_ALPHA_SWARM_CLIENT_TIMEOUT_SECONDS", 60.0),
+        timeout=swarm_client_timeout_seconds(),
         api_key=creds.api_key,
         project_id=creds.project_id,
         agent_id=agent_id,
+    )
+
+
+def swarm_client_timeout_seconds() -> float:
+    return env_float(
+        "SYNTHETIC_ALPHA_SWARM_CLIENT_TIMEOUT_SECONDS",
+        DEFAULT_SYNTHETIC_ALPHA_CLIENT_TIMEOUT_SECONDS,
     )
 
 
@@ -620,6 +637,7 @@ def build_project_api(alias: str) -> PlatformAPI:
         base_url=env("SYNTHETIC_ALPHA_SWARM_BASE_URL", "http://127.0.0.1:8000"),
         api_key=creds.api_key,
         project_id=creds.project_id,
+        timeout=swarm_client_timeout_seconds(),
     )
 
 
@@ -637,6 +655,7 @@ def build_project_admin_api(alias: str) -> PlatformAPI:
         api_key=api_key,
         bearer_token=bearer_token,
         project_id=creds.project_id,
+        timeout=swarm_client_timeout_seconds(),
     )
 
 
@@ -667,6 +686,7 @@ def build_role_api(role_name: str) -> PlatformAPI:
         base_url=env("SYNTHETIC_ALPHA_SWARM_BASE_URL", "http://127.0.0.1:8000"),
         api_key=creds.api_key,
         project_id=creds.project_id,
+        timeout=swarm_client_timeout_seconds(),
     )
 
 
@@ -676,6 +696,7 @@ def build_admin_api() -> PlatformAPI:
         api_key=optional_env("SYNTHETIC_ALPHA_SWARM_ADMIN_API_KEY"),
         bearer_token=optional_env("SYNTHETIC_ALPHA_SWARM_ADMIN_BEARER_TOKEN"),
         project_id=optional_env("SYNTHETIC_ALPHA_SWARM_ADMIN_PROJECT_ID"),
+        timeout=swarm_client_timeout_seconds(),
     )
 
 
@@ -795,6 +816,10 @@ def run_latency_seconds(run: RunState) -> float:
 
 def lower_blob(payload: Any) -> str:
     return json.dumps(payload, default=str, sort_keys=True).lower()
+
+
+def is_stale_ownership_signal(blob: str) -> bool:
+    return any(token in blob for token in STALE_OWNERSHIP_TOKENS)
 
 
 def classify_blob(blob: str) -> str:
@@ -928,7 +953,7 @@ def compute_project_metrics(
     captcha_challenge_count = sum(any(token in blob for token in ["captcha", "challenge", "turnstile"]) for blob in run_blobs + intervention_blobs)
     session_restore_failures = sum(any(token in blob for token in ["session restore", "session_restore", "restore failed"]) for blob in run_blobs + audit_blobs)
     duplicate_result_recoveries = sum(any(token in blob for token in ["duplicate", "idempotent", "recovered duplicate"]) for blob in run_blobs + audit_blobs)
-    stale_ownership_incidents = sum(any(token in blob for token in ["stale ownership", "stale", "lease expired", "ownership"]) for blob in run_blobs + audit_blobs)
+    stale_ownership_incidents = sum(is_stale_ownership_signal(blob) for blob in run_blobs + audit_blobs)
     stale_ownership_incidents += sum(1 for event in telemetry_events if str(event.get("event_type")) == "scheduler.stale_ownership")
 
     failure_rate = (failed / started) if started else 0.0
@@ -1131,6 +1156,18 @@ def is_retryable_http_error(exc: Exception) -> bool:
     return exc.response.status_code in {429, 502, 503, 504}
 
 
+def is_timeout_error(exc: Exception) -> bool:
+    return isinstance(exc, (TimeoutError, httpx.TimeoutException))
+
+
+def is_stale_ownership_error(exc: Exception) -> bool:
+    return is_stale_ownership_signal(str(exc).strip().lower())
+
+
+def is_retryable_swarm_error(exc: Exception) -> bool:
+    return is_retryable_http_error(exc) or is_timeout_error(exc) or is_stale_ownership_error(exc)
+
+
 def retry_with_backoff(
     action: Callable[[], Any],
     *,
@@ -1160,7 +1197,19 @@ def retry_with_backoff(
             last_error = exc
             if telemetry_context and label.startswith(("browser.", "browser-runner", "chaos-monkey")):
                 status_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
-                event_name = "browser.retry" if attempt < attempts and is_retryable_http_error(exc) else "browser.error"
+                retryable = is_retryable_swarm_error(exc)
+                event_name = "browser.retry" if attempt < attempts and retryable else "browser.error"
+                if is_stale_ownership_error(exc):
+                    record_telemetry_event(
+                        "scheduler.stale_ownership",
+                        project_alias=str(telemetry_context.get("project_alias") or "") or None,
+                        project_id=str(telemetry_context.get("project_id") or "") or None,
+                        role=str(telemetry_context.get("role") or "") or None,
+                        agent_id=str(telemetry_context.get("agent_id") or "") or None,
+                        run_id=str(telemetry_context.get("run_id") or "") or None,
+                        status="retrying" if event_name == "browser.retry" else "failed",
+                        details={"label": label, "attempt": attempt, "error": str(exc)},
+                    )
                 record_telemetry_event(
                     event_name,
                     project_alias=str(telemetry_context.get("project_alias") or "") or None,
@@ -1177,7 +1226,7 @@ def retry_with_backoff(
                         "category": browser_error_category_from_payload({"label": label, "error": str(exc), "status_code": status_code}),
                     },
                 )
-            if attempt >= attempts or not is_retryable_http_error(exc):
+            if attempt >= attempts or not is_retryable_swarm_error(exc):
                 raise
             delay = min(max_delay_seconds, base_delay_seconds * (2 ** (attempt - 1)))
             print({"label": label, "attempt": attempt, "retry_in_seconds": delay, "error": str(exc)})

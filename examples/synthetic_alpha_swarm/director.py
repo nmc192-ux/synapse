@@ -58,7 +58,7 @@ def schedule_catalog() -> dict[str, list[dict[str, object]]]:
             ),
             build_run_plan(
                 project_alias="chaos",
-                agent_id="synthetic-alpha-browser-runner-2",
+                agent_id="synthetic-alpha-chaos-browser-runner-2",
                 label="public-research-check",
                 goal="Open a public research page and extract the title plus abstract heading as a synthetic-alpha research task.",
                 start_url=urls[4],
@@ -78,7 +78,7 @@ def schedule_catalog() -> dict[str, list[dict[str, object]]]:
             ),
             build_run_plan(
                 project_alias="chaos",
-                agent_id="synthetic-alpha-browser-runner-2",
+                agent_id="synthetic-alpha-chaos-browser-runner-2",
                 label="delegated-run-check",
                 goal="Run a delegated synthetic task across the chaos lane and record any duplicate-result or stale-ownership recoveries.",
                 start_url=urls[5],
@@ -87,7 +87,7 @@ def schedule_catalog() -> dict[str, list[dict[str, object]]]:
             ),
             build_run_plan(
                 project_alias="chaos",
-                agent_id="synthetic-alpha-browser-runner-2",
+                agent_id="synthetic-alpha-chaos-browser-runner-2",
                 label="intervention-trigger-check",
                 goal="Open a safe page while simulating an intervention-triggering approval path without using sensitive credentials.",
                 start_url=urls[3],
@@ -167,6 +167,18 @@ def run_once() -> None:
                 submitted_runs.append(summarize_run(run))
     a2a_dispatches: list[dict[str, object]] = []
     for target_agent in ("synthetic-alpha-browser-runner-1",):
+        target_status: dict[str, object] | None = None
+        with build_project_api("steady") as api:
+            target_status = api.get_agent_status(target_agent)
+        if not bool(target_status.get("availability")):
+            a2a_dispatches.append({
+                "recipient_agent_id": target_agent,
+                "status": "skipped_unavailable",
+                "availability": target_status.get("availability"),
+                "agent_status": target_status.get("status"),
+                "last_seen_at": target_status.get("last_seen_at"),
+            })
+            continue
         try:
             dispatch = send_signed_role_message(
                 role_name="director",

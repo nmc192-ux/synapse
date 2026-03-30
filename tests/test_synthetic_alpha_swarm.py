@@ -66,3 +66,91 @@ def test_retry_with_backoff_does_not_retry_non_retryable_http_error(monkeypatch)
         assert exc.response.status_code == 403
     else:
         raise AssertionError("expected HTTPStatusError")
+
+
+def test_register_role_agent_falls_back_to_admin_for_agent_bootstrap(monkeypatch) -> None:
+    definition = common.build_agent_definition(
+        agent_id="synthetic-alpha-browser-runner-2",
+        kind=common.AgentKind.OPENCLAW,
+        name="BrowserRunner-2",
+        description="test",
+        role="browser-runner-2",
+    )
+
+    calls: list[str] = []
+
+    class _RoleClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def register_agent(self, _definition):
+            calls.append("role")
+            raise PermissionError(
+                "Authorization failed for POST /api/agents in project 'project-1': Missing required scopes: admin."
+            )
+
+    class _AdminClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def register_agent(self, passed_definition):
+            calls.append("admin")
+            return passed_definition
+
+    monkeypatch.setattr(common, "build_role_client", lambda role_name, agent_id=None: _RoleClient())
+    monkeypatch.setattr(common, "build_admin_api", lambda: _AdminClient())
+
+    registered = common.register_role_agent("browser-runner-2", definition)
+
+    assert registered.agent_id == definition.agent_id
+    assert calls == ["role", "admin"]
+
+
+def test_build_project_admin_api_prefers_alias_specific_admin_key(monkeypatch) -> None:
+    captured: dict[str, str | None] = {}
+
+    class _PlatformAPI:
+        def __init__(self, *, base_url, api_key=None, bearer_token=None, project_id=None, timeout=30.0):
+            captured["base_url"] = base_url
+            captured["api_key"] = api_key
+            captured["bearer_token"] = bearer_token
+            captured["project_id"] = project_id
+
+    monkeypatch.setattr(common, "PlatformAPI", _PlatformAPI)
+    monkeypatch.setattr(common, "build_project_credentials", lambda alias: common.ProjectCredentials(alias=alias, project_id="project-chaos", api_key="shared-key"))
+    monkeypatch.setattr(common, "env", lambda name, default=None: "http://127.0.0.1:8000")
+    monkeypatch.setattr(
+        common,
+        "optional_env",
+        lambda name, default=None: {"SYNTHETIC_ALPHA_SWARM_CHAOS_ADMIN_API_KEY": "chaos-admin-key"}.get(name, default),
+    )
+
+    common.build_project_admin_api("chaos")
+
+    assert captured == {
+        "base_url": "http://127.0.0.1:8000",
+        "api_key": "chaos-admin-key",
+        "bearer_token": None,
+        "project_id": "project-chaos",
+    }
+
+
+def test_director_schedule_catalog_uses_chaos_browser_runner_identity() -> None:
+    director_path = Path("/Users/drj/Documents/Synapse/examples/synthetic_alpha_swarm/director.py")
+    sys.path.insert(0, str(director_path.parent))
+    spec = importlib.util.spec_from_file_location("synthetic_alpha_swarm_director", director_path)
+    director = importlib.util.module_from_spec(spec)
+    assert spec is not None and spec.loader is not None
+    sys.modules[spec.name] = director
+    spec.loader.exec_module(director)
+
+    plans = director.schedule_catalog()["hourly"]
+    chaos_agent_ids = {plan["task_request"].agent_id for plan in plans if plan["project_alias"] == "chaos"}
+
+    assert chaos_agent_ids == {"synthetic-alpha-chaos-browser-runner-2"}

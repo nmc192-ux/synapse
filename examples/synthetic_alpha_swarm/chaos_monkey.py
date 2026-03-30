@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from common import (
     build_agent_definition,
-    build_project_api,
+    build_role_api,
     build_role_client,
     default_safe_urls,
     parse_loop_args,
@@ -44,27 +44,31 @@ def run_once() -> None:
 
     failures: list[dict[str, str]] = []
     with build_role_client("chaos-monkey", agent_id="synthetic-alpha-chaos-monkey") as client:
-        retry_with_backoff(
-            lambda: client.browser.open(default_safe_urls()[0]),
-            label="chaos-monkey:browser.open",
-            telemetry_context={
-                "project_alias": role_project_alias("chaos-monkey"),
-                "project_id": getattr(client, "project_id", None),
-                "role": "chaos-monkey",
-                "agent_id": "synthetic-alpha-chaos-monkey",
-            },
-        )
+        browser = client.browser
         try:
-            client.browser.inspect("#this-selector-does-not-exist")
-        except Exception as exc:  # pragma: no cover - scaffold path
-            failures.append({"scenario": "missing-selector", "outcome": "expected-failure", "detail": str(exc)})
+            retry_with_backoff(
+                lambda: browser.open(default_safe_urls()[0]),
+                label="chaos-monkey:browser.open",
+                telemetry_context={
+                    "project_alias": role_project_alias("chaos-monkey"),
+                    "project_id": getattr(client, "project_id", None),
+                    "role": "chaos-monkey",
+                    "agent_id": "synthetic-alpha-chaos-monkey",
+                },
+            )
+            try:
+                browser.inspect("#this-selector-does-not-exist")
+            except Exception as exc:  # pragma: no cover - scaffold path
+                failures.append({"scenario": "missing-selector", "outcome": "expected-failure", "detail": str(exc)})
 
-        try:
-            client.browser.open("https://example.com")
-        except Exception as exc:  # pragma: no cover - scaffold path
-            failures.append({"scenario": "blocked-domain", "outcome": "expected-failure", "detail": str(exc)})
+            try:
+                browser.open("https://example.com")
+            except Exception as exc:  # pragma: no cover - scaffold path
+                failures.append({"scenario": "blocked-domain", "outcome": "expected-failure", "detail": str(exc)})
+        finally:
+            browser.close()
 
-    with build_project_api("chaos") as api:
+    with build_role_api("chaos-monkey") as api:
         workers = [worker.model_dump(mode="json") for worker in api.list_workers()]
 
     artifact = write_json_artifact(

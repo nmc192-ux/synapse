@@ -3,6 +3,7 @@ from __future__ import annotations
 from common import (
     FAILURE_BUCKETS,
     build_agent_definition,
+    build_project_admin_api,
     build_project_api,
     classify_failure,
     compute_project_metrics,
@@ -11,6 +12,7 @@ from common import (
     register_role_agent,
     role_project_alias,
     run_forever,
+    safe_list_audit_logs,
     start_role_a2a_listener,
     timestamp_slug,
     write_json_artifact,
@@ -46,7 +48,8 @@ def run_once() -> None:
         with build_project_api(alias) as api:
             runs = api.list_runs()
             interventions = api.list_interventions()
-            audit_logs = api.list_audit_logs(api.project_id or "")
+        with build_project_admin_api(alias) as admin_api:
+            audit_logs = safe_list_audit_logs(admin_api, admin_api.project_id or "")
             metrics = compute_project_metrics(alias, runs, interventions, audit_logs)
             metrics["classified_failures"] = [
                 {

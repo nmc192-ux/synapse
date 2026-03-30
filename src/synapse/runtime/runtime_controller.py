@@ -419,6 +419,9 @@ class RuntimeController:
     async def get_session(self, session_id: str) -> BrowserSessionState:
         return await self.browser_service.get_session(session_id)
 
+    async def close_session(self, session_id: str) -> None:
+        await self.browser_service.close_session(session_id)
+
     async def create_session_profile(self, request: SessionProfileCreateRequest) -> SessionProfile:
         return await self.session_profiles.create_profile(request)
 

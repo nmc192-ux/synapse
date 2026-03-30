@@ -132,6 +132,8 @@ Optional env vars for bootstrap:
 - `SYNTHETIC_ALPHA_SWARM_ADMIN_PROJECT_ID` if your admin token needs a project context header
 - `SYNTHETIC_ALPHA_SWARM_DIRECTOR_ENABLE_SCHEDULE=true`
 - `SYNTHETIC_ALPHA_SWARM_DIRECTOR_SUBMIT_RUNS=true`
+- `SYNTHETIC_ALPHA_SWARM_STEADY_ADMIN_API_KEY` and `SYNTHETIC_ALPHA_SWARM_CHAOS_ADMIN_API_KEY` for project-scoped admin reads such as audit logs
+- `SYNTHETIC_ALPHA_SWARM_CLIENT_TIMEOUT_SECONDS=60` for slower local browser open/extract cycles
 - `SYNTHETIC_ALPHA_SWARM_ROLE_MAX_PAGES=20000`
 - `SYNTHETIC_ALPHA_SWARM_ROLE_MAX_RUNTIME_SECONDS=2592000`
 - `SYNTHETIC_ALPHA_SWARM_ROLE_BROWSER_ACTIONS_PER_MINUTE=30`
@@ -139,6 +141,8 @@ Optional env vars for bootstrap:
 - `SYNTHETIC_ALPHA_SWARM_TELEMETRY_DIR=~/synapse-logs/synthetic_alpha_swarm/telemetry`
 
 The browser runners now rotate a single smoke URL per interval, apply jitter between browser actions, and back off automatically on `429`/transient upstream errors so the supervisor does not amplify temporary throttling into a restart storm.
+
+The chaos lane should use a distinct browser-runner agent identity, `synthetic-alpha-chaos-browser-runner-2`, so project-scoped chaos runs do not collide with the steady-project browser runner.
 
 ## Startup Instructions
 

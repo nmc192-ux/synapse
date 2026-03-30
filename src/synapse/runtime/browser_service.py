@@ -153,7 +153,8 @@ class BrowserService:
 
     async def extract(self, request: ExtractionRequest | ExtractRequest) -> ExtractionResult:
         await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.extract")
-        self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
+        current_url = await self._require_current_url(request.session_id)
+        self.sandbox.authorize_domain(request.agent_id, current_url)
         self.sandbox.consume_browser_action(request.agent_id)
         payload = await self.browser.extract(request.session_id, request.selector, request.attribute)
         payload = await self._enforce_result_barrier(
@@ -179,7 +180,8 @@ class BrowserService:
         try:
             await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.screenshot")
             await self._hydrate_run_policy(run_id)
-            self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
+            current_url = await self._require_current_url(request.session_id)
+            self.sandbox.authorize_domain(request.agent_id, current_url)
             self.sandbox.authorize_screenshot(request.agent_id, run_id=run_id)
             self.sandbox.consume_browser_action(request.agent_id)
             result = await self.browser.screenshot(request.session_id)
@@ -208,7 +210,8 @@ class BrowserService:
 
     async def get_layout(self, request: LayoutRequest) -> StructuredPageModel:
         await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.get_layout")
-        self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
+        current_url = await self._require_current_url(request.session_id)
+        self.sandbox.authorize_domain(request.agent_id, current_url)
         self.sandbox.consume_browser_action(request.agent_id)
         layout = await self.browser.get_layout(request.session_id)
         layout = await self._handle_page_barrier(
@@ -223,19 +226,22 @@ class BrowserService:
 
     async def find_element(self, request: FindElementRequest) -> list[PageElementMatch]:
         await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.find_element")
-        self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
+        current_url = await self._require_current_url(request.session_id)
+        self.sandbox.authorize_domain(request.agent_id, current_url)
         self.sandbox.consume_browser_action(request.agent_id)
         return await self.browser.find_element(request.session_id, request.type, request.text)
 
     async def inspect(self, request: InspectRequest) -> PageInspection:
         await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.inspect")
-        self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
+        current_url = await self._require_current_url(request.session_id)
+        self.sandbox.authorize_domain(request.agent_id, current_url)
         self.sandbox.consume_browser_action(request.agent_id)
         return await self.browser.inspect(request.session_id, request.selector)
 
     async def dismiss_popups(self, request: DismissRequest) -> BrowserState:
         await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.dismiss")
-        self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
+        current_url = await self._require_current_url(request.session_id)
+        self.sandbox.authorize_domain(request.agent_id, current_url)
         self.sandbox.consume_browser_action(request.agent_id)
         state = await self.browser.dismiss_popups(request.session_id)
         state = await self._enforce_result_barrier(
@@ -261,7 +267,8 @@ class BrowserService:
         try:
             await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.upload")
             await self._hydrate_run_policy(run_id)
-            self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
+            current_url = await self._require_current_url(request.session_id)
+            self.sandbox.authorize_domain(request.agent_id, current_url)
             self.sandbox.authorize_upload(request.agent_id, run_id=run_id)
             self.sandbox.consume_browser_action(request.agent_id)
             result = await self.browser.upload(request.session_id, request.selector, request.file_paths)
@@ -293,7 +300,8 @@ class BrowserService:
         try:
             await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.download")
             await self._hydrate_run_policy(run_id)
-            self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
+            current_url = await self._require_current_url(request.session_id)
+            self.sandbox.authorize_domain(request.agent_id, current_url)
             self.sandbox.authorize_download(request.agent_id, run_id=run_id)
             self.sandbox.consume_browser_action(request.agent_id)
             result = await self.browser.download(request.session_id, request.trigger_selector, request.timeout_ms)
@@ -322,7 +330,8 @@ class BrowserService:
 
     async def scroll_extract(self, request: ScrollExtractRequest) -> ScrollExtractResult:
         await self._ensure_current_page_safe(request.agent_id, request.session_id, "browser.scroll_extract")
-        self.sandbox.authorize_domain(request.agent_id, self.browser.current_url(request.session_id))
+        current_url = await self._require_current_url(request.session_id)
+        self.sandbox.authorize_domain(request.agent_id, current_url)
         self.sandbox.consume_browser_action(request.agent_id)
         result = await self.browser.scroll_extract(
             request.session_id,
@@ -365,6 +374,9 @@ class BrowserService:
         if payload is None:
             raise KeyError(f"Session not found: {session_id}")
         return BrowserSessionState.model_validate(payload)
+
+    async def close_session(self, session_id: str) -> None:
+        await self.browser.close_session(session_id)
 
     async def save_session_state(
         self,
@@ -425,7 +437,8 @@ class BrowserService:
             await self._hydrate_run_policy(run_id)
             if precheck_url is None:
                 await self._ensure_current_page_safe(agent_id, session_id, f"browser.{action}")
-                self.sandbox.authorize_domain(agent_id, self.browser.current_url(session_id))
+                current_url = await self._require_current_url(session_id)
+                self.sandbox.authorize_domain(agent_id, current_url)
             else:
                 self.sandbox.authorize_navigation(
                     agent_id,
@@ -820,6 +833,24 @@ class BrowserService:
             payload = await self.state_store.get_session(session_id)
             if isinstance(payload, dict) and isinstance(payload.get("run_id"), str):
                 return str(payload["run_id"])
+        return None
+
+    async def _require_current_url(self, session_id: str) -> str:
+        current_url = await self._current_url_or_none_async(session_id)
+        if current_url is None:
+            raise KeyError(f"Unknown session URL: {session_id}")
+        return current_url
+
+    async def _current_url_or_none_async(self, session_id: str) -> str | None:
+        try:
+            return self.browser.current_url(session_id)
+        except Exception:
+            pass
+        if self.state_store is None:
+            return None
+        payload = await self.state_store.get_session(session_id)
+        if isinstance(payload, dict) and isinstance(payload.get("current_url"), str):
+            return str(payload["current_url"])
         return None
 
     async def _hydrate_run_policy(self, run_id: str | None) -> None:

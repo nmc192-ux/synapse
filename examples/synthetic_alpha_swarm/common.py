@@ -162,6 +162,13 @@ def env_float(name: str, default: float) -> float:
     return float(raw)
 
 
+def env_bool(name: str, default: bool) -> bool:
+    raw = optional_env(name)
+    if raw is None:
+        return default
+    return raw.lower() in {"1", "true", "yes", "on"}
+
+
 def csv_env(name: str, default_items: list[str]) -> list[str]:
     raw = optional_env(name)
     if raw is None:
@@ -263,6 +270,7 @@ def build_project_client(alias: str, agent_id: str | None = None) -> SynapseClie
     creds = build_project_credentials(alias)
     return SynapseClient(
         base_url=env("SYNTHETIC_ALPHA_SWARM_BASE_URL", "http://127.0.0.1:8000"),
+        timeout=env_float("SYNTHETIC_ALPHA_SWARM_CLIENT_TIMEOUT_SECONDS", 60.0),
         api_key=creds.api_key,
         project_id=creds.project_id,
         agent_id=agent_id,
@@ -273,6 +281,7 @@ def build_role_client(role_name: str, agent_id: str | None = None) -> SynapseCli
     creds = build_role_credentials(role_name)
     return SynapseClient(
         base_url=env("SYNTHETIC_ALPHA_SWARM_BASE_URL", "http://127.0.0.1:8000"),
+        timeout=env_float("SYNTHETIC_ALPHA_SWARM_CLIENT_TIMEOUT_SECONDS", 60.0),
         api_key=creds.api_key,
         project_id=creds.project_id,
         agent_id=agent_id,
@@ -442,7 +451,7 @@ class RoleA2AListener:
             try:
                 with build_role_client(self.role_name, agent_id=self.agent_id) as client:
                     url = client.build_websocket_url(path=f"/api/a2a/ws/{self.agent_id}")
-                    with connect(url, open_timeout=15, close_timeout=5) as websocket:
+                    with connect(url, open_timeout=15, close_timeout=5, ping_interval=None) as websocket:
                         backoff = 1.0
                         while True:
                             payload = websocket.recv()
@@ -576,6 +585,10 @@ class PlatformAPI:
         response = self._request("GET", "/api/runs")
         return [RunState.model_validate(item) for item in response.json()]
 
+    def get_agent_status(self, agent_id: str) -> dict[str, object]:
+        response = self._request("GET", f"/api/agents/{agent_id}/status")
+        return dict(response.json())
+
     def list_interventions(self) -> list[OperatorInterventionRecord]:
         response = self._request("GET", "/api/interventions")
         return [OperatorInterventionRecord.model_validate(item) for item in response.json()]
@@ -608,6 +621,44 @@ def build_project_api(alias: str) -> PlatformAPI:
         api_key=creds.api_key,
         project_id=creds.project_id,
     )
+
+
+def build_project_admin_api(alias: str) -> PlatformAPI:
+    creds = build_project_credentials(alias)
+    prefix = f"SYNTHETIC_ALPHA_SWARM_{alias.upper()}_ADMIN"
+    alias_api_key = optional_env(f"{prefix}_API_KEY")
+    alias_bearer_token = optional_env(f"{prefix}_BEARER_TOKEN")
+    global_api_key = optional_env("SYNTHETIC_ALPHA_SWARM_ADMIN_API_KEY")
+    global_bearer_token = optional_env("SYNTHETIC_ALPHA_SWARM_ADMIN_BEARER_TOKEN")
+    api_key = alias_api_key or global_api_key or creds.api_key
+    bearer_token = alias_bearer_token or (None if alias_api_key else global_bearer_token)
+    return PlatformAPI(
+        base_url=env("SYNTHETIC_ALPHA_SWARM_BASE_URL", "http://127.0.0.1:8000"),
+        api_key=api_key,
+        bearer_token=bearer_token,
+        project_id=creds.project_id,
+    )
+
+
+def safe_list_audit_logs(api: PlatformAPI, project_id: str) -> list[dict[str, Any]]:
+    try:
+        return api.list_audit_logs(project_id)
+    except (httpx.HTTPStatusError, PermissionError) as exc:
+        write_json_artifact(
+            f"audit_log_access_{project_id}_{timestamp_slug()}.json",
+            {
+                "project_id": project_id,
+                "error": str(exc),
+                "recorded_at": utc_now().isoformat(),
+            },
+        )
+        record_telemetry_event(
+            "audit_logs.unavailable",
+            project_id=project_id,
+            status="degraded",
+            details={"error": str(exc)},
+        )
+        return []
 
 
 def build_role_api(role_name: str) -> PlatformAPI:
@@ -683,8 +734,14 @@ def build_agent_definition(
 
 
 def register_role_agent(role_name: str, definition: AgentDefinition) -> AgentDefinition:
-    with build_role_client(role_name, agent_id=definition.agent_id) as client:
-        return client.register_agent(definition)
+    try:
+        with build_role_client(role_name, agent_id=definition.agent_id) as client:
+            return client.register_agent(definition)
+    except PermissionError as exc:
+        if "Missing required scopes: admin" not in str(exc):
+            raise
+    with build_admin_api() as admin_api:
+        return admin_api.register_agent(definition)
 
 
 def build_run_plan(

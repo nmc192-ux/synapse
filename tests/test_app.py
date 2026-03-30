@@ -2,21 +2,26 @@ import asyncio
 
 import synapse.api.routes as api_routes
 from synapse.connectors.codex import CodexConnector
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from synapse.main import app
+from synapse.config import Settings
 from synapse.models.a2a import A2AEnvelope, A2AMessageType, AgentWireMessage
 from synapse.models.agent import AgentDefinition, AgentKind, AgentRateLimits, AgentSecurityPolicy
 from synapse.models.browser import BrowserState, PageButton, PageLink, PageSection, StructuredPageModel
 from synapse.models.loop import AgentAction, AgentActionType
 from synapse.models.memory import MemorySearchRequest, MemoryStoreRequest, MemoryType
 from synapse.models.plugin import ToolDescriptor
+from synapse.models.runtime_state import BrowserSessionState
 from synapse.models.task import TaskCreateRequest, TaskRequest, TaskStatus
 from synapse.runtime.registry import AgentRegistry
 from synapse.runtime.planning import NavigationEvaluator, NavigationPlanner
 from synapse.runtime.security import AgentSecuritySandbox, SandboxPermissionError, SandboxRateLimitError
 from synapse.runtime.safety import AgentSafetyLayer
 from synapse.sdk import Synapse, SynapseClient
+from synapse.security.auth import Authenticator
+from synapse.security.policies import PrincipalType, Scope
 
 
 def test_healthcheck() -> None:
@@ -70,6 +75,76 @@ def test_readiness_unavailable(monkeypatch) -> None:
             "redis": {"status": "error", "detail": "redis unavailable"},
         },
     }
+
+
+def test_cors_allows_local_ui_origin() -> None:
+    client = TestClient(app)
+    response = client.options(
+        "/api/health",
+        headers={
+            "Origin": "http://127.0.0.1:3001",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "X-API-Key,X-Synapse-Project-Id",
+        },
+    )
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:3001"
+    assert "X-API-Key" in response.headers["access-control-allow-headers"]
+
+
+def test_close_session_route() -> None:
+    class _StubOrchestrator:
+        def __init__(self) -> None:
+            self.closed: list[str] = []
+
+        async def get_session(self, session_id: str):
+            return BrowserSessionState(
+                session_id=session_id,
+                project_id="project-1",
+                organization_id="org-1",
+                current_url="https://example.com",
+            )
+
+        async def close_session(self, session_id: str) -> None:
+            self.closed.append(session_id)
+
+    orchestrator = _StubOrchestrator()
+    authenticator = Authenticator(
+        Settings(
+            auth_required=True,
+            jwt_secret="test-secret",
+            jwt_issuer="synapse-test",
+            jwt_audience="synapse-test-api",
+        )
+    )
+
+    async def validate_api_key(raw_secret: str, project_id: str | None):
+        assert raw_secret == "synp_valid"
+        assert project_id == "project-1"
+        return authenticator.authenticate_token(
+            authenticator.issue_token(
+                subject="svc-browser",
+                principal_type=PrincipalType.SERVICE,
+                scopes=[Scope.BROWSER_CONTROL.value],
+                organization_id="org-1",
+                project_id="project-1",
+                api_key_id="key-1",
+            )
+        )
+
+    authenticator.set_api_key_validator(validate_api_key)
+    test_app = FastAPI()
+    test_app.include_router(api_routes.router, prefix="/api")
+    test_app.dependency_overrides[api_routes.get_authenticator] = lambda: authenticator
+    test_app.dependency_overrides[api_routes.get_orchestrator] = lambda: orchestrator
+
+    response = TestClient(test_app).delete(
+        "/api/sessions/session-1",
+        headers={"X-API-Key": "synp_valid", "X-Synapse-Project-Id": "project-1"},
+    )
+
+    assert response.status_code == 204
+    assert orchestrator.closed == ["session-1"]
 
 
 def test_browser_state_serialization() -> None:

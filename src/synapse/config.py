@@ -65,6 +65,14 @@ class Settings(BaseSettings):
     jwt_audience: str = "synapse-api"
     jwt_expiration_seconds: int = 3600
     hosted_plugin_partner_allowlist: list[str] = Field(default_factory=list)
+    ui_cors_allowed_origins: list[str] = Field(
+        default_factory=lambda: [
+            "http://127.0.0.1:3001",
+            "http://localhost:3001",
+            "http://127.0.0.1:3002",
+            "http://localhost:3002",
+        ]
+    )
 
     model_config = SettingsConfigDict(env_prefix="SYNAPSE_", env_file=".env", extra="ignore")
 

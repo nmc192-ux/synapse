@@ -2,7 +2,7 @@ import asyncio
 from datetime import datetime, timezone
 
 from synapse.models.agent import AgentDefinition, AgentKind
-from synapse.models.browser import CompactStructuredPageModel, OpenRequest
+from synapse.models.browser import CompactStructuredPageModel, ExtractRequest, OpenRequest, StructuredPageModel
 from synapse.models.events import EventType, RuntimeEvent
 from synapse.models.memory import MemoryRecord, MemoryScope, MemoryStoreRequest, MemoryType
 from synapse.models.plugin import PluginReloadRequest
@@ -205,6 +205,69 @@ def test_tool_service_invokes_and_emits_event() -> None:
             assert event.event_type == EventType.BUDGET_UPDATED
             event = await queue.get()
             assert event.event_type == EventType.TOOL_CALLED
+
+    asyncio.run(scenario())
+
+
+def test_browser_service_recovers_current_url_from_persisted_session_state() -> None:
+    class _FallbackBrowser(_StubBrowser):
+        async def extract(self, session_id: str, selector: str, attribute: str | None = None):
+            return type(
+                "Extraction",
+                (),
+                {
+                    "session_id": session_id,
+                    "matches": [],
+                    "page": StructuredPageModel(title="Example", url="https://example.com/docs"),
+                    "model_dump": lambda self, mode="json": {
+                        "session_id": session_id,
+                        "matches": [],
+                        "page": {"title": "Example", "url": "https://example.com/docs"},
+                    },
+                },
+            )()
+
+        def current_url(self, session_id: str) -> str:
+            raise KeyError(f"Unknown session URL: {session_id}")
+
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        await store.store_session(
+            "session-1",
+            {
+                "session_id": "session-1",
+                "agent_id": "agent-1",
+                "run_id": "run-1",
+                "current_url": "https://example.com/docs",
+                "local_storage": {},
+                "session_storage": {},
+                "downloads": [],
+                "tabs": [],
+                "auth_state": {},
+            },
+        )
+        registry = AgentRegistry()
+        registry.register(
+            AgentDefinition(
+                agent_id="agent-1",
+                kind=AgentKind.CUSTOM,
+                name="Agent 1",
+                security={"allowed_domains": ["example.com"], "allowed_tools": []},
+            )
+        )
+        bus = EventBus(WebSocketManager(state_store=store))
+        budget = BudgetService(AgentBudgetManager(), registry, bus)
+        service = BrowserService(
+            _FallbackBrowser(),
+            AgentSecuritySandbox(registry),
+            AgentSafetyLayer(),
+            bus,
+            budget,
+            state_store=store,
+        )
+
+        result = await service.extract(ExtractRequest(session_id="session-1", agent_id="agent-1", selector="h1"))
+        assert result.page.url == "https://example.com/docs"
 
     asyncio.run(scenario())
 

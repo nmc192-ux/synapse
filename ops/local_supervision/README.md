@@ -14,6 +14,7 @@ Launchd labels:
 - `ai.synapse.backend`
 - `ai.synapse.ui`
 - `ai.openclaw.default-local`
+- `ai.openclaw.discord-hourly-report`
 - `ai.synapse.swarm.director`
 - `ai.synapse.swarm.browser-runner-1`
 - `ai.synapse.swarm.browser-runner-2`
@@ -43,6 +44,12 @@ The supervision env references:
 - ui env: `ui/.env.local`
 - swarm env: `examples/synthetic_alpha_swarm/.env.synthetic-alpha`
 
+Optional OpenClaw Discord report settings:
+
+- `OPENCLAW_DISCORD_REPORT_CHANNEL=discord`
+- `OPENCLAW_DISCORD_REPORT_TARGET=<discord-channel-or-user-id>`
+- `OPENCLAW_DISCORD_REPORT_INTERVAL_SECONDS=3600`
+
 ## Stack Commands
 
 ```bash
@@ -57,6 +64,11 @@ Launchd service logs are written to:
 
 - `~/synapse-logs/services/*.log`
 - `~/synapse-logs/services/*.err.log`
+
+The hourly OpenClaw Discord reporter writes to:
+
+- `~/synapse-logs/services/ai.openclaw.discord-hourly-report.log`
+- `~/synapse-logs/services/ai.openclaw.discord-hourly-report.err.log`
 
 Synthetic swarm report artifacts are mirrored to:
 

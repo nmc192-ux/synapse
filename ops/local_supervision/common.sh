@@ -15,6 +15,13 @@ elif [[ -f "${DEFAULT_SUPERVISION_ENV_FILE}" ]]; then
   set +a
 fi
 
+for candidate in /opt/homebrew/bin /opt/homebrew/sbin /usr/local/bin /usr/local/sbin; do
+  if [[ -d "${candidate}" && ":${PATH}:" != *":${candidate}:"* ]]; then
+    PATH="${candidate}:${PATH}"
+  fi
+done
+export PATH
+
 LOG_DIR="${SYNAPSE_SUPERVISION_LOG_DIR:-${HOME}/synapse-logs/services}"
 RUNTIME_DIR="${SYNAPSE_LOCAL_RUNTIME_DIR:-${HOME}/synapse-runtime}"
 DATA_DIR="${SYNAPSE_LOCAL_DATA_DIR:-${HOME}/synapse-data}"
@@ -33,6 +40,7 @@ STACK_LABELS=(
   "ai.synapse.backend"
   "ai.synapse.ui"
   "ai.openclaw.default-local"
+  "ai.openclaw.discord-hourly-report"
   "ai.synapse.swarm.director"
   "ai.synapse.swarm.browser-runner-1"
   "ai.synapse.swarm.browser-runner-2"
@@ -40,6 +48,10 @@ STACK_LABELS=(
   "ai.synapse.swarm.reporter"
   "ai.synapse.swarm.chaos-monkey"
 )
+
+if [[ "${SYNAPSE_PUBLIC_UI_ENABLE:-false}" == "true" ]]; then
+  STACK_LABELS+=("ai.synapse.public-ui")
+fi
 
 ensure_dirs() {
   mkdir -p "${LOG_DIR}" "${RUNTIME_DIR}" "${DATA_DIR}" "${LAUNCH_AGENTS_DIR}"

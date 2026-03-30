@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { initialState } from "@/lib/mock-data";
 import { buildSynapseHeaders, buildSynapseWebSocketUrl, resolveUiAuth } from "@/lib/auth";
 import {
   ActionItem,
@@ -17,8 +16,9 @@ import {
 } from "@/lib/types";
 
 const defaultSocketUrl =
-  process.env.NEXT_PUBLIC_SYNAPSE_WS_URL ?? "ws://127.0.0.1:8000/api/ws";
+  process.env.NEXT_PUBLIC_SYNAPSE_WS_URL ?? "";
 const defaultApiBaseUrl = process.env.NEXT_PUBLIC_SYNAPSE_API_BASE_URL ?? "";
+const defaultProxyBaseUrl = "/api/dashboard";
 
 type DashboardFeed = DashboardState & {
   authStatus: "ready" | "missing" | "expired" | "forbidden" | "error";
@@ -30,19 +30,29 @@ type DashboardFeed = DashboardState & {
 };
 
 export function useSynapseFeed(): DashboardFeed {
-  const [state, setState] = useState<DashboardState>(initialState);
+  const [state, setState] = useState<DashboardState>(createEmptyState());
   const [authStatus, setAuthStatus] = useState<DashboardFeed["authStatus"]>("ready");
   const [authError, setAuthError] = useState<string | null>(null);
+  const useServerProxy = defaultApiBaseUrl.length === 0;
 
   useEffect(() => {
     const auth = resolveUiAuth();
-    if (!auth.bearerToken && !auth.apiKey) {
+    if (!useServerProxy && !auth.bearerToken && !auth.apiKey) {
       setAuthStatus("missing");
       setAuthError("Missing Synapse bearer token or API key for the dashboard.");
       return;
     }
+    void hydrateDashboard(auth);
     setAuthStatus("ready");
     setAuthError(null);
+    if (!defaultSocketUrl || useServerProxy) {
+      const interval = window.setInterval(() => {
+        void hydrateDashboard(auth);
+      }, 30000);
+      return () => {
+        window.clearInterval(interval);
+      };
+    }
     const socket = new WebSocket(buildSynapseWebSocketUrl(defaultSocketUrl, auth));
 
     socket.onmessage = (message) => {
@@ -72,11 +82,38 @@ export function useSynapseFeed(): DashboardFeed {
     void refreshInterventions();
   }, []);
 
+  async function hydrateDashboard(auth = resolveUiAuth()) {
+    try {
+      const headers = useServerProxy ? undefined : buildSynapseHeaders(auth);
+      const apiRoot = useServerProxy ? defaultProxyBaseUrl : `${defaultApiBaseUrl}/api`;
+      const [runsResponse, agentsResponse, interventionsResponse] = await Promise.all([
+        fetch(`${apiRoot}/runs`, { headers, cache: "no-store" }),
+        fetch(`${apiRoot}/agents`, { headers, cache: "no-store" }),
+        fetch(`${apiRoot}/interventions`, { headers, cache: "no-store" }),
+      ]);
+      const failed = [runsResponse, agentsResponse, interventionsResponse].find((response) => !response.ok);
+      if (failed) {
+        handleAuthFailure(failed.status);
+        return;
+      }
+      const runs = ((await runsResponse.json()) as Record<string, unknown>[]).slice(0, 24);
+      const agents = ((await agentsResponse.json()) as Record<string, unknown>[]).slice(0, 24);
+      const interventions = (await interventionsResponse.json()) as Record<string, unknown>[];
+      setState(buildStateFromSnapshot(runs, agents, interventions));
+      setAuthStatus("ready");
+      setAuthError(null);
+    } catch {
+      setAuthStatus("error");
+      setAuthError("Failed to load live Synapse dashboard data.");
+    }
+  }
+
   async function refreshInterventions() {
     const auth = resolveUiAuth();
     try {
-      const response = await fetch(`${defaultApiBaseUrl}/api/interventions`, {
-        headers: buildSynapseHeaders(auth),
+      const response = await fetch(`${useServerProxy ? defaultProxyBaseUrl : `${defaultApiBaseUrl}/api`}/interventions`, {
+        headers: useServerProxy ? undefined : buildSynapseHeaders(auth),
+        cache: "no-store",
       });
       if (!response.ok) {
         handleAuthFailure(response.status);
@@ -95,6 +132,11 @@ export function useSynapseFeed(): DashboardFeed {
   }
 
   async function approveIntervention(interventionId: string) {
+    if (useServerProxy) {
+      setAuthStatus("forbidden");
+      setAuthError("Public dashboard access is read-only.");
+      return;
+    }
     const auth = resolveUiAuth();
     const response = await fetch(`${defaultApiBaseUrl}/api/interventions/${interventionId}/approve`, {
       method: "POST",
@@ -105,6 +147,11 @@ export function useSynapseFeed(): DashboardFeed {
   }
 
   async function rejectIntervention(interventionId: string, reason?: string) {
+    if (useServerProxy) {
+      setAuthStatus("forbidden");
+      setAuthError("Public dashboard access is read-only.");
+      return;
+    }
     const auth = resolveUiAuth();
     const response = await fetch(`${defaultApiBaseUrl}/api/interventions/${interventionId}/reject`, {
       method: "POST",
@@ -116,6 +163,11 @@ export function useSynapseFeed(): DashboardFeed {
   }
 
   async function provideInterventionInput(interventionId: string, payload: Record<string, unknown>) {
+    if (useServerProxy) {
+      setAuthStatus("forbidden");
+      setAuthError("Public dashboard access is read-only.");
+      return;
+    }
     const auth = resolveUiAuth();
     const response = await fetch(`${defaultApiBaseUrl}/api/interventions/${interventionId}/provide_input`, {
       method: "POST",
@@ -523,6 +575,120 @@ function relativeTimestamp(timestamp?: string): string {
 
 function stringify(value: unknown): string | null {
   return typeof value === "string" || typeof value === "number" ? String(value) : null;
+}
+
+function createEmptyState(): DashboardState {
+  return {
+    events: [],
+    activity: [],
+    thoughts: [],
+    actions: [],
+    memory: [],
+    messages: [],
+    tasks: [],
+    budgets: [],
+    interventions: [],
+    page: {
+      url: "",
+      title: "No live page selected",
+      excerpt: "Waiting for live Synapse page events.",
+      links: [],
+      elements: [],
+      sections: [],
+    },
+  };
+}
+
+function buildStateFromSnapshot(
+  runs: Record<string, unknown>[],
+  agents: Record<string, unknown>[],
+  interventions: Record<string, unknown>[],
+): DashboardState {
+  const sortedRuns = [...runs].sort((left, right) =>
+    String(right.updated_at ?? right.started_at ?? "").localeCompare(String(left.updated_at ?? left.started_at ?? "")),
+  );
+  const latestRun = sortedRuns[0];
+  const latestMetadata =
+    latestRun && latestRun.metadata && typeof latestRun.metadata === "object"
+      ? (latestRun.metadata as Record<string, unknown>)
+      : {};
+
+  const activity: ActivityItem[] = sortedRuns.slice(0, 8).map((run, index) => ({
+    id: `run-activity-${stringify(run.run_id) ?? index}`,
+    label: stringify(run.agent_id) ?? "synapse-agent",
+    detail: `${stringify(run.status) ?? "unknown"} · ${stringify(run.current_phase) ?? "phase unknown"} · ${stringify((run.metadata as Record<string, unknown> | undefined)?.goal) ?? "Runtime task"}`,
+    tone: stringify(run.status) === "failed" ? "alert" : stringify(run.status) === "completed" ? "warm" : "normal",
+    timestamp: relativeTimestamp(stringify(run.updated_at) ?? stringify(run.started_at) ?? undefined),
+  }));
+
+  const tasks: TaskItem[] = sortedRuns.slice(0, 8).map((run, index) => ({
+    id: stringify(run.task_id) ?? `task-${index}`,
+    goal: stringify((run.metadata as Record<string, unknown> | undefined)?.goal) ?? "Runtime task",
+    status: stringify(run.status) ?? "unknown",
+    assignedAgent: stringify(run.agent_id) ?? "unassigned",
+  }));
+
+  const memory: MemoryItem[] = [
+    {
+      id: "memory-project",
+      key: "project",
+      value: stringify(latestRun?.project_id) ?? "unknown",
+    },
+    {
+      id: "memory-latest-goal",
+      key: "latest goal",
+      value: stringify(latestMetadata.goal) ?? "No recent goal available",
+    },
+    {
+      id: "memory-run-count",
+      key: "run count",
+      value: `${sortedRuns.length} recent runs loaded`,
+    },
+  ];
+
+  const pageUrl = stringify(latestMetadata.start_url) ?? "";
+  const pageTitle = stringify(latestMetadata.page_title) ?? stringify(latestMetadata.goal) ?? "No live page selected";
+  const pageExcerpt =
+    stringify(latestMetadata.summary) ??
+    stringify(latestMetadata.goal) ??
+    "Waiting for browser extraction and page navigation events.";
+
+  return {
+    events: [],
+    activity,
+    thoughts: agents.slice(0, 6).map((agent, index) => ({
+      id: `agent-thought-${stringify(agent.agent_id) ?? index}`,
+      agent: stringify(agent.agent_id) ?? "agent",
+      phase: "registered",
+      content: stringify(agent.description) ?? "Agent is registered with the current Synapse project.",
+    })),
+    actions: sortedRuns.slice(0, 8).map((run, index) => ({
+      id: `action-${stringify(run.run_id) ?? index}`,
+      action: stringify(run.current_phase) ?? "run.update",
+      target: stringify((run.metadata as Record<string, unknown> | undefined)?.start_url) ?? stringify(run.task_id) ?? "runtime",
+      status: stringify(run.status) ?? "unknown",
+    })),
+    memory,
+    messages: [],
+    tasks,
+    budgets: [],
+    interventions: interventions.map(toInterventionItem).filter(Boolean) as InterventionItem[],
+    page: {
+      url: pageUrl,
+      title: pageTitle,
+      excerpt: pageExcerpt,
+      links: pageUrl ? [pageUrl] : [],
+      elements: [],
+      sections: pageExcerpt
+        ? [
+            {
+              heading: "Latest Run Context",
+              text: pageExcerpt,
+            },
+          ]
+        : [],
+    },
+  };
 }
 
 function toRecordArray(value: unknown): Record<string, unknown>[] {

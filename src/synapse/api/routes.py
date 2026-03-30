@@ -1115,6 +1115,19 @@ async def get_session(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def close_session(
+    session_id: str,
+    principal: BrowserControlPrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> None:
+    try:
+        await _require_session_project(principal, orchestrator, session_id)
+        await orchestrator.close_session(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.post("/profiles/create", response_model=SessionProfile)
 async def create_session_profile(
     request: SessionProfileCreateRequest,

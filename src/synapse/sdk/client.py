@@ -57,11 +57,14 @@ class SynapseClient:
         self.project_id = project_id
         self.token_refresh_callback = token_refresh_callback
         self._message_signer = MessageSigner()
+        self._browser: SynapseBrowser | None = None
         self._apply_auth_headers()
 
     @property
     def browser(self) -> SynapseBrowser:
-        return SynapseBrowser(self, agent_id=self.agent_id)
+        if self._browser is None or self._browser._agent_id != self.agent_id:
+            self._browser = SynapseBrowser(self, agent_id=self.agent_id)
+        return self._browser
 
     @property
     def memory(self) -> SynapseMemory:
@@ -264,6 +267,16 @@ class SynapseBrowser:
         if self._session_id is None:
             self._session_id = self._client.create_session().session_id
         return self._session_id
+
+    def close(self) -> None:
+        if self._session_id is None:
+            return
+        try:
+            self._client._request("DELETE", f"/api/sessions/{self._session_id}")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
+        self._session_id = None
 
     def open(self, url: str) -> BrowserState:
         payload = OpenRequest(session_id=self.session_id, agent_id=self._agent_id, url=url)

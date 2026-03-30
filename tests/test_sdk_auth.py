@@ -155,6 +155,29 @@ def test_sdk_builds_hosted_websocket_url() -> None:
     assert "project_id=project-1" in websocket_url
 
 
+def test_sdk_browser_close_deletes_existing_session() -> None:
+    requests: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        return httpx.Response(204)
+
+    client = SynapseClient(
+        base_url="http://testserver",
+        api_key="key-abc",
+        project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        browser = client.browser.fork(session_id="session-1")
+        browser.close()
+    finally:
+        client.close()
+
+    assert requests == [("DELETE", "/api/sessions/session-1")]
+
+
 def test_sdk_api_key_auth_succeeds_against_real_route() -> None:
     class _StubOrchestrator:
         def __init__(self) -> None:
@@ -231,3 +254,67 @@ def test_sdk_api_key_auth_succeeds_against_real_route() -> None:
 
     assert response.status_code == 200
     assert response.json()["status"] == "completed"
+
+
+def test_sdk_reuses_browser_session_across_property_accesses() -> None:
+    requests: list[tuple[str, str]] = []
+    created_sessions = iter(["session-1", "session-2"])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        if request.url.path == "/api/sessions":
+            return httpx.Response(200, json={"session_id": next(created_sessions)})
+        if request.url.path == "/api/browser/open":
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": "session-1",
+                    "page": {
+                        "title": "Example",
+                        "url": "https://example.com",
+                        "sections": [],
+                        "buttons": [],
+                        "inputs": [],
+                        "forms": [],
+                        "tables": [],
+                        "links": [],
+                    },
+                    "metadata": {},
+                },
+            )
+        if request.url.path == "/api/browser/extract":
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": "session-1",
+                    "matches": [],
+                    "page": {
+                        "title": "Example",
+                        "url": "https://example.com",
+                        "sections": [],
+                        "buttons": [],
+                        "inputs": [],
+                        "forms": [],
+                        "tables": [],
+                        "links": [],
+                    },
+                },
+            )
+        raise AssertionError(f"unexpected path: {request.url.path}")
+
+    client = SynapseClient(
+        base_url="http://testserver",
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        client.browser.open("https://example.com")
+        client.browser.extract("h1")
+    finally:
+        client.close()
+
+    assert requests == [
+        ("POST", "/api/sessions"),
+        ("POST", "/api/browser/open"),
+        ("POST", "/api/browser/extract"),
+    ]

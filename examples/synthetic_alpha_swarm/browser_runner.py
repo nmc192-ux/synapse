@@ -10,6 +10,7 @@ from common import (
     build_role_client,
     build_run_plan,
     default_safe_urls,
+    env_bool,
     load_json_state,
     register_role_agent,
     retry_with_backoff,
@@ -34,7 +35,7 @@ RUNNER_CONFIG: dict[str, dict[str, str]] = {
         "description": "Baseline browser runner for public docs and reference browsing in the steady project.",
     },
     "browser-runner-2": {
-        "agent_id": "synthetic-alpha-browser-runner-2",
+        "agent_id": "synthetic-alpha-chaos-browser-runner-2",
         "name": "BrowserRunner-2",
         "description": "Chaos-lane browser runner for safe tenancy and failure exercises in the chaos project.",
     },
@@ -97,7 +98,7 @@ def smoke_urls(runner: str) -> list[str]:
     urls = default_safe_urls()
     if runner == "browser-runner-1":
         return urls[:3]
-    return [urls[1], urls[3], urls[4]]
+    return [urls[0], urls[1], urls[2]]
 
 
 def next_smoke_url(runner: str) -> str:
@@ -124,33 +125,38 @@ def run_once(runner: str) -> None:
     ensure_a2a_listener(runner)
 
     direct_results: list[dict[str, Any]] = []
-    with build_role_client(runner, agent_id=config["agent_id"]) as client:
-        url = next_smoke_url(runner)
-        telemetry_context = {
-            "project_alias": project_alias,
-            "project_id": getattr(client, "project_id", None),
-            "role": runner,
-            "agent_id": config["agent_id"],
-        }
-        opened = retry_with_backoff(
-            lambda: client.browser.open(url),
-            label=f"{runner}:browser.open",
-            telemetry_context=telemetry_context,
-        )
-        sleep_with_jitter(1.0, jitter_seconds=0.5)
-        extracted = retry_with_backoff(
-            lambda: client.browser.extract("h1"),
-            label=f"{runner}:browser.extract",
-            telemetry_context=telemetry_context,
-        )
-        direct_results.append(
-            {
-                "url": url,
-                "session_id": opened.session_id,
-                "title": opened.page.title if opened.page else None,
-                "matches": [match.model_dump(mode="json") for match in extracted.matches[:3]],
+    if env_bool("SYNTHETIC_ALPHA_SWARM_DIRECT_BROWSER_SMOKE", False):
+        with build_role_client(runner, agent_id=config["agent_id"]) as client:
+            browser = client.browser
+            url = next_smoke_url(runner)
+            telemetry_context = {
+                "project_alias": project_alias,
+                "project_id": getattr(client, "project_id", None),
+                "role": runner,
+                "agent_id": config["agent_id"],
             }
-        )
+            try:
+                opened = retry_with_backoff(
+                    lambda: browser.open(url),
+                    label=f"{runner}:browser.open",
+                    telemetry_context=telemetry_context,
+                )
+                sleep_with_jitter(1.0, jitter_seconds=0.5)
+                extracted = retry_with_backoff(
+                    lambda: browser.extract("h1"),
+                    label=f"{runner}:browser.extract",
+                    telemetry_context=telemetry_context,
+                )
+                direct_results.append(
+                    {
+                        "url": url,
+                        "session_id": opened.session_id,
+                        "title": opened.page.title if opened.page else None,
+                        "matches": [match.model_dump(mode="json") for match in extracted.matches[:3]],
+                    }
+                )
+            finally:
+                browser.close()
 
     submitted_runs: list[dict[str, Any]] = []
     plan = build_run_plan(

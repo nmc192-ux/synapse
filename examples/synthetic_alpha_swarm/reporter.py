@@ -3,6 +3,7 @@ from __future__ import annotations
 from common import (
     FAILURE_BUCKETS,
     build_agent_definition,
+    build_project_admin_api,
     build_project_api,
     compute_project_metrics,
     filter_audit_logs_since,
@@ -15,6 +16,7 @@ from common import (
     register_role_agent,
     role_project_alias,
     run_forever,
+    safe_list_audit_logs,
     start_role_a2a_listener,
     timestamp_slug,
     utc_now,
@@ -42,7 +44,8 @@ def collect_metrics(window_label: str) -> tuple[list[dict[str, object]], dict[st
         with build_project_api(alias) as api:
             runs = filter_runs_since(api.list_runs(), since)
             interventions = filter_interventions_since(api.list_interventions(), since)
-            audit_logs = filter_audit_logs_since(api.list_audit_logs(api.project_id or ""), since)
+        with build_project_admin_api(alias) as admin_api:
+            audit_logs = filter_audit_logs_since(safe_list_audit_logs(admin_api, admin_api.project_id or ""), since)
             project_telemetry = filter_telemetry_events_since(
                 [event for event in telemetry_events if str(event.get("project_alias")) == alias],
                 since,

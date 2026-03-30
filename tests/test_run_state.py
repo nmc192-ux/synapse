@@ -304,6 +304,7 @@ def test_run_api_endpoints() -> None:
     assert len(worker_requests) == 1
     assert worker_requests[0]["request"]["action_id"] == "action-1"
     assert worker_requests[0]["health_state"] == "completed"
+    assert worker_requests[0]["recovery_class"] == "steady"
     assert worker_requests[0]["has_result"] is True
     assert worker_requests[0]["is_active"] is False
     assert worker_requests[0]["total_age_seconds"] >= 0
@@ -324,6 +325,11 @@ def test_run_api_endpoints() -> None:
     assert graph_response.status_code == 200
     assert graph_response.json()["root_run_id"] == run_id
     assert graph_response.json()["nodes"][0]["run_id"] == run_id
+
+    delegation_summary_response = client.get(f"/api/runs/{run_id}/delegation-summary", headers=headers)
+    assert delegation_summary_response.status_code == 200
+    assert delegation_summary_response.json()["run_id"] == run_id
+    assert delegation_summary_response.json()["delegated_runs"] == 0
 
     children_response = client.get(f"/api/runs/{run_id}/children", headers=headers)
     assert children_response.status_code == 200
@@ -469,9 +475,13 @@ def test_task_runtime_creates_child_run_for_capability_delegation() -> None:
 
         parent_run = await run_store.get(result.run_id)
         child_runs = [run for run in await run_store.list() if run.parent_run_id == parent_run.run_id]
+        delegation_summary = await run_store.get_delegation_summary(parent_run.run_id)
         assert result.artifacts["delegated"] is True
         assert len(child_runs) == 1
         assert child_runs[0].agent_id == "analysis-agent"
+        assert delegation_summary.delegated_runs == 1
+        assert delegation_summary.delegated_agent_ids == ["analysis-agent"]
+        assert delegation_summary.statuses_by_agent["analysis-agent"]["completed"] == 1
 
         events_for_parent = await store.get_runtime_events(run_id=parent_run.run_id)
         event_types = {event["event_type"] for event in events_for_parent}

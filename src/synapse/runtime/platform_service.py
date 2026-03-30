@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import secrets
+import base64
 from datetime import datetime, timezone
 
 from synapse.models.agent import AgentDefinition
@@ -27,6 +29,8 @@ from synapse.security.policies import PrincipalType
 
 
 class PlatformService:
+    _API_KEY_KDF_ITERATIONS = 200_000
+
     def __init__(
         self,
         state_store: RuntimeStateStore | None,
@@ -159,10 +163,9 @@ class PlatformService:
         project_id: str | None = None,
     ) -> APIKeyRecord:
         self._require_store()
-        hashed_secret = self._hash_secret(raw_secret)
         records = await self.list_api_keys()
         for record in records:
-            if record.hashed_secret != hashed_secret:
+            if not self._verify_secret(raw_secret, record.hashed_secret):
                 continue
             if record.status != APIKeyStatus.ACTIVE:
                 raise PermissionError("API key has been revoked.")
@@ -282,7 +285,37 @@ class PlatformService:
 
     @staticmethod
     def _hash_secret(secret: str) -> str:
-        return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+        salt = secrets.token_bytes(16)
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            secret.encode("utf-8"),
+            salt,
+            PlatformService._API_KEY_KDF_ITERATIONS,
+        )
+        return "pbkdf2_sha256${iterations}${salt}${digest}".format(
+            iterations=PlatformService._API_KEY_KDF_ITERATIONS,
+            salt=base64.urlsafe_b64encode(salt).decode("ascii"),
+            digest=base64.urlsafe_b64encode(digest).decode("ascii"),
+        )
+
+    @staticmethod
+    def _verify_secret(secret: str, hashed_secret: str) -> bool:
+        if hashed_secret.startswith("pbkdf2_sha256$"):
+            try:
+                _, iterations, salt_b64, digest_b64 = hashed_secret.split("$", 3)
+                salt = base64.urlsafe_b64decode(salt_b64.encode("ascii"))
+                expected = base64.urlsafe_b64decode(digest_b64.encode("ascii"))
+                computed = hashlib.pbkdf2_hmac(
+                    "sha256",
+                    secret.encode("utf-8"),
+                    salt,
+                    int(iterations),
+                )
+                return hmac.compare_digest(computed, expected)
+            except Exception:
+                return False
+        legacy = hashlib.sha256(secret.encode("utf-8")).hexdigest()
+        return hmac.compare_digest(legacy, hashed_secret)
 
     def _require_store(self) -> None:
         if self.state_store is None:

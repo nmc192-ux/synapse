@@ -38,6 +38,7 @@ export function Dashboard() {
   const lastSignal = state.activity[0]?.timestamp ?? "live";
   const activeTasks = state.tasks.filter((task) => task.status !== "completed").length;
   const a2aMessages = state.messages.filter((message) => message.kind === "a2a").length;
+  const activeRequestHealth = state.requestHealth.filter((item) => item.healthState !== "completed").length;
 
   return (
     <main className="shell">
@@ -68,6 +69,10 @@ export function Dashboard() {
             <div className="stat">
               <span className="stat-label">Active Tasks</span>
               <span className="stat-value">{activeTasks}</span>
+            </div>
+            <div className="stat">
+              <span className="stat-label">Request Health</span>
+              <span className="stat-value">{activeRequestHealth}</span>
             </div>
           </div>
         </header>
@@ -206,6 +211,30 @@ export function Dashboard() {
                     <strong>{task.goal}</strong>
                     <p className="mono">
                       {task.id} · {task.assignedAgent}
+                    </p>
+                  </article>
+                ))}
+              </div>
+            </Panel>
+
+            <Panel title="Request Health" badge={`${state.requestHealth.length} tracked`}>
+              <div className="task-list">
+                {state.requestHealth.map((item) => (
+                  <article className={`task-card task-${item.healthState}`.trim()} key={item.id}>
+                    <span>{item.healthState}</span>
+                    <strong>{item.action}</strong>
+                    <p className="mono">
+                      {item.runId} · {item.workerId}
+                    </p>
+                    <p>
+                      recovery {item.recoveryClass}
+                      {item.recoverySummary ? ` · ${item.recoverySummary}` : ""}
+                    </p>
+                    <p className="mono">
+                      total {item.totalAgeSeconds.toFixed(1)}s
+                      {item.progressAgeSeconds !== null && item.progressAgeSeconds !== undefined
+                        ? ` · progress ${item.progressAgeSeconds.toFixed(1)}s`
+                        : ""}
                     </p>
                   </article>
                 ))}

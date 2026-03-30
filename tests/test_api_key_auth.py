@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -12,6 +13,7 @@ from synapse.models.agent import AgentDefinition, AgentKind
 from synapse.models.platform import APIKeyCreateRequest, APIKeyStatus, OrganizationCreateRequest, ProjectCreateRequest, UserCreateRequest
 from synapse.runtime.budget import AgentBudgetManager
 from synapse.runtime.orchestrator import RuntimeOrchestrator
+from synapse.runtime.platform_service import PlatformService
 from synapse.runtime.registry import AgentRegistry
 from synapse.runtime.state_store import InMemoryRuntimeStateStore
 from synapse.security.auth import Authenticator
@@ -165,3 +167,52 @@ def test_api_key_wrong_project_revoked_and_expired_are_rejected() -> None:
         headers={"X-API-Key": issued.api_key, "X-Synapse-Project-Id": project.project_id},
     )
     assert expired_response.status_code == 401
+
+
+def test_api_key_uses_kdf_hash_and_supports_legacy_secret_verification() -> None:
+    client, orchestrator = _build_hosted_client()
+
+    organization = asyncio.run(orchestrator.create_organization(OrganizationCreateRequest(name="Acme", slug="acme")))
+    project = asyncio.run(
+        orchestrator.create_project(ProjectCreateRequest(organization_id=organization.organization_id, name="Core", slug="core"))
+    )
+    user = asyncio.run(
+        orchestrator.create_user(
+            UserCreateRequest(
+                organization_id=organization.organization_id,
+                project_ids=[project.project_id],
+                email="ops@example.com",
+                display_name="Ops",
+            )
+        )
+    )
+    issued = asyncio.run(
+        orchestrator.create_api_key(
+            APIKeyCreateRequest(
+                organization_id=organization.organization_id,
+                project_id=project.project_id,
+                user_id=user.user_id,
+                name="Hosted Key",
+                scopes=[Scope.A2A_RECEIVE.value],
+            )
+        )
+    )
+    assert issued.record.hashed_secret.startswith("pbkdf2_sha256$")
+
+    legacy_secret = "synp_legacy_test_secret"
+    legacy_record = issued.record.model_copy(
+        update={
+            "api_key_id": "legacy-key",
+            "name": "Legacy Key",
+            "hashed_secret": hashlib.sha256(legacy_secret.encode("utf-8")).hexdigest(),
+            "prefix": legacy_secret[:12],
+            "scopes": [Scope.A2A_RECEIVE.value],
+        }
+    )
+    asyncio.run(orchestrator.state_store.store_api_key(legacy_record.api_key_id, legacy_record.model_dump(mode="json")))
+
+    legacy_response = client.get(
+        f"/api/cloud/projects/{project.project_id}/capabilities",
+        headers={"X-API-Key": legacy_secret, "X-Synapse-Project-Id": project.project_id},
+    )
+    assert legacy_response.status_code == 200

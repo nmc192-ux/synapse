@@ -215,6 +215,14 @@ Partner-safe templates live in [`/Users/jahanzebhussain/Synapse/config/examples`
 
 Partner-facing issue templates live in [`/Users/jahanzebhussain/Synapse/.github/ISSUE_TEMPLATE`](/Users/jahanzebhussain/Synapse/.github/ISSUE_TEMPLATE).
 
+## Enterprise Rollout Docs
+
+Enterprise-facing rollout and hosted-operation material lives in [`/Users/jahanzebhussain/Synapse/docs/enterprise`](/Users/jahanzebhussain/Synapse/docs/enterprise):
+
+- [`/Users/jahanzebhussain/Synapse/docs/enterprise/rollout-readiness.md`](/Users/jahanzebhussain/Synapse/docs/enterprise/rollout-readiness.md)
+- [`/Users/jahanzebhussain/Synapse/docs/enterprise/hosted-operating-model.md`](/Users/jahanzebhussain/Synapse/docs/enterprise/hosted-operating-model.md)
+- [`/Users/jahanzebhussain/Synapse/docs/enterprise/support-playbook.md`](/Users/jahanzebhussain/Synapse/docs/enterprise/support-playbook.md)
+
 ## Development Plan
 
 The current multi-phase development plan for taking Synapse from restricted

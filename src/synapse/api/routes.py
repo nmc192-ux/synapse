@@ -52,7 +52,7 @@ from synapse.models.platform import (
     ProjectCreateRequest,
     UserCreateRequest,
 )
-from synapse.models.run import RunGraph, RunState
+from synapse.models.run import RunDelegationSummary, RunGraph, RunState
 from synapse.models.runtime_state import (
     BrowserNetworkEntry,
     BrowserSessionState,
@@ -1337,6 +1337,19 @@ async def get_run_graph(
     try:
         await _require_run_project(principal, orchestrator, run_id)
         return await orchestrator.get_run_graph(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/runs/{run_id}/delegation-summary", response_model=RunDelegationSummary)
+async def get_run_delegation_summary(
+    run_id: str,
+    principal: TasksReadPrincipal,
+    orchestrator: RuntimeOrchestrator = Depends(get_orchestrator),
+) -> RunDelegationSummary:
+    try:
+        await _require_run_project(principal, orchestrator, run_id)
+        return await orchestrator.get_run_delegation_summary(run_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

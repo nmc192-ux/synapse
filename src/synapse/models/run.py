@@ -68,3 +68,16 @@ class RunGraph(BaseModel):
     completed_runs: int = 0
     failed_runs: int = 0
     active_runs: int = 0
+
+
+class RunDelegationSummary(BaseModel):
+    run_id: str
+    root_run_id: str
+    total_runs: int = 0
+    delegated_runs: int = 0
+    completed_runs: int = 0
+    failed_runs: int = 0
+    active_runs: int = 0
+    child_runs: list[str] = Field(default_factory=list)
+    delegated_agent_ids: list[str] = Field(default_factory=list)
+    statuses_by_agent: dict[str, dict[str, int]] = Field(default_factory=dict)

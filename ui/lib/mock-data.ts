@@ -2,6 +2,7 @@ import { DashboardState } from "@/lib/types";
 
 export const initialState: DashboardState = {
   events: [],
+  requestHealth: [],
   activity: [
     {
       id: "activity-1",

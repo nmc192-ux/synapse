@@ -6,6 +6,7 @@ import {
   ActionItem,
   ActivityItem,
   InterventionItem,
+  RequestHealthItem,
   DashboardState,
   MemoryItem,
   MessageItem,
@@ -99,7 +100,8 @@ export function useSynapseFeed(): DashboardFeed {
       const runs = ((await runsResponse.json()) as Record<string, unknown>[]).slice(0, 24);
       const agents = ((await agentsResponse.json()) as Record<string, unknown>[]).slice(0, 24);
       const interventions = (await interventionsResponse.json()) as Record<string, unknown>[];
-      setState(buildStateFromSnapshot(runs, agents, interventions));
+      const requestHealth = await loadRequestHealth(apiRoot, headers, runs);
+      setState(buildStateFromSnapshot(runs, agents, interventions, requestHealth));
       setAuthStatus("ready");
       setAuthError(null);
     } catch {
@@ -588,6 +590,7 @@ function createEmptyState(): DashboardState {
     tasks: [],
     budgets: [],
     interventions: [],
+    requestHealth: [],
     page: {
       url: "",
       title: "No live page selected",
@@ -603,6 +606,7 @@ function buildStateFromSnapshot(
   runs: Record<string, unknown>[],
   agents: Record<string, unknown>[],
   interventions: Record<string, unknown>[],
+  requestHealth: RequestHealthItem[],
 ): DashboardState {
   const sortedRuns = [...runs].sort((left, right) =>
     String(right.updated_at ?? right.started_at ?? "").localeCompare(String(left.updated_at ?? left.started_at ?? "")),
@@ -673,6 +677,7 @@ function buildStateFromSnapshot(
     tasks,
     budgets: [],
     interventions: interventions.map(toInterventionItem).filter(Boolean) as InterventionItem[],
+    requestHealth,
     page: {
       url: pageUrl,
       title: pageTitle,
@@ -689,6 +694,33 @@ function buildStateFromSnapshot(
         : [],
     },
   };
+}
+
+async function loadRequestHealth(
+  apiRoot: string,
+  headers: HeadersInit | undefined,
+  runs: Record<string, unknown>[],
+): Promise<RequestHealthItem[]> {
+  const runIds = runs
+    .map((run) => stringify(run.run_id))
+    .filter((value): value is string => Boolean(value))
+    .slice(0, 4);
+  if (runIds.length === 0) {
+    return [];
+  }
+  const responses = await Promise.all(
+    runIds.map(async (runId) => {
+      const response = await fetch(`${apiRoot}/runs/${runId}/worker-requests`, {
+        headers,
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        return [];
+      }
+      return (await response.json()) as Record<string, unknown>[];
+    }),
+  );
+  return responses.flatMap((items) => items.map(toRequestHealthItem).filter(Boolean) as RequestHealthItem[]).slice(0, 12);
 }
 
 function toRecordArray(value: unknown): Record<string, unknown>[] {
@@ -757,5 +789,34 @@ function toInterventionItem(value: Record<string, unknown> | null | undefined): 
       `Run ${runId} requires operator review.`,
     createdAt: stringify(value.created_at) ?? undefined,
     resolvedAt: stringify(value.resolved_at),
+  };
+}
+
+function toRequestHealthItem(value: Record<string, unknown> | null | undefined): RequestHealthItem | null {
+  if (!value) {
+    return null;
+  }
+  const request = value.request && typeof value.request === "object" ? (value.request as Record<string, unknown>) : null;
+  if (!request) {
+    return null;
+  }
+  const actionId = stringify(request.action_id);
+  const runId = stringify(request.run_id);
+  const workerId = stringify(request.worker_id);
+  const action = stringify(request.action);
+  if (!actionId || !runId || !workerId || !action) {
+    return null;
+  }
+  return {
+    id: actionId,
+    runId,
+    action,
+    workerId,
+    healthState: stringify(value.health_state) ?? "unknown",
+    recoveryClass: stringify(value.recovery_class) ?? "steady",
+    recoverySummary: stringify(value.recovery_summary),
+    progressAgeSeconds: typeof value.progress_age_seconds === "number" ? value.progress_age_seconds : null,
+    executionAgeSeconds: typeof value.execution_age_seconds === "number" ? value.execution_age_seconds : null,
+    totalAgeSeconds: typeof value.total_age_seconds === "number" ? value.total_age_seconds : 0,
   };
 }

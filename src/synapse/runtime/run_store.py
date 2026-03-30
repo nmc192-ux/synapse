@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from synapse.models.agent import AgentBudgetUsage
-from synapse.models.run import RunGraph, RunGraphEdge, RunGraphNode, RunState, RunStatus
+from synapse.models.run import RunDelegationSummary, RunGraph, RunGraphEdge, RunGraphNode, RunState, RunStatus
 from synapse.models.runtime_event import RunReplayView, RunTimeline, RunTimelineEntry, infer_event_phase
 from synapse.models.runtime_state import (
     BrowserNetworkEntry,
@@ -462,17 +462,50 @@ class RunStore:
         health_state = request.status
         if result is not None and health_state not in {"completed", "failed"}:
             health_state = "completed" if result.success else "failed"
+        recovery_class, recovery_summary = self._derive_recovery_class(request, result, health_state)
 
         return BrowserTaskRequestHealthView(
             request=request,
             result=result,
             health_state=health_state,
+            recovery_class=recovery_class,
+            recovery_summary=recovery_summary,
             has_result=result is not None,
             is_active=health_state in {"queued", "dispatched", "running", "slow", "stuck", "recovered"},
             total_age_seconds=round(total_age_seconds, 3),
             execution_age_seconds=round(execution_age_seconds, 3) if execution_age_seconds is not None else None,
             progress_age_seconds=round(progress_age_seconds, 3) if progress_age_seconds is not None else None,
         )
+
+    @staticmethod
+    def _derive_recovery_class(
+        request: BrowserTaskRequestRecord,
+        result: BrowserTaskResultRecord | None,
+        health_state: str,
+    ) -> tuple[str, str | None]:
+        reason = request.status_reason.strip() if isinstance(request.status_reason, str) and request.status_reason.strip() else None
+        lowered = reason.lower() if reason is not None else ""
+        if health_state in {"queued", "dispatched", "running"}:
+            return "steady", reason
+        if health_state == "slow":
+            return "degraded", reason or "request is active but progressing slower than expected"
+        if health_state == "stuck":
+            return "stalled", reason or "request has not made recent durable progress"
+        if health_state == "recovered":
+            return "recovered", reason or "request resumed after a recovery path"
+        if health_state == "failed":
+            if "recover" in lowered:
+                return "failed_after_recovery", reason
+            return "failed", reason
+        if health_state == "completed":
+            if "recover" in lowered:
+                return "completed_after_recovery", reason
+            if "slow" in lowered or "stall" in lowered or "stuck" in lowered:
+                return "completed_after_delay", reason
+            if result is not None and not result.success:
+                return "failed", result.error
+            return "steady", reason
+        return "steady", reason
 
     async def validate_fencing_token(self, run_id: str | None, worker_id: str, token: int | None) -> bool:
         if run_id is None or token is None:
@@ -593,6 +626,29 @@ class RunStore:
             completed_runs=completed_runs,
             failed_runs=failed_runs,
             active_runs=active_runs,
+        )
+
+    async def get_delegation_summary(self, run_id: str) -> RunDelegationSummary:
+        graph = await self.get_graph(run_id)
+        child_runs = [node for node in graph.nodes if node.run_id != graph.root_run_id]
+        statuses_by_agent: dict[str, dict[str, int]] = {}
+        delegated_agent_ids: list[str] = []
+        for node in child_runs:
+            delegated_agent_ids.append(node.agent_id)
+            per_agent = statuses_by_agent.setdefault(node.agent_id, {})
+            status_key = node.status.value if hasattr(node.status, "value") else str(node.status)
+            per_agent[status_key] = per_agent.get(status_key, 0) + 1
+        return RunDelegationSummary(
+            run_id=run_id,
+            root_run_id=graph.root_run_id,
+            total_runs=graph.total_runs,
+            delegated_runs=len(child_runs),
+            completed_runs=graph.completed_runs,
+            failed_runs=graph.failed_runs,
+            active_runs=graph.active_runs,
+            child_runs=[node.run_id for node in child_runs],
+            delegated_agent_ids=sorted(dict.fromkeys(delegated_agent_ids)),
+            statuses_by_agent=dict(sorted(statuses_by_agent.items())),
         )
 
     async def _get_run_events(self, run_id: str, limit: int) -> list[dict[str, object]]:

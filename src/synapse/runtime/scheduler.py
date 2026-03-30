@@ -249,6 +249,7 @@ class RunScheduler:
             for worker in await self.browser_workers.list_registered_workers()
             if worker.status not in {WorkerRuntimeStatus.OFFLINE, WorkerRuntimeStatus.FAILED}
             and worker.health_status in {WorkerHealthStatus.HEALTHY, WorkerHealthStatus.DEGRADED}
+            and self._worker_dispatchable(worker)
         ]
         if not workers:
             return None
@@ -260,8 +261,18 @@ class RunScheduler:
             worker.worker_id == worker_id
             and worker.status not in {WorkerRuntimeStatus.OFFLINE, WorkerRuntimeStatus.FAILED}
             and worker.health_status in {WorkerHealthStatus.HEALTHY, WorkerHealthStatus.DEGRADED}
+            and self._worker_dispatchable(worker)
             for worker in await self.browser_workers.list_registered_workers()
         )
+
+    @staticmethod
+    def _worker_dispatchable(worker: BrowserWorkerState) -> bool:
+        if not isinstance(worker.metadata, dict):
+            return True
+        drain_state = str(worker.metadata.get("drain_state", "")).lower()
+        if drain_state in {"draining", "maintenance"}:
+            return False
+        return worker.metadata.get("dispatchable") is not False
 
     @staticmethod
     def _assignment_attempts(run: RunState) -> int:
@@ -269,13 +280,16 @@ class RunScheduler:
         return int(attempts) if isinstance(attempts, int) else 0
 
     async def _emit_worker_unavailable(self, run: RunState) -> None:
+        workers = await self.browser_workers.list_registered_workers()
+        drain_only = bool(workers) and not any(self._worker_dispatchable(worker) for worker in workers)
+        reason = "All browser workers are draining or under maintenance." if drain_only else "No browser workers available."
         await self.events.emit(
             EventType.WORKER_UNAVAILABLE,
             run_id=run.run_id,
             agent_id=run.agent_id,
             task_id=run.task_id,
             source="scheduler",
-            payload={"reason": "No browser workers available."},
+            payload={"reason": reason, "dispatchable_workers": sum(1 for worker in workers if self._worker_dispatchable(worker))},
             severity=EventSeverity.WARNING,
             correlation_id=run.correlation_id,
         )

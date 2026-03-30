@@ -169,6 +169,8 @@ class BrowserTaskRequestHealthView(BaseModel):
     request: BrowserTaskRequestRecord
     result: BrowserTaskResultRecord | None = None
     health_state: str
+    recovery_class: str
+    recovery_summary: str | None = None
     has_result: bool = False
     is_active: bool = False
     total_age_seconds: float = 0.0

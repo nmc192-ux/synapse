@@ -105,6 +105,19 @@ export type InterventionItem = {
   resolvedAt?: string | null;
 };
 
+export type RequestHealthItem = {
+  id: string;
+  runId: string;
+  action: string;
+  workerId: string;
+  healthState: string;
+  recoveryClass: string;
+  recoverySummary?: string | null;
+  progressAgeSeconds?: number | null;
+  executionAgeSeconds?: number | null;
+  totalAgeSeconds: number;
+};
+
 export type DashboardState = {
   events: SynapseEvent[];
   activity: ActivityItem[];
@@ -115,5 +128,6 @@ export type DashboardState = {
   tasks: TaskItem[];
   budgets: AgentBudgetItem[];
   interventions: InterventionItem[];
+  requestHealth: RequestHealthItem[];
   page: PageState;
 };

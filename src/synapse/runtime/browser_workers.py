@@ -329,11 +329,22 @@ class BrowserWorkerPool:
                     if worker.controller_id != self.controller_id:
                         continue
                     refreshed = self._with_computed_health(worker, now)
+                    if not self._worker_dispatchable(refreshed):
+                        continue
                     if refreshed.health_status in {WorkerHealthStatus.HEALTHY, WorkerHealthStatus.DEGRADED}:
                         dispatchable.append(refreshed)
                 if dispatchable:
                     return dispatchable
         return self.list_workers()
+
+    @staticmethod
+    def _worker_dispatchable(worker: BrowserWorkerState) -> bool:
+        drain_state = str(worker.metadata.get("drain_state", "")).lower() if isinstance(worker.metadata, dict) else ""
+        if drain_state in {"draining", "maintenance"}:
+            return False
+        if isinstance(worker.metadata, dict) and worker.metadata.get("dispatchable") is False:
+            return False
+        return True
 
     async def _on_worker_heartbeat(self, worker_id: str) -> None:
         if self._run_store is None:

@@ -47,7 +47,7 @@ from synapse.models.platform import (
     UserCreateRequest,
 )
 from synapse.models.plugin import PluginDescriptor, PluginReloadRequest, ToolDescriptor
-from synapse.models.run import RunGraph, RunState, RunStatus
+from synapse.models.run import RunDelegationSummary, RunGraph, RunState, RunStatus
 from synapse.models.runtime_state import (
     BrowserNetworkEntry,
     BrowserSessionState,
@@ -549,6 +549,9 @@ class RuntimeController:
 
     async def get_run_graph(self, run_id: str) -> RunGraph:
         return await self.run_store.get_graph(run_id)
+
+    async def get_run_delegation_summary(self, run_id: str) -> RunDelegationSummary:
+        return await self.run_store.get_delegation_summary(run_id)
 
     async def get_run_trace(self, run_id: str, limit: int = 500) -> list[BrowserTraceEntry]:
         return await self.run_store.get_trace(run_id, limit=limit)

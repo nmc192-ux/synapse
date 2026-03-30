@@ -169,6 +169,43 @@ def test_scheduler_requeues_when_no_workers_available() -> None:
     asyncio.run(scenario())
 
 
+def test_scheduler_skips_draining_workers() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        bus = EventBus(WebSocketManager(state_store=store))
+        bus.set_context_resolver(lambda event: _event_context())
+        scheduler = RunScheduler(
+            run_store,
+            _StubWorkerPool(
+                [
+                    BrowserWorkerState(
+                        worker_id="worker-draining",
+                        queue_name="q1",
+                        status=WorkerRuntimeStatus.IDLE,
+                        active_sessions=0,
+                        metadata={"drain_state": "draining"},
+                    ),
+                    BrowserWorkerState(
+                        worker_id="worker-ready",
+                        queue_name="q2",
+                        status=WorkerRuntimeStatus.IDLE,
+                        active_sessions=1,
+                    ),
+                ]
+            ),
+            bus,
+            cleanup_interval_seconds=60,
+        )
+        run = await run_store.create_run(task_id="task-drain", agent_id="agent-1")
+
+        lease = await scheduler.assign_run(run.run_id)
+
+        assert lease.worker_id == "worker-ready"
+
+    asyncio.run(scenario())
+
+
 def test_scheduler_requeues_expired_leases() -> None:
     async def scenario() -> None:
         store = InMemoryRuntimeStateStore()

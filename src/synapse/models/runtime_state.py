@@ -127,8 +127,14 @@ class BrowserTaskRequestRecord(BaseModel):
     agent_id: str | None = None
     fencing_token: int | None = None
     status: str = "queued"
+    status_reason: str | None = None
     payload: dict[str, object] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    dispatched_at: datetime | None = None
+    started_at: datetime | None = None
+    last_progress_at: datetime | None = None
+    completed_at: datetime | None = None
+    recovered_at: datetime | None = None
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     @model_validator(mode="after")

@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from contextlib import suppress
 
 from synapse.models.browser import BrowserState, StructuredPageModel
@@ -59,6 +59,16 @@ class _FakeBrowserRuntime:
             BrowserSessionState(session_id=session_id, agent_id=agent_id, current_url=url)
             for session_id, url in self.sessions.items()
         ]
+
+
+class _SlowBrowserRuntime(_FakeBrowserRuntime):
+    def __init__(self, worker_name: str, *, delay_seconds: float) -> None:
+        super().__init__(worker_name)
+        self.delay_seconds = delay_seconds
+
+    async def open(self, session_id: str, url: str) -> BrowserState:
+        await asyncio.sleep(self.delay_seconds)
+        return await super().open(session_id, url)
 
 
 def test_browser_worker_pool_dispatches_and_preserves_session_affinity() -> None:
@@ -480,3 +490,142 @@ def test_browser_worker_pool_rejects_stale_fencing_result() -> None:
             await pool.stop()
 
     asyncio.run(scenario())
+
+
+def test_browser_worker_pool_marks_long_running_request_slow_but_completes_with_progress() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        sockets = WebSocketManager(state_store=store)
+        bus = EventBus(sockets)
+        bus.set_context_resolver(lambda event: _event_context())
+        controller_id = "controller-slow"
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            heartbeat_interval_seconds=0.01,
+            lease_timeout_seconds=0.1,
+            runtime_factory=lambda: _SlowBrowserRuntime(worker_name="worker-1", delay_seconds=0.07),
+            run_store=run_store,
+            controller_id=controller_id,
+        )
+        pool.set_event_publisher(bus.publish)
+
+        await pool.start()
+        try:
+            await pool.create_session("s1", agent_id="agent-1", run_id="run-1")
+            async with sockets.subscribe("slow-request", organization_id="org-1", project_id="project-1") as queue:
+                state = await pool.open("s1", "https://example.com/slow")
+                assert state.page.url == "https://example.com/slow"
+                events = await asyncio.wait_for(_collect_browser_events(queue, expected=4), timeout=0.5)
+        finally:
+            await pool.stop()
+
+        event_types = [event.event_type for event in events]
+        assert EventType.WORKER_REQUEST_RUNNING in event_types
+        assert EventType.WORKER_REQUEST_SLOW in event_types
+        assert EventType.WORKER_REQUEST_STUCK not in event_types
+
+        requests = await run_store.list_worker_requests(run_id="run-1", session_id="s1")
+        request = next(item for item in requests if item.action == "open")
+        assert request is not None
+        assert request.started_at is not None
+        assert request.last_progress_at is not None
+        assert request.completed_at is not None
+        assert request.status == "completed"
+
+    asyncio.run(scenario())
+
+
+def test_browser_worker_pool_marks_request_stuck_when_progress_stalls() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        sockets = WebSocketManager(state_store=store)
+        bus = EventBus(sockets)
+        bus.set_context_resolver(lambda event: _event_context())
+        controller_id = "controller-stuck"
+        worker_id = f"{controller_id}:browser-worker-1"
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            heartbeat_interval_seconds=0.2,
+            lease_timeout_seconds=0.05,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id=controller_id,
+        )
+        pool.set_event_publisher(bus.publish)
+        stale_time = datetime.now(timezone.utc) - timedelta(seconds=1)
+        await run_store.save_lease(
+            RunLeaseRecord(
+                run_id="run-1",
+                worker_id=worker_id,
+                token=2,
+                acquired_at=stale_time,
+                expires_at=stale_time,
+            )
+        )
+        request = BrowserTaskRequestRecord(
+            action_id="action-stuck",
+            request_id="request-stuck",
+            run_id="run-1",
+            worker_id=worker_id,
+            action="open",
+            session_id="s1",
+            status="running",
+            payload={"session_id": "s1", "url": "https://example.com/stuck"},
+            dispatched_at=stale_time,
+            started_at=stale_time,
+            last_progress_at=stale_time,
+        )
+        await run_store.save_worker_request(request)
+
+        await pool.start()
+        try:
+            async with sockets.subscribe("stuck-request", organization_id="org-1", project_id="project-1") as queue:
+                await pool._maybe_mark_request_stuck(request)
+                event = await asyncio.wait_for(queue.get(), timeout=0.2)
+                assert event.event_type == EventType.WORKER_REQUEST_STUCK
+                await pool._handle_result(
+                    BrowserTaskResult(
+                        action_id="action-stuck",
+                        request_id="request-stuck",
+                        run_id="run-1",
+                        worker_id=worker_id,
+                        action="open",
+                        session_id="s1",
+                        success=True,
+                        payload={"ok": True},
+                        fencing_token=2,
+                    )
+                )
+        finally:
+            await pool.stop()
+
+        stored = await run_store.get_worker_request("run-1", "action-stuck")
+        assert stored is not None
+        assert stored.completed_at is not None
+        assert stored.status == "completed"
+
+    asyncio.run(scenario())
+
+
+async def _collect_browser_events(queue: asyncio.Queue, *, expected: int) -> list:
+    events = []
+    seen = set()
+    while len(seen) < expected:
+        event = await queue.get()
+        if event.event_type not in {
+            EventType.BROWSER_TASK_DISPATCHED,
+            EventType.WORKER_REQUEST_RUNNING,
+            EventType.WORKER_REQUEST_SLOW,
+            EventType.WORKER_REQUEST_STUCK,
+            EventType.BROWSER_TASK_COMPLETED,
+        }:
+            continue
+        events.append(event)
+        seen.add(event.event_type)
+        if EventType.BROWSER_TASK_COMPLETED in seen and len(seen) >= expected:
+            break
+    return events

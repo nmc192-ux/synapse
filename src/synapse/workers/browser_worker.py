@@ -13,6 +13,7 @@ from synapse.runtime.queues import BrowserTaskEnvelope, BrowserTaskQueue, Browse
 ResultHandler = Callable[[BrowserTaskResult], Awaitable[None]]
 EventPublisher = Callable[[RuntimeEvent], Awaitable[None]]
 HeartbeatCallback = Callable[[str], Awaitable[None]]
+RequestLifecycleCallback = Callable[[str, BrowserTaskEnvelope], Awaitable[None]]
 
 
 class BrowserWorker:
@@ -25,6 +26,8 @@ class BrowserWorker:
         event_publisher: EventPublisher | None = None,
         heartbeat_interval_seconds: float = 15.0,
         heartbeat_callback: HeartbeatCallback | None = None,
+        request_started_callback: RequestLifecycleCallback | None = None,
+        request_progress_callback: RequestLifecycleCallback | None = None,
     ) -> None:
         self.worker_id = worker_id
         self.queue = queue
@@ -33,11 +36,14 @@ class BrowserWorker:
         self.event_publisher = event_publisher
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self.heartbeat_callback = heartbeat_callback
+        self.request_started_callback = request_started_callback
+        self.request_progress_callback = request_progress_callback
         self.runtime: Any | None = None
         self.state = BrowserWorkerState(worker_id=worker_id, queue_name=queue.name)
         self._loop_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._running = False
+        self._current_item: BrowserTaskEnvelope | None = None
 
     async def start(self) -> None:
         if self._running:
@@ -87,6 +93,9 @@ class BrowserWorker:
             try:
                 self.state.status = WorkerRuntimeStatus.BUSY
                 self.state.current_request_id = item.request_id
+                self._current_item = item
+                if self.request_started_callback is not None:
+                    await self.request_started_callback(self.worker_id, item)
                 await self._emit_status_event()
                 handler = getattr(self.runtime, item.action)
                 payload = await handler(**item.arguments)
@@ -122,6 +131,7 @@ class BrowserWorker:
             finally:
                 self.state.status = WorkerRuntimeStatus.IDLE if self._running else WorkerRuntimeStatus.OFFLINE
                 self.state.current_request_id = None
+                self._current_item = None
                 self.state.last_heartbeat = datetime.now(timezone.utc)
                 await self._emit_status_event()
 
@@ -131,6 +141,8 @@ class BrowserWorker:
             self.state.last_heartbeat = datetime.now(timezone.utc)
             if self.heartbeat_callback is not None:
                 await self.heartbeat_callback(self.worker_id)
+            if self._current_item is not None and self.request_progress_callback is not None:
+                await self.request_progress_callback(self.worker_id, self._current_item)
             if self.event_publisher is not None:
                 await self.event_publisher(
                     RuntimeEvent(

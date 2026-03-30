@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from synapse.config import settings
-from synapse.models.runtime_event import EventType, RuntimeEvent
+from synapse.models.runtime_event import EventSeverity, EventType, RuntimeEvent
 from synapse.models.runtime_state import (
     BrowserSessionState,
     BrowserSessionOwnershipRecord,
@@ -57,6 +57,7 @@ class BrowserWorkerPool:
         self._session_runs: dict[str, str | None] = {}
         self._session_urls: dict[str, str | None] = {}
         self._pending: dict[str, asyncio.Future[BrowserTaskResult]] = {}
+        self._request_alerts: set[tuple[str, EventType]] = set()
         self._next_worker_index = 0
 
     def set_state_store(self, state_store: RuntimeStateStore) -> None:
@@ -87,6 +88,8 @@ class BrowserWorkerPool:
                 event_publisher=self._event_publisher,
                 heartbeat_interval_seconds=self.heartbeat_interval_seconds,
                 heartbeat_callback=self._on_worker_heartbeat,
+                request_started_callback=self._on_request_started,
+                request_progress_callback=self._on_request_progress,
             )
             self._workers[worker_id] = worker
             await worker.start()
@@ -107,6 +110,7 @@ class BrowserWorkerPool:
             if not future.done():
                 future.cancel()
         self._pending.clear()
+        self._request_alerts.clear()
 
     async def create_session(
         self,
@@ -368,12 +372,21 @@ class BrowserWorkerPool:
         if item.request_id is None:
             item.request_id = item.action_id
         existing_request = await self._load_existing_request(item.run_id, item.action_id)
-        if existing_request is not None and existing_request.status in {"queued", "dispatched", "running"}:
+        if existing_request is not None and existing_request.status in {
+            "queued",
+            "dispatched",
+            "running",
+            "slow",
+            "stuck",
+            "recovered",
+        }:
             return await self._wait_for_durable_result(existing_request)
         item.fencing_token = await self._current_fencing_token(item.run_id, worker_id)
         loop = asyncio.get_running_loop()
         future: asyncio.Future[BrowserTaskResult] = loop.create_future()
         self._pending[item.action_id] = future
+        self._request_alerts.discard((item.action_id, EventType.WORKER_REQUEST_SLOW))
+        self._request_alerts.discard((item.action_id, EventType.WORKER_REQUEST_STUCK))
         await self._persist_request(worker_id, item, status="dispatched")
         await worker.queue.put(item)
         if self._event_publisher is not None:
@@ -519,6 +532,7 @@ class BrowserWorkerPool:
     async def _persist_request(self, worker_id: str, item: BrowserTaskEnvelope, *, status: str) -> None:
         if self._run_store is None:
             return
+        now = datetime.now(timezone.utc)
         await self._run_store.save_worker_request(
             BrowserTaskRequestRecord(
                 action_id=item.action_id,
@@ -532,6 +546,55 @@ class BrowserWorkerPool:
                 fencing_token=item.fencing_token,
                 status=status,
                 payload=dict(item.arguments),
+                dispatched_at=now if status in {"dispatched", "running", "slow", "stuck"} else None,
+                started_at=now if status in {"running", "slow", "stuck"} else None,
+                last_progress_at=now if status in {"dispatched", "running", "slow", "stuck"} else None,
+            )
+        )
+
+    async def _on_request_started(self, worker_id: str, item: BrowserTaskEnvelope) -> None:
+        request = await self._load_existing_request(item.run_id, item.action_id)
+        now = datetime.now(timezone.utc)
+        if request is not None:
+            await self._run_store.save_worker_request(
+                request.model_copy(
+                    update={
+                        "worker_id": worker_id,
+                        "status": "running",
+                        "started_at": request.started_at or now,
+                        "dispatched_at": request.dispatched_at or now,
+                        "last_progress_at": now,
+                        "updated_at": now,
+                        "status_reason": None,
+                    }
+                )
+            )
+        await self._emit_worker_event(
+            EventType.WORKER_REQUEST_RUNNING,
+            run_id=item.run_id,
+            session_id=item.session_id,
+            payload={
+                "worker_id": worker_id,
+                "action_id": item.action_id,
+                "request_id": item.request_id,
+                "action": item.action,
+            },
+        )
+
+    async def _on_request_progress(self, worker_id: str, item: BrowserTaskEnvelope) -> None:
+        request = await self._load_existing_request(item.run_id, item.action_id)
+        if request is None or self._run_store is None:
+            return
+        now = datetime.now(timezone.utc)
+        if request.status not in {"dispatched", "running", "slow"}:
+            return
+        await self._run_store.save_worker_request(
+            request.model_copy(
+                update={
+                    "worker_id": worker_id,
+                    "last_progress_at": now,
+                    "updated_at": now,
+                }
             )
         )
 
@@ -571,14 +634,20 @@ class BrowserWorkerPool:
         )
         request = await self._run_store.get_worker_request(result.run_id, result.action_id)
         if request is not None:
+            now = datetime.now(timezone.utc)
             await self._run_store.save_worker_request(
                 request.model_copy(
                     update={
                         "status": "completed" if result.success else "failed",
-                        "updated_at": datetime.now(timezone.utc),
+                        "completed_at": now,
+                        "last_progress_at": now,
+                        "updated_at": now,
+                        "status_reason": result.error if not result.success else None,
                     }
                 )
             )
+        self._request_alerts.discard((result.action_id, EventType.WORKER_REQUEST_SLOW))
+        self._request_alerts.discard((result.action_id, EventType.WORKER_REQUEST_STUCK))
         return True
 
     async def _load_existing_result(self, item: BrowserTaskEnvelope) -> BrowserTaskResult | None:
@@ -619,10 +688,17 @@ class BrowserWorkerPool:
         item: BrowserTaskEnvelope,
         future: asyncio.Future[BrowserTaskResult],
     ) -> BrowserTaskResult:
-        try:
-            return await asyncio.wait_for(asyncio.shield(future), timeout=self._lease_timeout_seconds)
-        except TimeoutError:
-            return await self._wait_for_durable_result(item)
+        poll_interval = min(0.25, max(self.heartbeat_interval_seconds, 0.05))
+        started = datetime.now(timezone.utc)
+        while True:
+            remaining = self._lease_timeout_seconds - (datetime.now(timezone.utc) - started).total_seconds()
+            if remaining <= 0:
+                await self._maybe_mark_request_stuck(item)
+                return await self._wait_for_durable_result(item)
+            try:
+                return await asyncio.wait_for(asyncio.shield(future), timeout=min(poll_interval, remaining))
+            except TimeoutError:
+                await self._maybe_mark_request_slow(item)
 
     async def _wait_for_durable_result(
         self,
@@ -649,8 +725,92 @@ class BrowserWorkerPool:
                     fencing_token=existing.fencing_token,
                     completed_at=existing.completed_at,
                 )
+            await self._maybe_mark_request_stuck(item_or_request)
             await asyncio.sleep(0.05)
         raise TimeoutError(f"Timed out waiting for durable worker result: {action_id}")
+
+    async def _maybe_mark_request_slow(self, item_or_request: BrowserTaskEnvelope | BrowserTaskRequestRecord) -> None:
+        if self._run_store is None:
+            return
+        request = await self._request_record(item_or_request)
+        if request is None or request.status not in {"dispatched", "running"}:
+            return
+        anchor = request.started_at or request.dispatched_at or request.created_at
+        age_seconds = (datetime.now(timezone.utc) - anchor).total_seconds()
+        threshold = max(self.heartbeat_interval_seconds * 2, self._lease_timeout_seconds / 2)
+        if age_seconds < threshold:
+            return
+        alert_key = (request.action_id, EventType.WORKER_REQUEST_SLOW)
+        if alert_key in self._request_alerts:
+            return
+        self._request_alerts.add(alert_key)
+        now = datetime.now(timezone.utc)
+        updated = request.model_copy(
+            update={
+                "status": "slow",
+                "status_reason": f"request exceeded {threshold:.2f}s without a durable result",
+                "updated_at": now,
+            }
+        )
+        await self._run_store.save_worker_request(updated)
+        await self._emit_worker_event(
+            EventType.WORKER_REQUEST_SLOW,
+            run_id=request.run_id,
+            session_id=request.session_id,
+            payload={
+                "worker_id": request.worker_id,
+                "action_id": request.action_id,
+                "request_id": request.request_id,
+                "status": updated.status,
+                "age_seconds": round(age_seconds, 3),
+            },
+            severity=EventSeverity.WARNING,
+        )
+
+    async def _maybe_mark_request_stuck(self, item_or_request: BrowserTaskEnvelope | BrowserTaskRequestRecord) -> None:
+        if self._run_store is None:
+            return
+        request = await self._request_record(item_or_request)
+        if request is None or request.status not in {"dispatched", "running", "slow"}:
+            return
+        anchor = request.last_progress_at or request.started_at or request.dispatched_at or request.created_at
+        age_seconds = (datetime.now(timezone.utc) - anchor).total_seconds()
+        if age_seconds < self._lease_timeout_seconds:
+            return
+        alert_key = (request.action_id, EventType.WORKER_REQUEST_STUCK)
+        if alert_key in self._request_alerts:
+            return
+        self._request_alerts.add(alert_key)
+        now = datetime.now(timezone.utc)
+        updated = request.model_copy(
+            update={
+                "status": "stuck",
+                "status_reason": f"request exceeded {self._lease_timeout_seconds:.2f}s without a durable result",
+                "updated_at": now,
+            }
+        )
+        await self._run_store.save_worker_request(updated)
+        await self._emit_worker_event(
+            EventType.WORKER_REQUEST_STUCK,
+            run_id=request.run_id,
+            session_id=request.session_id,
+            payload={
+                "worker_id": request.worker_id,
+                "action_id": request.action_id,
+                "request_id": request.request_id,
+                "status": updated.status,
+                "age_seconds": round(age_seconds, 3),
+            },
+            severity=EventSeverity.WARNING,
+        )
+
+    async def _request_record(
+        self,
+        item_or_request: BrowserTaskEnvelope | BrowserTaskRequestRecord,
+    ) -> BrowserTaskRequestRecord | None:
+        if isinstance(item_or_request, BrowserTaskRequestRecord):
+            return item_or_request
+        return await self._load_existing_request(item_or_request.run_id, item_or_request.action_id)
 
     async def _persist_session_ownership(
         self,
@@ -743,7 +903,7 @@ class BrowserWorkerPool:
         for worker in self._workers:
             requests = await self._run_store.list_worker_requests(worker_id=worker)
             for request in requests:
-                if request.status not in {"queued", "dispatched", "running"}:
+                if request.status not in {"queued", "dispatched", "running", "slow", "stuck"}:
                     continue
                 result = await self._run_store.get_worker_result(request.run_id, request.action_id)
                 if result is not None:
@@ -761,8 +921,16 @@ class BrowserWorkerPool:
                         },
                     )
                 else:
+                    now = datetime.now(timezone.utc)
                     await self._run_store.save_worker_request(
-                        request.model_copy(update={"status": "recovered", "updated_at": datetime.now(timezone.utc)})
+                        request.model_copy(
+                            update={
+                                "status": "recovered",
+                                "recovered_at": now,
+                                "updated_at": now,
+                                "status_reason": "controller restart recovered in-flight request",
+                            }
+                        )
                     )
                     await self._emit_worker_event(
                         EventType.WORKER_REQUEST_RECOVERED,
@@ -793,6 +961,7 @@ class BrowserWorkerPool:
         run_id: str | None = None,
         session_id: str | None = None,
         payload: dict[str, object],
+        severity: EventSeverity = EventSeverity.INFO,
     ) -> None:
         if self._event_publisher is None:
             return
@@ -803,6 +972,7 @@ class BrowserWorkerPool:
                 session_id=session_id,
                 source="browser_worker_pool",
                 payload=payload,
+                severity=severity,
                 correlation_id=str(payload.get("request_id") or payload.get("action_id") or run_id or session_id),
             )
         )

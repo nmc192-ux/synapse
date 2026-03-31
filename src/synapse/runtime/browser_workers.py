@@ -375,7 +375,24 @@ class BrowserWorkerPool:
         return payload
 
     async def _dispatch(self, worker_id: str, item: BrowserTaskEnvelope):
-        worker = self._workers[worker_id]
+        worker = self._workers.get(worker_id)
+        if worker is None:
+            await self._emit_worker_event(
+                EventType.WORKER_UNAVAILABLE,
+                run_id=item.run_id,
+                session_id=item.session_id,
+                payload={
+                    "worker_id": worker_id,
+                    "action_id": item.action_id,
+                    "request_id": item.request_id or item.action_id,
+                    "reason_code": "remote_worker",
+                    "reason": "request is assigned to a worker owned by another controller",
+                },
+                severity=EventSeverity.WARNING,
+            )
+            raise RuntimeError(
+                f"Browser request cannot be dispatched locally because worker {worker_id} is not owned by controller {self.controller_id}."
+            )
         existing_result = await self._load_existing_result(item)
         if existing_result is not None:
             if not existing_result.success:

@@ -551,6 +551,48 @@ def test_browser_worker_pool_rejects_stale_fencing_result() -> None:
     asyncio.run(scenario())
 
 
+def test_browser_worker_pool_rejects_remote_run_assignment_for_local_dispatch() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        sockets = WebSocketManager(state_store=store)
+        bus = EventBus(sockets)
+        bus.set_context_resolver(lambda event: _event_context())
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id="controller-local",
+        )
+        pool.set_event_publisher(bus.publish)
+        await run_store.save_lease(
+            RunLeaseRecord(
+                run_id="run-remote",
+                worker_id="controller-remote:browser-worker-1",
+                token=3,
+                acquired_at=datetime.now(timezone.utc),
+                expires_at=datetime.now(timezone.utc) + timedelta(seconds=30),
+            )
+        )
+        await pool.start()
+        try:
+            async with sockets.subscribe("remote-worker", organization_id="org-1", project_id="project-1") as queue:
+                try:
+                    await pool.call_tool("web.search", {"query": "synapse"}, run_id="run-remote")
+                except RuntimeError as exc:
+                    assert "cannot be dispatched locally" in str(exc)
+                else:
+                    raise AssertionError("expected local dispatch to reject remote assigned worker")
+                event = await asyncio.wait_for(queue.get(), timeout=0.2)
+                assert event.event_type == EventType.WORKER_UNAVAILABLE
+                assert event.payload["reason_code"] == "remote_worker"
+        finally:
+            await pool.stop()
+
+    asyncio.run(scenario())
+
+
 def test_browser_worker_pool_marks_long_running_request_slow_but_completes_with_progress() -> None:
     async def scenario() -> None:
         store = InMemoryRuntimeStateStore()

@@ -14,6 +14,7 @@ from synapse.models.runtime_state import (
     BrowserTaskRequestRecord,
     BrowserTaskResultRecord,
     BrowserWorkerState,
+    RunLeaseStatus,
     WorkerHealthStatus,
     WorkerRuntimeStatus,
 )
@@ -409,7 +410,9 @@ class BrowserWorkerPool:
             "stuck",
             "recovered",
         }:
-            return await self._wait_for_durable_result(existing_request)
+            abandoned = await self._maybe_finalize_abandoned_request(existing_request)
+            if abandoned is None:
+                return await self._wait_for_durable_result(existing_request)
         item.fencing_token = await self._current_fencing_token(item.run_id, worker_id)
         loop = asyncio.get_running_loop()
         future: asyncio.Future[BrowserTaskResult] = loop.create_future()
@@ -686,6 +689,7 @@ class BrowserWorkerPool:
         if self._run_store is None:
             return True
         if not await self._run_store.validate_fencing_token(result.run_id, result.worker_id, result.fencing_token):
+            await self._reject_stale_result(result)
             return False
         existing = await self._run_store.get_worker_result(result.run_id, result.action_id)
         if existing is not None:
@@ -811,6 +815,11 @@ class BrowserWorkerPool:
                     completed_at=existing.completed_at,
                 )
             await self._maybe_mark_request_stuck(item_or_request)
+            request = await self._request_record(item_or_request)
+            if request is not None:
+                abandoned = await self._maybe_finalize_abandoned_request(request)
+                if abandoned is not None:
+                    raise TimeoutError(abandoned.status_reason or f"Durable worker result abandoned: {action_id}")
             await asyncio.sleep(0.05)
         raise TimeoutError(f"Timed out waiting for durable worker result: {action_id}")
 
@@ -896,6 +905,87 @@ class BrowserWorkerPool:
         if isinstance(item_or_request, BrowserTaskRequestRecord):
             return item_or_request
         return await self._load_existing_request(item_or_request.run_id, item_or_request.action_id)
+
+    async def _maybe_finalize_abandoned_request(
+        self,
+        request: BrowserTaskRequestRecord,
+    ) -> BrowserTaskRequestRecord | None:
+        if self._run_store is None or request.run_id is None:
+            return None
+        if request.status not in {"stuck", "recovered"}:
+            return None
+        lease = await self._run_store.get_lease(request.run_id)
+        reason_code: str | None = None
+        reason: str | None = None
+        if lease is None:
+            reason_code = "lease_missing"
+            reason = "durable result wait ended because the run lease is no longer present"
+        elif lease.status != RunLeaseStatus.ACTIVE:
+            reason_code = "lease_inactive"
+            reason = "durable result wait ended because the run lease is no longer active"
+        elif lease.worker_id != request.worker_id:
+            reason_code = "lease_moved"
+            reason = f"durable result wait ended after lease ownership moved to {lease.worker_id}"
+        if reason_code is None or reason is None:
+            return None
+        now = datetime.now(timezone.utc)
+        updated = request.model_copy(
+            update={
+                "status": "failed",
+                "status_reason": reason,
+                "updated_at": now,
+                "completed_at": request.completed_at or now,
+            }
+        )
+        await self._run_store.save_worker_request(updated)
+        self._request_alerts.discard((request.action_id, EventType.WORKER_REQUEST_SLOW))
+        self._request_alerts.discard((request.action_id, EventType.WORKER_REQUEST_STUCK))
+        await self._emit_worker_event(
+            EventType.WORKER_UNAVAILABLE,
+            run_id=request.run_id,
+            session_id=request.session_id,
+            payload={
+                "worker_id": request.worker_id,
+                "action_id": request.action_id,
+                "request_id": request.request_id,
+                "reason_code": reason_code,
+                "reason": reason,
+            },
+            severity=EventSeverity.WARNING,
+        )
+        return updated
+
+    async def _reject_stale_result(self, result: BrowserTaskResult) -> None:
+        if self._run_store is None:
+            return
+        request = await self._run_store.get_worker_request(result.run_id, result.action_id)
+        if request is None or request.status in {"completed", "failed"}:
+            return
+        reason = "late worker result rejected because lease ownership changed before durable completion"
+        updated = request.model_copy(
+            update={
+                "status": "failed",
+                "status_reason": reason,
+                "updated_at": datetime.now(timezone.utc),
+                "completed_at": request.completed_at or datetime.now(timezone.utc),
+            }
+        )
+        await self._run_store.save_worker_request(updated)
+        self._request_alerts.discard((request.action_id, EventType.WORKER_REQUEST_SLOW))
+        self._request_alerts.discard((request.action_id, EventType.WORKER_REQUEST_STUCK))
+        await self._emit_worker_event(
+            EventType.WORKER_UNAVAILABLE,
+            run_id=request.run_id,
+            session_id=request.session_id,
+            payload={
+                "worker_id": result.worker_id,
+                "action_id": result.action_id,
+                "request_id": result.request_id or result.action_id,
+                "reason_code": "stale_fencing_result",
+                "reason": reason,
+            },
+            severity=EventSeverity.WARNING,
+        )
 
     def _completion_status_reason(
         self,

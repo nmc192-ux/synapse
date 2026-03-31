@@ -540,6 +540,8 @@ def test_browser_worker_pool_rejects_stale_fencing_result() -> None:
 
             assert not future.done()
             assert await run_store.get_worker_result("run-1", "action-stale") is None
+            request = await run_store.get_worker_request("run-1", "action-stale")
+            assert request is None
         finally:
             pending = pool._pending.pop("action-stale", None)
             if pending is not None:
@@ -547,6 +549,132 @@ def test_browser_worker_pool_rejects_stale_fencing_result() -> None:
                 with suppress(asyncio.CancelledError):
                     await pending
             await pool.stop()
+
+    asyncio.run(scenario())
+
+
+def test_browser_worker_pool_marks_stale_fencing_request_failed_when_record_exists() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        sockets = WebSocketManager(state_store=store)
+        bus = EventBus(sockets)
+        bus.set_context_resolver(lambda event: _event_context())
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id="controller-stale-token-record",
+        )
+        pool.set_event_publisher(bus.publish)
+        worker_id = "controller-stale-token-record:browser-worker-1"
+        await run_store.save_lease(
+            RunLeaseRecord(
+                run_id="run-1",
+                worker_id=worker_id,
+                acquired_at=datetime.now(timezone.utc),
+                expires_at=datetime.now(timezone.utc),
+                token=2,
+            )
+        )
+        await run_store.save_worker_request(
+            BrowserTaskRequestRecord(
+                action_id="action-stale-record",
+                request_id="request-stale-record",
+                run_id="run-1",
+                worker_id=worker_id,
+                action="open",
+                session_id="s1",
+                status="stuck",
+                fencing_token=1,
+                status_reason="request exceeded 0.10s without a durable result",
+            )
+        )
+        await pool.start()
+        try:
+            async with sockets.subscribe("stale-result", organization_id="org-1", project_id="project-1") as queue:
+                await pool._handle_result(
+                    BrowserTaskResult(
+                        action_id="action-stale-record",
+                        request_id="request-stale-record",
+                        run_id="run-1",
+                        worker_id=worker_id,
+                        action="open",
+                        session_id="s1",
+                        success=True,
+                        payload={"stale": True},
+                        fencing_token=1,
+                    )
+                )
+                event = await asyncio.wait_for(queue.get(), timeout=0.2)
+                assert event.event_type == EventType.WORKER_UNAVAILABLE
+                assert event.payload["reason_code"] == "stale_fencing_result"
+        finally:
+            await pool.stop()
+
+        request = await run_store.get_worker_request("run-1", "action-stale-record")
+        assert request is not None
+        assert request.status == "failed"
+        assert request.status_reason == "late worker result rejected because lease ownership changed before durable completion"
+
+    asyncio.run(scenario())
+
+
+def test_browser_worker_pool_abandons_stuck_request_when_lease_moves() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        sockets = WebSocketManager(state_store=store)
+        bus = EventBus(sockets)
+        bus.set_context_resolver(lambda event: _event_context())
+        controller_id = "controller-lease-moved"
+        worker_id = f"{controller_id}:browser-worker-1"
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id=controller_id,
+        )
+        pool.set_event_publisher(bus.publish)
+        await run_store.save_lease(
+            RunLeaseRecord(
+                run_id="run-1",
+                worker_id="controller-remote:browser-worker-1",
+                acquired_at=datetime.now(timezone.utc),
+                expires_at=datetime.now(timezone.utc) + timedelta(seconds=30),
+                token=4,
+            )
+        )
+        request = BrowserTaskRequestRecord(
+            action_id="action-lease-moved",
+            request_id="request-lease-moved",
+            run_id="run-1",
+            worker_id=worker_id,
+            action="open",
+            session_id="s1",
+            status="stuck",
+            status_reason="request exceeded 0.10s without a durable result",
+        )
+        await run_store.save_worker_request(request)
+
+        await pool.start()
+        try:
+            async with sockets.subscribe("lease-moved", organization_id="org-1", project_id="project-1") as queue:
+                updated = await pool._maybe_finalize_abandoned_request(request)
+                assert updated is not None
+                assert updated.status == "failed"
+                assert updated.status_reason == "durable result wait ended after lease ownership moved to controller-remote:browser-worker-1"
+                event = await asyncio.wait_for(queue.get(), timeout=0.2)
+                assert event.event_type == EventType.WORKER_UNAVAILABLE
+                assert event.payload["reason_code"] == "lease_moved"
+        finally:
+            await pool.stop()
+
+        stored = await run_store.get_worker_request("run-1", "action-lease-moved")
+        assert stored is not None
+        assert stored.status == "failed"
 
     asyncio.run(scenario())
 

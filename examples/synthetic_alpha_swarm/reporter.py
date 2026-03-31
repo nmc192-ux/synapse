@@ -68,6 +68,7 @@ def collect_metrics(window_label: str) -> tuple[list[dict[str, object]], dict[st
 
 def build_daily_report(projects: list[dict[str, object]], summary: dict[str, object]) -> str:
     alpha_gate = summary["alpha_gate"]
+    blocker_lines = [f"  - {reason}" for reason in alpha_gate.get("release_blockers", [])] or ["  - none"]
     lines = [
         "# Synthetic Alpha Daily Report",
         "",
@@ -77,8 +78,11 @@ def build_daily_report(projects: list[dict[str, object]], summary: dict[str, obj
         "## Alpha Gate Recommendation",
         f"- Recommendation: {alpha_gate['recommendation']}",
         f"- Safe degraded recoveries: {alpha_gate['safe_degraded_recoveries']}",
+        f"- Unresolved degradation: {alpha_gate['unresolved_degradation']}",
         f"- Unsafe failures: {alpha_gate['unsafe_failures']}",
         f"- Manual interventions: {alpha_gate['manual_interventions']}",
+        "## Release Blockers",
+        *blocker_lines,
         "- Reasons:",
         *[f"  - {reason}" for reason in alpha_gate["reasons"]],
         "",
@@ -132,7 +136,7 @@ def build_daily_report(projects: list[dict[str, object]], summary: dict[str, obj
                 "",
                 f"## Project {project['project_alias']}",
                 f"- Alpha gate recommendation: {project_gate['recommendation']}",
-                f"- Alpha gate safe degraded / unsafe / manual: {project_gate['safe_degraded_recoveries']}/{project_gate['unsafe_failures']}/{project_gate['manual_interventions']}",
+                f"- Alpha gate safe degraded / unresolved / unsafe / manual: {project_gate['safe_degraded_recoveries']}/{project_gate['unresolved_degradation']}/{project_gate['unsafe_failures']}/{project_gate['manual_interventions']}",
                 f"- Runs started: {project['runs_started']}",
                 f"- Runs completed: {project['runs_completed']}",
                 f"- Runs failed: {project['runs_failed']}",
@@ -148,6 +152,7 @@ def build_daily_report(projects: list[dict[str, object]], summary: dict[str, obj
                 f"- Average run latency (s): {project['average_run_latency_seconds']}",
                 f"- Failure rate: {project['per_project_failure_rate']:.2%}",
                 f"- Request health slow/stuck/recovered/completed-after-slow/unresolved: {project['request_health_summary']['slow']}/{project['request_health_summary']['stuck']}/{project['request_health_summary']['recovered']}/{project['request_health_summary']['completed_after_slow']}/{project['request_health_summary']['unresolved']}",
+                f"- Alpha gate blockers: {', '.join(project_gate.get('release_blockers', [])) or 'none'}",
                 f"- Alpha gate reasons: {', '.join(project_gate['reasons'])}",
             ]
         )
@@ -171,6 +176,7 @@ def build_weekly_review(projects: list[dict[str, object]], summary: dict[str, ob
         f"- Total interventions this week: {summary['intervention_count']}",
         f"- Total A2A failures this week: {summary['a2a_messages_failed']}",
         f"- Mean run latency (s): {summary['average_run_latency_seconds']}",
+        f"- Unresolved degradation signals: {alpha_gate['unresolved_degradation']}",
         f"- Active unresolved request-health signals: {summary['request_health_summary']['unresolved']}",
         "",
         "## Key Risks",
@@ -197,6 +203,9 @@ def build_weekly_review(projects: list[dict[str, object]], summary: dict[str, ob
         "## Recommendations",
         *[f"- {reason}" for reason in alpha_gate["reasons"]],
         "",
+        "## Release Blockers",
+        *([f"- {reason}" for reason in alpha_gate.get("release_blockers", [])] or ["- none"]),
+        "",
         "## Project Notes",
     ]
     for project in projects:
@@ -221,7 +230,7 @@ def build_dashboard_html(daily_summary: dict[str, object], weekly_summary: dict[
         "<style>body{font-family:ui-sans-serif,system-ui;margin:32px;background:#f5f0e8;color:#17212b}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px}.card{background:white;border-radius:16px;padding:18px;box-shadow:0 10px 30px rgba(0,0,0,.08)}h1,h2{margin:0 0 12px}ul{padding-left:18px}</style></head><body>"
         f"<h1>Synthetic Alpha Review</h1><p>Generated {utc_now().isoformat()}</p>"
         "<div class='grid'>"
-        f"<section class='card'><h2>Alpha Gate</h2><p>Recommendation: {daily_gate['recommendation']}</p><p>Safe degraded: {daily_gate['safe_degraded_recoveries']}</p><p>Unsafe: {daily_gate['unsafe_failures']}</p><p>Manual: {daily_gate['manual_interventions']}</p><ul>{gate_reasons}</ul></section>"
+        f"<section class='card'><h2>Alpha Gate</h2><p>Recommendation: {daily_gate['recommendation']}</p><p>Safe degraded: {daily_gate['safe_degraded_recoveries']}</p><p>Unresolved: {daily_gate['unresolved_degradation']}</p><p>Unsafe: {daily_gate['unsafe_failures']}</p><p>Manual: {daily_gate['manual_interventions']}</p><ul>{gate_reasons}</ul></section>"
         f"<section class='card'><h2>Daily Summary</h2><p>Runs started: {daily_summary['runs_started']}</p><p>Runs failed: {daily_summary['runs_failed']}</p><p>A2A failures: {daily_summary['a2a_messages_failed']}</p><p>Avg latency: {daily_summary['average_run_latency_seconds']}s</p></section>"
         f"<section class='card'><h2>Weekly Summary</h2><p>Runs started: {weekly_summary['runs_started']}</p><p>Runs failed: {weekly_summary['runs_failed']}</p><p>Interventions: {weekly_summary['intervention_count']}</p><p>Plugin denials: {weekly_summary['plugin_denials']}</p></section>"
         f"<section class='card'><h2>Request Health</h2><p>Slow: {daily_summary['request_health_summary']['slow']}</p><p>Stuck: {daily_summary['request_health_summary']['stuck']}</p><p>Recovered: {daily_summary['request_health_summary']['recovered']}</p><p>Completed after slow: {daily_summary['request_health_summary']['completed_after_slow']}</p><p>Unresolved: {daily_summary['request_health_summary']['unresolved']}</p></section>"

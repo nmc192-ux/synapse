@@ -79,6 +79,8 @@ def test_compute_project_metrics_includes_telemetry_and_agent_rates() -> None:
     assert metrics['intervention_count_by_reason']['challenge/captcha'] == 1
     assert metrics['per_agent_outcomes']['synthetic-alpha-browser-runner-1']['failure_rate'] == 1.0
     assert metrics['alpha_gate']['recommendation'] == 'hold'
+    assert metrics['alpha_gate']['unresolved_degradation'] >= 1
+    assert metrics['alpha_gate']['release_blockers']
 
 
 def test_compute_project_metrics_counts_only_explicit_stale_ownership_signals() -> None:
@@ -390,8 +392,10 @@ def test_reporter_outputs_include_review_sections(monkeypatch, tmp_path) -> None
     dashboard = Path(paths['dashboard']['log']).read_text()
 
     assert 'Alpha Gate Recommendation' in daily_report
+    assert 'Release Blockers' in daily_report
     assert 'Browser Errors By Category' in daily_report
     assert 'Alpha gate recommendation' in weekly_report
+    assert 'Release Blockers' in weekly_report
     assert 'Agents Requiring Intervention' in daily_report
     assert 'Top Regressions' in weekly_report
     assert 'Alpha Gate' in dashboard
@@ -406,7 +410,7 @@ def test_reporter_run_once_starts_project_runtime_listeners(monkeypatch, tmp_pat
     monkeypatch.setattr(reporter, 'register_role_agent', lambda *args, **kwargs: None)
     monkeypatch.setattr(reporter, 'ensure_a2a_listener', lambda: None)
     monkeypatch.setattr(reporter, 'ensure_project_runtime_listener', lambda alias: listener_calls.append(alias))
-    monkeypatch.setattr(reporter, 'collect_metrics', lambda window: ([], {'runs_started': 0, 'runs_completed': 0, 'runs_failed': 0, 'intervention_count': 0, 'browser_crash_count': 0, 'captcha_challenge_count': 0, 'session_restore_failures': 0, 'duplicate_result_recoveries': 0, 'stale_ownership_incidents': 0, 'a2a_messages_sent': 0, 'a2a_messages_succeeded': 0, 'a2a_messages_failed': 0, 'scheduler_recovery_events': 0, 'plugin_denials': 0, 'average_run_latency_seconds': 0.0, 'request_health_summary': {'slow': 0, 'stuck': 0, 'recovered': 0, 'completed_after_slow': 0, 'unresolved': 0}, 'browser_errors_by_category': {bucket: 0 for bucket in reporter.FAILURE_BUCKETS}, 'intervention_count_by_reason': {}, 'per_project_failure_rate': {}, 'failure_classification': {bucket: 0 for bucket in reporter.FAILURE_BUCKETS}, 'per_agent_outcomes': {}, 'agents_requiring_intervention': {}, 'alpha_gate': {'recommendation': 'continue', 'safe_degraded_recoveries': 0, 'unsafe_failures': 0, 'manual_interventions': 0, 'reasons': ['restricted alpha reliability remains within continue thresholds'], 'projects': {}}}))
+    monkeypatch.setattr(reporter, 'collect_metrics', lambda window: ([], {'runs_started': 0, 'runs_completed': 0, 'runs_failed': 0, 'intervention_count': 0, 'browser_crash_count': 0, 'captcha_challenge_count': 0, 'session_restore_failures': 0, 'duplicate_result_recoveries': 0, 'stale_ownership_incidents': 0, 'a2a_messages_sent': 0, 'a2a_messages_succeeded': 0, 'a2a_messages_failed': 0, 'scheduler_recovery_events': 0, 'plugin_denials': 0, 'average_run_latency_seconds': 0.0, 'request_health_summary': {'slow': 0, 'stuck': 0, 'recovered': 0, 'completed_after_slow': 0, 'unresolved': 0}, 'browser_errors_by_category': {bucket: 0 for bucket in reporter.FAILURE_BUCKETS}, 'intervention_count_by_reason': {}, 'per_project_failure_rate': {}, 'failure_classification': {bucket: 0 for bucket in reporter.FAILURE_BUCKETS}, 'per_agent_outcomes': {}, 'agents_requiring_intervention': {}, 'alpha_gate': {'recommendation': 'continue', 'safe_degraded_recoveries': 0, 'unresolved_degradation': 0, 'unsafe_failures': 0, 'manual_interventions': 0, 'release_blockers': [], 'reasons': ['restricted alpha reliability remains within continue thresholds'], 'projects': {}}}))
 
     reporter.run_once()
 
@@ -496,6 +500,7 @@ def test_assess_project_alpha_gate_recommends_expand_for_clean_project() -> None
 
     assert assessment["recommendation"] == "expand"
     assert assessment["unsafe_failures"] == 1
+    assert assessment["unresolved_degradation"] == 0
 
 
 def test_overall_metrics_rolls_up_alpha_gate_recommendation() -> None:
@@ -509,4 +514,5 @@ def test_overall_metrics_rolls_up_alpha_gate_recommendation() -> None:
     summary = common.overall_metrics([steady, chaos])
 
     assert summary["alpha_gate"]["recommendation"] == "hold"
+    assert summary["alpha_gate"]["unresolved_degradation"] >= 1
     assert any("chaos:" in reason for reason in summary["alpha_gate"]["reasons"])

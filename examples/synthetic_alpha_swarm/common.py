@@ -1330,6 +1330,9 @@ def request_health_summary(telemetry_events: list[dict[str, Any]]) -> dict[str, 
     }
     for event in unique_telemetry_events(
         telemetry_events,
+        "browser.request_slow",
+        "browser.request_stuck",
+        "scheduler.request_recovered",
         "browser.request_health.slow",
         "browser.request_health.stuck",
         "browser.request_health.recovered",
@@ -1338,13 +1341,13 @@ def request_health_summary(telemetry_events: list[dict[str, Any]]) -> dict[str, 
         event_type = str(event.get("event_type"))
         details = event.get("details")
         details = details if isinstance(details, dict) else {}
-        if event_type == "browser.request_health.slow":
+        if event_type in {"browser.request_slow", "browser.request_health.slow"}:
             counts["slow"] += 1
-        elif event_type == "browser.request_health.stuck":
+        elif event_type in {"browser.request_stuck", "browser.request_health.stuck"}:
             counts["stuck"] += 1
-            if details.get("is_active") and not details.get("has_result"):
+            if event_type == "browser.request_stuck" or (details.get("is_active") and not details.get("has_result")):
                 counts["unresolved"] += 1
-        elif event_type == "browser.request_health.recovered":
+        elif event_type in {"scheduler.request_recovered", "browser.request_health.recovered"}:
             counts["recovered"] += 1
         elif event_type == "browser.request_health.completed_after_slow":
             counts["completed_after_slow"] += 1
@@ -1494,11 +1497,14 @@ def assess_project_alpha_gate(snapshot: dict[str, Any]) -> dict[str, Any]:
         + recovered
         + completed_after_slow
     )
+    unresolved_degradation = (
+        unresolved
+        + max(0, stuck - recovered)
+        + int(snapshot.get("stale_ownership_incidents", 0))
+    )
     unsafe_failures = (
         int(snapshot.get("runs_failed", 0))
         + int(snapshot.get("plugin_denials", 0))
-        + unresolved
-        + max(0, stuck - recovered)
     )
     reasons: list[str] = []
     recommendation = "continue"
@@ -1542,11 +1548,14 @@ def assess_project_alpha_gate(snapshot: dict[str, Any]) -> dict[str, Any]:
             if not reasons:
                 reasons.append("restricted alpha reliability remains within continue thresholds")
 
+    release_blockers = list(reasons)
     return {
         "recommendation": recommendation,
         "safe_degraded_recoveries": safe_degraded_recoveries,
+        "unresolved_degradation": unresolved_degradation,
         "unsafe_failures": unsafe_failures,
         "manual_interventions": int(snapshot.get("intervention_count", 0)),
+        "release_blockers": release_blockers,
         "reasons": reasons,
     }
 
@@ -1623,10 +1632,14 @@ def assess_overall_alpha_gate(
     else:
         recommendation = "continue"
     safe_degraded_recoveries = sum(int(assessment.get("safe_degraded_recoveries", 0)) for assessment in assessments.values())
+    unresolved_degradation = sum(int(assessment.get("unresolved_degradation", 0)) for assessment in assessments.values())
     unsafe_failures = sum(int(assessment.get("unsafe_failures", 0)) for assessment in assessments.values())
     manual_interventions = sum(int(assessment.get("manual_interventions", 0)) for assessment in assessments.values())
+    release_blockers: list[str] = []
     reasons: list[str] = []
     for alias, assessment in sorted(assessments.items()):
+        for blocker in assessment.get("release_blockers", []):
+            release_blockers.append(f"{alias}: {blocker}")
         for reason in assessment.get("reasons", []):
             reasons.append(f"{alias}: {reason}")
     if not reasons:
@@ -1634,8 +1647,10 @@ def assess_overall_alpha_gate(
     return {
         "recommendation": recommendation,
         "safe_degraded_recoveries": safe_degraded_recoveries,
+        "unresolved_degradation": unresolved_degradation,
         "unsafe_failures": unsafe_failures,
         "manual_interventions": manual_interventions,
+        "release_blockers": release_blockers,
         "reasons": reasons,
         "projects": assessments,
     }

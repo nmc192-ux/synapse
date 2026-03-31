@@ -20,12 +20,35 @@ Readiness gates should be driven by synthetic-alpha telemetry and runtime health
 
 Minimum rollout criteria:
 
-- unresolved worker request health is near zero
-- stale ownership incidents remain rare and explainable
-- scheduler recovery rate is stable
-- operator queue remains manageable
-- plugin policy violations are understood and contained
-- customer diagnostics and export paths are documented
+- unresolved worker request health is near zero in the current launch window
+- stale ownership incidents remain rare, explainable, and non-repeating across deployments
+- scheduler recovery rate is stable and not masking unresolved execution drift
+- operator queue remains manageable without sustained manual firefighting
+- plugin policy violations are understood, documented, and contained to allowed policy boundaries
+- customer diagnostics, support exports, and escalation paths are documented and exercised
+
+Rollout scorecard:
+
+1. Continue
+   - request health is stable
+   - degraded runs recover automatically
+   - intervention queue stays below the agreed operating threshold
+2. Hold
+   - unresolved degradation appears in daily synthetic-alpha reports
+   - stale ownership or browser request stalls trend upward
+   - latency grows without a matching increase in recovery quality
+3. Expand
+   - multiple synthetic-alpha windows remain stable
+   - request-health-backed reports show low unresolved degradation
+   - operator load remains predictable and support bundles are sufficient for triage
+
+Readiness review checklist:
+
+- synthetic-alpha recommendation is not `hold`
+- request-health summaries match runtime events closely enough for operator trust
+- worker drain and maintenance behavior is verified in the intended topology
+- checkpoint and replay flows are acceptable for the partner workflow class
+- support team can gather run, event, replay, and worker-request diagnostics without engineering help
 
 Enterprise buyers should be told the truth:
 

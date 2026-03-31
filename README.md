@@ -223,6 +223,10 @@ Enterprise-facing rollout and hosted-operation material lives in [`/Users/jahanz
 - [`/Users/jahanzebhussain/Synapse/docs/enterprise/hosted-operating-model.md`](/Users/jahanzebhussain/Synapse/docs/enterprise/hosted-operating-model.md)
 - [`/Users/jahanzebhussain/Synapse/docs/enterprise/support-playbook.md`](/Users/jahanzebhussain/Synapse/docs/enterprise/support-playbook.md)
 
+- [`/Users/jahanzebhussain/Synapse/docs/enterprise/rollout-readiness.md`](/Users/jahanzebhussain/Synapse/docs/enterprise/rollout-readiness.md)
+- [`/Users/jahanzebhussain/Synapse/docs/enterprise/hosted-operating-model.md`](/Users/jahanzebhussain/Synapse/docs/enterprise/hosted-operating-model.md)
+- [`/Users/jahanzebhussain/Synapse/docs/enterprise/support-playbook.md`](/Users/jahanzebhussain/Synapse/docs/enterprise/support-playbook.md)
+
 ## Development Plan
 
 The current multi-phase development plan for taking Synapse from restricted

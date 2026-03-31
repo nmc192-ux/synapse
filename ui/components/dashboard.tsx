@@ -226,12 +226,13 @@ export function Dashboard() {
               <div className="task-list">
                 {state.runHealth.map((item) => (
                   <article className={`task-card task-${item.healthState}`.trim()} key={item.runId}>
-                    <span>{item.healthState}</span>
+                    <span>{item.healthState} · {item.attentionPriority}</span>
                     <strong>{item.goal}</strong>
                     <p className="mono">
                       {item.runId} · {item.status} · {item.phase}
                     </p>
                     <p>{item.summary}</p>
+                    <p className="mono">attention {item.attentionScore} · {item.attentionAction}</p>
                   </article>
                 ))}
               </div>

@@ -81,3 +81,17 @@ class RunDelegationSummary(BaseModel):
     child_runs: list[str] = Field(default_factory=list)
     delegated_agent_ids: list[str] = Field(default_factory=list)
     statuses_by_agent: dict[str, dict[str, int]] = Field(default_factory=dict)
+
+
+class RunAttentionSummary(BaseModel):
+    run_id: str
+    root_run_id: str
+    attention_score: int = 0
+    priority: str = "low"
+    recommended_action: str = "continue_monitoring"
+    reasons: list[str] = Field(default_factory=list)
+    degraded_requests: int = 0
+    stuck_requests: int = 0
+    unresolved_interventions: int = 0
+    active_delegations: int = 0
+    failed_delegations: int = 0

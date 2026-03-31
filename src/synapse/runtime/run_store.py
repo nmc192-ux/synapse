@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from synapse.models.agent import AgentBudgetUsage
-from synapse.models.run import RunDelegationSummary, RunGraph, RunGraphEdge, RunGraphNode, RunState, RunStatus
+from synapse.models.run import RunAttentionSummary, RunDelegationSummary, RunGraph, RunGraphEdge, RunGraphNode, RunState, RunStatus
 from synapse.models.runtime_event import RunReplayView, RunTimeline, RunTimelineEntry, infer_event_phase
 from synapse.models.runtime_state import (
     BrowserNetworkEntry,
@@ -649,6 +649,82 @@ class RunStore:
             child_runs=[node.run_id for node in child_runs],
             delegated_agent_ids=sorted(dict.fromkeys(delegated_agent_ids)),
             statuses_by_agent=dict(sorted(statuses_by_agent.items())),
+        )
+
+    async def get_attention_summary(self, run_id: str) -> RunAttentionSummary:
+        run = await self.get(run_id)
+        delegation = await self.get_delegation_summary(run_id)
+        request_health = await self.list_worker_request_health(run_id=run_id)
+        interventions = await self.list_interventions(run_id=run_id)
+
+        degraded_requests = sum(1 for item in request_health if item.health_state in {"slow", "stuck", "recovered"})
+        stuck_requests = sum(1 for item in request_health if item.health_state == "stuck")
+        unresolved_interventions = sum(
+            1
+            for item in interventions
+            if item.state == OperatorInterventionState.PENDING
+        )
+
+        reasons: list[str] = []
+        score = 0
+
+        if run.status == RunStatus.FAILED:
+            score += 90
+            reasons.append("run failed")
+        elif run.status == RunStatus.WAITING_FOR_OPERATOR:
+            score += 60
+            reasons.append("run waiting for operator")
+
+        if stuck_requests:
+            score += 80
+            reasons.append(f"{stuck_requests} stuck request{'s' if stuck_requests != 1 else ''}")
+        elif degraded_requests:
+            score += 30
+            reasons.append(f"{degraded_requests} degraded request{'s' if degraded_requests != 1 else ''}")
+
+        if unresolved_interventions:
+            score += 70
+            reasons.append(
+                f"{unresolved_interventions} unresolved intervention{'s' if unresolved_interventions != 1 else ''}"
+            )
+
+        if delegation.failed_runs:
+            score += 40
+            reasons.append(
+                f"{delegation.failed_runs} failed delegation{'s' if delegation.failed_runs != 1 else ''}"
+            )
+        if delegation.active_runs:
+            score += 10
+            reasons.append(
+                f"{delegation.active_runs} active delegation{'s' if delegation.active_runs != 1 else ''}"
+            )
+
+        attention_score = min(score, 100)
+        if attention_score >= 80:
+            priority = "urgent"
+            recommended_action = "review_immediately"
+        elif attention_score >= 50:
+            priority = "high"
+            recommended_action = "operator_review"
+        elif attention_score >= 25:
+            priority = "medium"
+            recommended_action = "watch_closely"
+        else:
+            priority = "low"
+            recommended_action = "continue_monitoring"
+
+        return RunAttentionSummary(
+            run_id=run_id,
+            root_run_id=delegation.root_run_id,
+            attention_score=attention_score,
+            priority=priority,
+            recommended_action=recommended_action,
+            reasons=reasons,
+            degraded_requests=degraded_requests,
+            stuck_requests=stuck_requests,
+            unresolved_interventions=unresolved_interventions,
+            active_delegations=delegation.active_runs,
+            failed_delegations=delegation.failed_runs,
         )
 
     async def _get_run_events(self, run_id: str, limit: int) -> list[dict[str, object]]:

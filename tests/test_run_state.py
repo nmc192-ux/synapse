@@ -10,7 +10,7 @@ from synapse.config import Settings
 from synapse.models.agent import AgentDefinition, AgentKind
 from synapse.models.run import RunStatus
 from synapse.models.runtime_event import EventType
-from synapse.models.runtime_state import BrowserTaskRequestRecord, BrowserTaskResultRecord
+from synapse.models.runtime_state import BrowserTaskRequestRecord, BrowserTaskResultRecord, OperatorInterventionRecord
 from synapse.models.task import TaskRequest, TaskResult, TaskStatus
 from synapse.runtime.budget import AgentBudgetManager
 from synapse.runtime.a2a import A2AHub
@@ -331,6 +331,12 @@ def test_run_api_endpoints() -> None:
     assert delegation_summary_response.json()["run_id"] == run_id
     assert delegation_summary_response.json()["delegated_runs"] == 0
 
+    attention_response = client.get(f"/api/runs/{run_id}/attention", headers=headers)
+    assert attention_response.status_code == 200
+    assert attention_response.json()["run_id"] == run_id
+    assert attention_response.json()["attention_score"] >= 0
+    assert attention_response.json()["priority"] in {"low", "medium", "high", "urgent"}
+
     children_response = client.get(f"/api/runs/{run_id}/children", headers=headers)
     assert children_response.status_code == 200
     assert children_response.json() == []
@@ -399,6 +405,49 @@ def test_run_timeline_orders_events_and_groups_replay() -> None:
         assert replay.planner_outputs[0]["event_id"] == "evt-1"
         assert replay.budget_updates[0]["event_id"] == "evt-3"
         assert replay.checkpoints == [{"checkpoint_id": "cp-1"}]
+
+    asyncio.run(scenario())
+
+
+def test_run_attention_summary_prioritizes_stuck_requests_and_interventions() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        run = await run_store.create_run(
+            task_id="task-attention",
+            agent_id="agent-1",
+            project_id="development",
+            correlation_id="task-attention",
+        )
+        await run_store.save_worker_request(
+            BrowserTaskRequestRecord(
+                action_id="action-attention",
+                request_id="request-attention",
+                run_id=run.run_id,
+                worker_id="controller-1:browser-worker-1",
+                action="extract",
+                session_id="session-attention",
+                task_id="task-attention",
+                agent_id="agent-1",
+                status="stuck",
+            )
+        )
+        await run_store.save_intervention(
+            OperatorInterventionRecord(
+                run_id=run.run_id,
+                project_id="development",
+                agent_id="agent-1",
+                task_id="task-attention",
+                reason="browser challenge",
+                category="browser.challenge",
+            )
+        )
+        summary = await run_store.get_attention_summary(run.run_id)
+        assert summary.priority == "urgent"
+        assert summary.attention_score >= 80
+        assert summary.stuck_requests == 1
+        assert summary.unresolved_interventions == 1
+        assert summary.recommended_action == "review_immediately"
 
     asyncio.run(scenario())
 

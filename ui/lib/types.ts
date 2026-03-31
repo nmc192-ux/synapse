@@ -130,6 +130,9 @@ export type RunHealthItem = {
   delegatedRuns: number;
   activeDelegations: number;
   failedDelegations: number;
+  attentionScore: number;
+  attentionPriority: "low" | "medium" | "high" | "urgent";
+  attentionAction: string;
   healthState: "healthy" | "watch" | "needs_operator";
   summary: string;
 };

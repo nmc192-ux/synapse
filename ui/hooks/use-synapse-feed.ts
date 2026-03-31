@@ -770,21 +770,41 @@ async function loadRunHealth(
         headers,
         cache: "no-store",
       });
-      if (!response.ok) {
+      const attentionResponse = await fetch(`${apiRoot}/runs/${runId}/attention`, {
+        headers,
+        cache: "no-store",
+      });
+      if (!response.ok || !attentionResponse.ok) {
         return null;
       }
       const payload = (await response.json()) as Record<string, unknown>;
+      const attention = (await attentionResponse.json()) as Record<string, unknown>;
       return {
         runId,
         delegatedRuns: typeof payload.delegated_runs === "number" ? payload.delegated_runs : 0,
         activeRuns: typeof payload.active_runs === "number" ? payload.active_runs : 0,
         failedRuns: typeof payload.failed_runs === "number" ? payload.failed_runs : 0,
+        attentionScore: typeof attention.attention_score === "number" ? attention.attention_score : 0,
+        attentionPriority: stringify(attention.priority) ?? "low",
+        attentionAction: stringify(attention.recommended_action) ?? "continue_monitoring",
       };
     }),
   );
   const delegationByRunId = new Map(
     responses
-      .filter((value): value is { runId: string; delegatedRuns: number; activeRuns: number; failedRuns: number } => Boolean(value))
+      .filter(
+        (
+          value,
+        ): value is {
+          runId: string;
+          delegatedRuns: number;
+          activeRuns: number;
+          failedRuns: number;
+          attentionScore: number;
+          attentionPriority: string;
+          attentionAction: string;
+        } => Boolean(value),
+      )
       .map((item) => [item.runId, item]),
   );
   return runs
@@ -902,6 +922,9 @@ function toRunHealthItem(
         delegatedRuns: number;
         activeRuns: number;
         failedRuns: number;
+        attentionScore: number;
+        attentionPriority: string;
+        attentionAction: string;
       }
     | undefined,
 ): RunHealthItem | null {
@@ -920,6 +943,9 @@ function toRunHealthItem(
   const delegatedRuns = delegation?.delegatedRuns ?? 0;
   const activeDelegations = delegation?.activeRuns ?? 0;
   const failedDelegations = delegation?.failedRuns ?? 0;
+  const attentionScore = delegation?.attentionScore ?? 0;
+  const attentionPriority = (delegation?.attentionPriority ?? "low") as RunHealthItem["attentionPriority"];
+  const attentionAction = delegation?.attentionAction ?? "continue_monitoring";
   let healthState: RunHealthItem["healthState"] = "healthy";
   if (status === "failed" || degradedRequests > 0 || failedDelegations > 0) {
     healthState = "needs_operator";
@@ -932,6 +958,7 @@ function toRunHealthItem(
     degradedRequests > 0 ? `${degradedRequests} degraded request${degradedRequests === 1 ? "" : "s"}` : null,
     delegatedRuns > 0 ? `${delegatedRuns} delegated run${delegatedRuns === 1 ? "" : "s"}` : null,
     failedDelegations > 0 ? `${failedDelegations} failed delegation${failedDelegations === 1 ? "" : "s"}` : null,
+    attentionScore > 0 ? `attention ${attentionScore}` : null,
   ]
     .filter((value): value is string => Boolean(value))
     .join(" · ");
@@ -945,6 +972,9 @@ function toRunHealthItem(
     delegatedRuns,
     activeDelegations,
     failedDelegations,
+    attentionScore,
+    attentionPriority,
+    attentionAction,
     healthState,
     summary,
   };

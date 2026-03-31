@@ -26,6 +26,7 @@ from synapse.workers.browser_worker import BrowserWorker
 
 
 RuntimeFactory = Callable[[], ExecutionPlaneRuntime]
+OwnershipReason = tuple[bool, str | None, str | None]
 
 
 class BrowserWorkerPool:
@@ -454,7 +455,8 @@ class BrowserWorkerPool:
         if worker_id is None:
             ownership = await self._load_session_ownership(session_id)
             if ownership is not None:
-                if await self._worker_ownership_is_stale(ownership.worker_id):
+                stale, reason_code, reason = await self._worker_ownership_status(ownership)
+                if stale:
                     await self._emit_worker_event(
                         EventType.WORKER_OWNERSHIP_STALE,
                         session_id=session_id,
@@ -463,9 +465,15 @@ class BrowserWorkerPool:
                             "session_id": session_id,
                             "worker_id": ownership.worker_id,
                             "controller_id": ownership.controller_id,
+                            "reason_code": reason_code,
+                            "reason": reason,
                         },
                     )
-                    await self._mark_session_ownership_stale(ownership)
+                    await self._mark_session_ownership_stale(
+                        ownership,
+                        reason_code=reason_code,
+                        reason=reason,
+                    )
                 else:
                     worker_id = ownership.worker_id
                     self._session_workers[session_id] = worker_id
@@ -926,6 +934,7 @@ class BrowserWorkerPool:
                 project_id=project_id or (existing.project_id if existing is not None else None),
                 current_url=current_url or self._session_urls.get(session_id),
                 status=status,
+                updated_at=datetime.now(timezone.utc),
                 created_at=existing.created_at if existing is not None else datetime.now(timezone.utc),
             )
         )
@@ -939,23 +948,78 @@ class BrowserWorkerPool:
             return None
         return await self._run_store.get_session_ownership(session_id)
 
-    async def _mark_session_ownership_stale(self, ownership: BrowserSessionOwnershipRecord) -> None:
-        await self._run_store.save_session_ownership(
-            ownership.model_copy(update={"status": "stale", "updated_at": datetime.now(timezone.utc)})
-        )
-
-    async def _worker_ownership_is_stale(self, worker_id: str) -> bool:
+    async def _mark_session_ownership_stale(
+        self,
+        ownership: BrowserSessionOwnershipRecord,
+        *,
+        reason_code: str | None,
+        reason: str | None,
+    ) -> None:
         if self._run_store is None:
-            return worker_id not in self._workers
+            return
+        await self._run_store.save_session_ownership(
+            ownership.model_copy(
+                update={
+                    "status": "stale",
+                    "status_reason": reason,
+                    "updated_at": datetime.now(timezone.utc),
+                }
+            )
+        )
+        active_requests = await self._run_store.list_worker_requests(session_id=ownership.session_id)
+        now = datetime.now(timezone.utc)
+        for request in active_requests:
+            if request.status not in {"queued", "dispatched", "running", "slow", "recovered"}:
+                continue
+            updated = request.model_copy(
+                update={
+                    "status": "stuck",
+                    "status_reason": self._ownership_request_reason(reason),
+                    "updated_at": now,
+                }
+            )
+            await self._run_store.save_worker_request(updated)
+            alert_key = (request.action_id, EventType.WORKER_REQUEST_STUCK)
+            self._request_alerts.add(alert_key)
+            await self._emit_worker_event(
+                EventType.WORKER_REQUEST_STUCK,
+                run_id=request.run_id,
+                session_id=request.session_id,
+                payload={
+                    "worker_id": request.worker_id,
+                    "action_id": request.action_id,
+                    "request_id": request.request_id,
+                    "status": updated.status,
+                    "reason_code": reason_code,
+                    "reason": reason,
+                },
+                severity=EventSeverity.WARNING,
+            )
+
+    async def _worker_ownership_status(self, ownership: BrowserSessionOwnershipRecord) -> OwnershipReason:
+        if self._run_store is None:
+            if ownership.worker_id in self._workers:
+                return False, None, None
+            return True, "worker_missing", "worker is not available in the current controller process"
         workers = await self._run_store.list_workers()
         for worker in workers:
-            if worker.worker_id == worker_id:
-                refreshed = self._with_computed_health(worker, datetime.now(timezone.utc))
-                return refreshed.controller_id != self.controller_id or refreshed.health_status in {
-                    WorkerHealthStatus.STALE,
-                    WorkerHealthStatus.UNAVAILABLE,
-                }
-        return True
+            if worker.worker_id != ownership.worker_id:
+                continue
+            refreshed = self._with_computed_health(worker, datetime.now(timezone.utc))
+            if refreshed.controller_id != self.controller_id:
+                return True, "foreign_controller", "session is owned by a different controller"
+            if refreshed.health_status == WorkerHealthStatus.STALE:
+                return True, "worker_stale", "owning worker heartbeat is stale"
+            if refreshed.health_status == WorkerHealthStatus.UNAVAILABLE:
+                return True, "worker_unavailable", "owning worker is unavailable"
+            return False, None, None
+        return True, "worker_missing", "owning worker is missing from the durable registry"
+
+    def _ownership_request_reason(self, reason: str | None) -> str:
+        base = "session ownership conflict blocked continued dispatch"
+        if isinstance(reason, str) and reason:
+            return f"{base}: {reason}"
+        return base
 
     def _with_computed_health(self, worker: BrowserWorkerState, now: datetime) -> BrowserWorkerState:
         age = (now - worker.last_heartbeat).total_seconds()
@@ -979,12 +1043,24 @@ class BrowserWorkerPool:
                 if ownership.current_url is not None:
                     self._session_urls[ownership.session_id] = ownership.current_url
             else:
+                stale, reason_code, reason = await self._worker_ownership_status(ownership)
                 await self._emit_worker_event(
                     EventType.WORKER_OWNERSHIP_STALE,
                     session_id=ownership.session_id,
                     run_id=ownership.run_id,
-                    payload=ownership.model_dump(mode="json"),
+                    payload={
+                        **ownership.model_dump(mode="json"),
+                        "reason_code": reason_code,
+                        "reason": reason,
+                        "stale": stale,
+                    },
                 )
+                if stale:
+                    await self._mark_session_ownership_stale(
+                        ownership,
+                        reason_code=reason_code,
+                        reason=reason,
+                    )
         for worker in self._workers:
             requests = await self._run_store.list_worker_requests(worker_id=worker)
             for request in requests:

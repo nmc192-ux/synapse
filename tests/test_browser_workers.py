@@ -292,6 +292,18 @@ def test_browser_worker_pool_marks_stale_session_ownership() -> None:
                 run_id="run-1",
             )
         )
+        await run_store.save_worker_request(
+            BrowserTaskRequestRecord(
+                action_id="action-stale-ownership",
+                request_id="request-stale-ownership",
+                run_id="run-1",
+                worker_id="foreign-worker",
+                action="open",
+                session_id="s-stale",
+                status="running",
+                payload={"session_id": "s-stale", "url": "https://example.com"},
+            )
+        )
         await run_store.save_worker(
             BrowserWorkerState(
                 worker_id="foreign-worker",
@@ -320,9 +332,56 @@ def test_browser_worker_pool_marks_stale_session_ownership() -> None:
                     raise AssertionError("expected stale ownership to block dispatch")
                 event = await asyncio.wait_for(queue.get(), timeout=0.2)
                 assert event.event_type == EventType.WORKER_OWNERSHIP_STALE
+                assert event.payload["reason_code"] == "foreign_controller"
             stale = await run_store.get_session_ownership("s-stale")
             assert stale is not None
             assert stale.status == "stale"
+            assert stale.status_reason == "session is owned by a different controller"
+            request = await run_store.get_worker_request("run-1", "action-stale-ownership")
+            assert request is not None
+            assert request.status == "stuck"
+            assert request.status_reason == "session ownership conflict blocked continued dispatch: session is owned by a different controller"
+        finally:
+            await pool.stop()
+
+    asyncio.run(scenario())
+
+
+def test_browser_worker_pool_classifies_missing_worker_ownership_reason() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        sockets = WebSocketManager(state_store=store)
+        bus = EventBus(sockets)
+        bus.set_context_resolver(lambda event: _event_context())
+        await run_store.save_session_ownership(
+            BrowserSessionOwnershipRecord(
+                session_id="s-missing",
+                worker_id="missing-worker",
+                controller_id="controller-z",
+                run_id="run-2",
+            )
+        )
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id="controller-a",
+        )
+        pool.set_event_publisher(bus.publish)
+        await pool.start()
+        try:
+            async with sockets.subscribe("missing-ownership") as queue:
+                try:
+                    await pool.open("s-missing", "https://example.com/missing")
+                except KeyError:
+                    pass
+                else:
+                    raise AssertionError("expected missing ownership to block dispatch")
+                event = await asyncio.wait_for(queue.get(), timeout=0.2)
+                assert event.event_type == EventType.WORKER_OWNERSHIP_STALE
+                assert event.payload["reason_code"] == "worker_missing"
         finally:
             await pool.stop()
 

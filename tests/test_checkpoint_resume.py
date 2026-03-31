@@ -14,6 +14,7 @@ from synapse.runtime.registry import AgentRegistry
 from synapse.runtime.state_store import InMemoryRuntimeStateStore
 from synapse.runtime.tools import ToolRegistry
 from synapse.security.auth import Authenticator
+from synapse.security.policies import PrincipalType, Scope
 from synapse.transports.websocket_manager import WebSocketManager
 
 
@@ -114,7 +115,15 @@ class _StubBudget:
 async def _build_orchestrator() -> RuntimeOrchestrator:
     store = InMemoryRuntimeStateStore()
     agents = AgentRegistry(state_store=store)
-    agent = agents.register(AgentDefinition(agent_id="agent-1", kind=AgentKind.CUSTOM, name="Agent One"))
+    agent = agents.register(
+        AgentDefinition(
+            agent_id="agent-1",
+            kind=AgentKind.CUSTOM,
+            name="Agent One",
+            organization_id="development",
+            project_id="development",
+        )
+    )
     await agents.save_to_store(agent)
 
     orchestrator = RuntimeOrchestrator(
@@ -148,6 +157,7 @@ def test_checkpoint_save_and_resume() -> None:
             },
         )
         assert isinstance(checkpoint, RuntimeCheckpoint)
+        assert checkpoint.recovery_class == "replayable"
 
         async def fake_execute_task(request):
             return TaskResult(task_id=request.task_id, status=TaskStatus.COMPLETED, message="resumed", artifacts={})
@@ -155,6 +165,40 @@ def test_checkpoint_save_and_resume() -> None:
         orchestrator.execute_task = fake_execute_task  # type: ignore[method-assign]
         result = await orchestrator.resume_task(checkpoint.checkpoint_id)
         assert result.status == TaskStatus.COMPLETED
+        resumed_checkpoint = await orchestrator.get_checkpoint(checkpoint.checkpoint_id)
+        assert resumed_checkpoint.resume_count == 1
+        assert resumed_checkpoint.last_resumed_at is not None
+
+    asyncio.run(scenario())
+
+
+def test_checkpoint_resume_with_operator_context_becomes_operator_assisted() -> None:
+    async def scenario() -> None:
+        orchestrator = await _build_orchestrator()
+        checkpoint = await orchestrator.save_checkpoint(
+            "task-3",
+            {
+                "agent_id": "agent-1",
+                "current_goal": "Resume with review",
+                "browser_session_reference": "session-3",
+            },
+        )
+        assert checkpoint.recovery_class == "session_recovery"
+
+        async def fake_execute_task(request):
+            assert request.constraints["operator_context"]["note"] == "approved after review"
+            return TaskResult(task_id=request.task_id, status=TaskStatus.COMPLETED, message="resumed", artifacts={})
+
+        orchestrator.task_runtime.execute_task = fake_execute_task  # type: ignore[method-assign]
+        result = await orchestrator.task_runtime.resume_task(
+            checkpoint.checkpoint_id,
+            operator_context={"note": "approved after review"},
+        )
+        assert result.status == TaskStatus.COMPLETED
+        resumed_checkpoint = await orchestrator.get_checkpoint(checkpoint.checkpoint_id)
+        assert resumed_checkpoint.recovery_class == "operator_assisted"
+        assert resumed_checkpoint.recovery_summary == "resume includes operator-provided context"
+        assert resumed_checkpoint.resume_count == 1
 
     asyncio.run(scenario())
 
@@ -166,6 +210,7 @@ def test_checkpoint_api_endpoints() -> None:
             "task-2",
             {
                 "agent_id": "agent-1",
+                "project_id": "development",
                 "current_goal": "Seed",
                 "browser_session_reference": "session-2",
             },
@@ -175,17 +220,33 @@ def test_checkpoint_api_endpoints() -> None:
     orchestrator, checkpoint = asyncio.run(scenario())
     app = FastAPI()
     app.include_router(router, prefix="/api")
+    authenticator = Authenticator(
+        Settings(
+            auth_required=True,
+            jwt_secret="checkpoint-test-secret",
+            jwt_issuer="synapse-test",
+            jwt_audience="synapse-test-api",
+        )
+    )
     app.dependency_overrides[get_orchestrator] = lambda: orchestrator
-    app.dependency_overrides[get_authenticator] = lambda: Authenticator(Settings(auth_required=False))
+    app.dependency_overrides[get_authenticator] = lambda: authenticator
     client = TestClient(app)
-    list_response = client.get("/api/checkpoints")
+    token = authenticator.issue_token(
+        subject="operator-1",
+        principal_type=PrincipalType.OPERATOR,
+        scopes=[Scope.TASKS_READ.value],
+        organization_id="development",
+        project_id="development",
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    list_response = client.get("/api/checkpoints", headers=headers)
     assert list_response.status_code == 200
     assert len(list_response.json()) >= 1
 
-    get_response = client.get(f"/api/checkpoints/{checkpoint.checkpoint_id}")
+    get_response = client.get(f"/api/checkpoints/{checkpoint.checkpoint_id}", headers=headers)
     assert get_response.status_code == 200
     assert get_response.json()["checkpoint_id"] == checkpoint.checkpoint_id
 
-    agents_response = client.get("/api/agents")
+    agents_response = client.get("/api/agents", headers=headers)
     assert agents_response.status_code == 200
     assert any(agent["agent_id"] == "agent-1" for agent in agents_response.json())

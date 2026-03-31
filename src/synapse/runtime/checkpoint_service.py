@@ -7,6 +7,7 @@ from synapse.models.runtime_state import RuntimeCheckpoint
 from synapse.models.task import TaskRequest
 from synapse.runtime.browser_service import BrowserService
 from synapse.runtime.event_bus import EventBus
+from synapse.runtime.registry import AgentRegistry
 from synapse.runtime.state_store import RuntimeStateStore
 
 
@@ -16,10 +17,12 @@ class CheckpointService:
         state_store: RuntimeStateStore | None,
         browser_service: BrowserService,
         events: EventBus,
+        agents: AgentRegistry | None = None,
     ) -> None:
         self.state_store = state_store
         self.browser_service = browser_service
         self.events = events
+        self.agents = agents
         self._task_context: dict[str, TaskRequest] = {}
 
     def set_state_store(self, state_store: RuntimeStateStore | None) -> None:
@@ -35,11 +38,15 @@ class CheckpointService:
         if not agent_id:
             raise KeyError(f"Unable to resolve agent for task: {task_id}")
 
+        recovery_class, recovery_summary = self._classify_recovery_state(state)
+        project_id = self._project_id_from_state(state)
         checkpoint = RuntimeCheckpoint(
             task_id=task_id,
             agent_id=agent_id,
             run_id=run_id,
-            project_id=await self._project_id_for_run(run_id),
+            project_id=project_id or await self._project_id_for_run(run_id) or self._project_id_for_agent(agent_id),
+            recovery_class=recovery_class,
+            recovery_summary=recovery_summary,
             current_goal=str(state.get("current_goal") or (context.goal if context is not None else "")),
             planner_state=state.get("planner_state", {}) if isinstance(state.get("planner_state"), dict) else {},
             memory_snapshot_reference=str(state.get("memory_snapshot_reference")) if state.get("memory_snapshot_reference") is not None else None,
@@ -97,6 +104,7 @@ class CheckpointService:
         operator_context: dict[str, object] | None = None,
     ) -> tuple[RuntimeCheckpoint, TaskRequest]:
         checkpoint = await self.get_checkpoint(checkpoint_id)
+        checkpoint = await self._mark_checkpoint_resumed(checkpoint, operator_context=operator_context)
         if checkpoint.browser_session_reference:
             await self.browser_service.restore_session_state(
                 checkpoint.browser_session_reference,
@@ -135,10 +143,52 @@ class CheckpointService:
             payload={
                 "checkpoint_id": checkpoint.checkpoint_id,
                 "task_id": checkpoint.task_id,
+                "recovery_class": checkpoint.recovery_class,
+                "recovery_summary": checkpoint.recovery_summary,
+                "resume_count": checkpoint.resume_count,
                 "result": result.model_dump(mode="json"),
             },
             correlation_id=checkpoint.checkpoint_id,
         )
+
+    def _classify_recovery_state(self, state: dict[str, object]) -> tuple[str, str | None]:
+        if isinstance(state.get("recovery_class"), str) and state["recovery_class"]:
+            return str(state["recovery_class"]), (
+                str(state.get("recovery_summary")) if state.get("recovery_summary") is not None else None
+            )
+        if state.get("operator_context") is not None:
+            return "operator_assisted", "checkpoint captured with operator context"
+        pending_actions = state.get("pending_actions")
+        if isinstance(pending_actions, list) and pending_actions:
+            return "replayable", "checkpoint captured with pending action plan"
+        if state.get("browser_session_reference") is not None:
+            return "session_recovery", "checkpoint depends on browser session restoration"
+        return "replayable", "checkpoint can resume from stored task context"
+
+    async def _mark_checkpoint_resumed(
+        self,
+        checkpoint: RuntimeCheckpoint,
+        *,
+        operator_context: dict[str, object] | None,
+    ) -> RuntimeCheckpoint:
+        now = datetime.now(timezone.utc)
+        recovery_class = checkpoint.recovery_class
+        recovery_summary = checkpoint.recovery_summary
+        if operator_context:
+            recovery_class = "operator_assisted"
+            recovery_summary = "resume includes operator-provided context"
+        updated = checkpoint.model_copy(
+            update={
+                "recovery_class": recovery_class,
+                "recovery_summary": recovery_summary,
+                "last_resumed_at": now,
+                "resume_count": checkpoint.resume_count + 1,
+                "updated_at": now,
+            }
+        )
+        if self.state_store is not None:
+            await self.state_store.store_checkpoint(updated.checkpoint_id, updated.model_dump(mode="json"))
+        return updated
 
     async def _project_id_for_run(self, run_id: str | None) -> str | None:
         if run_id is None or self.state_store is None:
@@ -148,3 +198,16 @@ class CheckpointService:
             return None
         project_id = payload.get("project_id")
         return str(project_id) if isinstance(project_id, str) and project_id else None
+
+    def _project_id_from_state(self, state: dict[str, object]) -> str | None:
+        project_id = state.get("project_id")
+        return str(project_id) if isinstance(project_id, str) and project_id else None
+
+    def _project_id_for_agent(self, agent_id: str) -> str | None:
+        if self.agents is None:
+            return None
+        try:
+            agent = self.agents.get(agent_id)
+        except KeyError:
+            return None
+        return agent.project_id

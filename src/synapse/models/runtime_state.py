@@ -198,12 +198,16 @@ class RuntimeCheckpoint(BaseModel):
     agent_id: str
     run_id: str | None = None
     project_id: str | None = None
+    recovery_class: str = "replayable"
+    recovery_summary: str | None = None
     current_goal: str
     planner_state: dict[str, object] = Field(default_factory=dict)
     memory_snapshot_reference: str | None = None
     browser_session_reference: str | None = None
     last_action: dict[str, object] = Field(default_factory=dict)
     pending_actions: list[dict[str, object]] = Field(default_factory=list)
+    last_resumed_at: datetime | None = None
+    resume_count: int = 0
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

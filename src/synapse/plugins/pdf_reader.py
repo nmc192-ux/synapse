@@ -1,8 +1,6 @@
 import asyncio
 from pathlib import Path
 
-from pypdf import PdfReader
-
 from synapse.runtime.tools import ToolRegistry
 
 
@@ -31,7 +29,7 @@ def register(registry: ToolRegistry) -> None:
 
 
 def _read_pdf(path: str, page_limit: int) -> dict[str, object]:
-    reader = PdfReader(path)
+    reader = _load_pdf_reader()(path)
     pages = []
     for index, page in enumerate(reader.pages[:page_limit]):
         pages.append(
@@ -48,3 +46,11 @@ def _read_pdf(path: str, page_limit: int) -> dict[str, object]:
         "metadata": {str(key): str(value) for key, value in (reader.metadata or {}).items()},
         "pages": pages,
     }
+
+
+def _load_pdf_reader():
+    try:
+        from pypdf import PdfReader
+    except ModuleNotFoundError as exc:  # pragma: no cover - environment-dependent
+        raise RuntimeError("pdf.read requires the optional 'pypdf' dependency to be installed.") from exc
+    return PdfReader

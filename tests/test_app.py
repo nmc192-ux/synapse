@@ -1,4 +1,5 @@
 import asyncio
+import sys
 
 import synapse.api.routes as api_routes
 from synapse.connectors.codex import CodexConnector
@@ -7,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from synapse.main import app
 from synapse.config import Settings
+from synapse.plugins import pdf_reader
 from synapse.models.a2a import A2AEnvelope, A2AMessageType, AgentWireMessage
 from synapse.models.agent import AgentDefinition, AgentKind, AgentRateLimits, AgentSecurityPolicy
 from synapse.models.browser import BrowserState, PageButton, PageLink, PageSection, StructuredPageModel
@@ -202,6 +204,17 @@ def test_tools_endpoint_returns_descriptors() -> None:
     tools = [ToolDescriptor.model_validate(item) for item in response.json()]
     assert any(tool.name == "github.search" for tool in tools)
     assert any(tool.endpoint == "pdf.read" for tool in tools)
+
+
+def test_pdf_reader_reports_missing_optional_dependency(monkeypatch) -> None:
+    monkeypatch.setitem(sys.modules, "pypdf", None)
+
+    try:
+        pdf_reader._read_pdf("/tmp/missing.pdf", 1)
+    except RuntimeError as exc:
+        assert "optional 'pypdf' dependency" in str(exc)
+    else:  # pragma: no cover - defensive
+        raise AssertionError("expected missing pypdf dependency to raise a runtime error")
 
 
 def test_sdk_client_exposes_browser() -> None:

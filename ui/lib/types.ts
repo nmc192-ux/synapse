@@ -120,6 +120,20 @@ export type RequestHealthItem = {
   active?: boolean;
 };
 
+export type RunHealthItem = {
+  runId: string;
+  status: string;
+  phase: string;
+  goal: string;
+  activeRequests: number;
+  degradedRequests: number;
+  delegatedRuns: number;
+  activeDelegations: number;
+  failedDelegations: number;
+  healthState: "healthy" | "watch" | "needs_operator";
+  summary: string;
+};
+
 export type DashboardState = {
   events: SynapseEvent[];
   activity: ActivityItem[];
@@ -131,5 +145,6 @@ export type DashboardState = {
   budgets: AgentBudgetItem[];
   interventions: InterventionItem[];
   requestHealth: RequestHealthItem[];
+  runHealth: RunHealthItem[];
   page: PageState;
 };

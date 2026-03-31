@@ -39,6 +39,7 @@ export function Dashboard() {
   const activeTasks = state.tasks.filter((task) => task.status !== "completed").length;
   const a2aMessages = state.messages.filter((message) => message.kind === "a2a").length;
   const activeRequestHealth = state.requestHealth.filter((item) => item.healthState !== "completed").length;
+  const runsAtRisk = state.runHealth.filter((item) => item.healthState === "needs_operator").length;
 
   return (
     <main className="shell">
@@ -73,6 +74,10 @@ export function Dashboard() {
             <div className="stat">
               <span className="stat-label">Request Health</span>
               <span className="stat-value">{activeRequestHealth}</span>
+            </div>
+            <div className="stat">
+              <span className="stat-label">Runs At Risk</span>
+              <span className="stat-value">{runsAtRisk}</span>
             </div>
           </div>
         </header>
@@ -212,6 +217,21 @@ export function Dashboard() {
                     <p className="mono">
                       {task.id} · {task.assignedAgent}
                     </p>
+                  </article>
+                ))}
+              </div>
+            </Panel>
+
+            <Panel title="Run Health" badge={`${state.runHealth.length} tracked`}>
+              <div className="task-list">
+                {state.runHealth.map((item) => (
+                  <article className={`task-card task-${item.healthState}`.trim()} key={item.runId}>
+                    <span>{item.healthState}</span>
+                    <strong>{item.goal}</strong>
+                    <p className="mono">
+                      {item.runId} · {item.status} · {item.phase}
+                    </p>
+                    <p>{item.summary}</p>
                   </article>
                 ))}
               </div>

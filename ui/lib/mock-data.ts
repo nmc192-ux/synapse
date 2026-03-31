@@ -3,6 +3,21 @@ import { DashboardState } from "@/lib/types";
 export const initialState: DashboardState = {
   events: [],
   requestHealth: [],
+  runHealth: [
+    {
+      runId: "run-301",
+      status: "running",
+      phase: "act",
+      goal: "Inspect current page and capture a screenshot",
+      activeRequests: 1,
+      degradedRequests: 0,
+      delegatedRuns: 1,
+      activeDelegations: 0,
+      failedDelegations: 0,
+      healthState: "healthy",
+      summary: "Primary run is active with one browser request and one completed delegated child run.",
+    },
+  ],
   activity: [
     {
       id: "activity-1",

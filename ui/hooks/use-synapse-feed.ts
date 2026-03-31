@@ -7,6 +7,7 @@ import {
   ActivityItem,
   InterventionItem,
   RequestHealthItem,
+  RunHealthItem,
   DashboardState,
   MemoryItem,
   MessageItem,
@@ -113,7 +114,8 @@ export function useSynapseFeed(): DashboardFeed {
       const agents = sortAgentsByRecency((await agentsResponse.json()) as Record<string, unknown>[]).slice(0, 24);
       const interventions = (await interventionsResponse.json()) as Record<string, unknown>[];
       const requestHealth = await loadRequestHealth(apiRoot, headers, runs);
-      setState(buildStateFromSnapshot(runs, agents, interventions, requestHealth));
+      const runHealth = await loadRunHealth(apiRoot, headers, runs, requestHealth);
+      setState(buildStateFromSnapshot(runs, agents, interventions, requestHealth, runHealth));
       setAuthStatus("ready");
       setAuthError(null);
     } catch {
@@ -245,6 +247,7 @@ function applyEvent(current: DashboardState, event: SynapseEvent): DashboardStat
     tasks: task ? mergeTask(current.tasks, task).slice(0, 8) : current.tasks,
     budgets: budget ? mergeBudget(current.budgets, budget).slice(0, 6) : current.budgets,
     interventions: intervention ? mergeIntervention(current.interventions, intervention).slice(0, 8) : current.interventions,
+    runHealth: current.runHealth,
     page: derivePage(current.page, event, payload),
   };
 }
@@ -603,6 +606,7 @@ function createEmptyState(): DashboardState {
     budgets: [],
     interventions: [],
     requestHealth: [],
+    runHealth: [],
     page: {
       url: "",
       title: "No live page selected",
@@ -619,6 +623,7 @@ function buildStateFromSnapshot(
   agents: Record<string, unknown>[],
   interventions: Record<string, unknown>[],
   requestHealth: RequestHealthItem[],
+  runHealth: RunHealthItem[],
 ): DashboardState {
   const sortedRuns = sortRunsByRecency(runs);
   const latestRun = sortedRuns[0];
@@ -688,6 +693,7 @@ function buildStateFromSnapshot(
     budgets: [],
     interventions: interventions.map(toInterventionItem).filter(Boolean) as InterventionItem[],
     requestHealth,
+    runHealth,
     page: {
       url: pageUrl,
       title: pageTitle,
@@ -743,6 +749,48 @@ async function loadRequestHealth(
     }),
   );
   return responses.flatMap((items) => items.map(toRequestHealthItem).filter(Boolean) as RequestHealthItem[]).slice(0, 12);
+}
+
+async function loadRunHealth(
+  apiRoot: string,
+  headers: HeadersInit | undefined,
+  runs: Record<string, unknown>[],
+  requestHealth: RequestHealthItem[],
+): Promise<RunHealthItem[]> {
+  const runIds = runs
+    .map((run) => stringify(run.run_id))
+    .filter((value): value is string => Boolean(value))
+    .slice(0, 6);
+  if (runIds.length === 0) {
+    return [];
+  }
+  const responses = await Promise.all(
+    runIds.map(async (runId) => {
+      const response = await fetch(`${apiRoot}/runs/${runId}/delegation-summary`, {
+        headers,
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        return null;
+      }
+      const payload = (await response.json()) as Record<string, unknown>;
+      return {
+        runId,
+        delegatedRuns: typeof payload.delegated_runs === "number" ? payload.delegated_runs : 0,
+        activeRuns: typeof payload.active_runs === "number" ? payload.active_runs : 0,
+        failedRuns: typeof payload.failed_runs === "number" ? payload.failed_runs : 0,
+      };
+    }),
+  );
+  const delegationByRunId = new Map(
+    responses
+      .filter((value): value is { runId: string; delegatedRuns: number; activeRuns: number; failedRuns: number } => Boolean(value))
+      .map((item) => [item.runId, item]),
+  );
+  return runs
+    .slice(0, 6)
+    .map((run) => toRunHealthItem(run, requestHealth, delegationByRunId.get(stringify(run.run_id) ?? "")))
+    .filter(Boolean) as RunHealthItem[];
 }
 
 function toRecordArray(value: unknown): Record<string, unknown>[] {
@@ -842,5 +890,62 @@ function toRequestHealthItem(value: Record<string, unknown> | null | undefined):
     totalAgeSeconds: typeof value.total_age_seconds === "number" ? value.total_age_seconds : 0,
     hasResult: Boolean(value.has_result),
     active: Boolean(value.is_active),
+  };
+}
+
+function toRunHealthItem(
+  run: Record<string, unknown>,
+  requestHealth: RequestHealthItem[],
+  delegation:
+    | {
+        runId: string;
+        delegatedRuns: number;
+        activeRuns: number;
+        failedRuns: number;
+      }
+    | undefined,
+): RunHealthItem | null {
+  const runId = stringify(run.run_id);
+  if (!runId) {
+    return null;
+  }
+  const status = stringify(run.status) ?? "unknown";
+  const phase = stringify(run.current_phase) ?? "unknown";
+  const metadata =
+    run.metadata && typeof run.metadata === "object" ? (run.metadata as Record<string, unknown>) : {};
+  const goal = stringify(metadata.goal) ?? "Runtime task";
+  const runRequests = requestHealth.filter((item) => item.runId === runId);
+  const activeRequests = runRequests.filter((item) => item.active || item.healthState !== "completed").length;
+  const degradedRequests = runRequests.filter((item) => item.healthState === "slow" || item.healthState === "stuck").length;
+  const delegatedRuns = delegation?.delegatedRuns ?? 0;
+  const activeDelegations = delegation?.activeRuns ?? 0;
+  const failedDelegations = delegation?.failedRuns ?? 0;
+  let healthState: RunHealthItem["healthState"] = "healthy";
+  if (status === "failed" || degradedRequests > 0 || failedDelegations > 0) {
+    healthState = "needs_operator";
+  } else if (activeRequests > 0 || activeDelegations > 0 || status === "running" || status === "paused") {
+    healthState = "watch";
+  }
+  const summary = [
+    `${status} in ${phase}`,
+    activeRequests > 0 ? `${activeRequests} active request${activeRequests === 1 ? "" : "s"}` : null,
+    degradedRequests > 0 ? `${degradedRequests} degraded request${degradedRequests === 1 ? "" : "s"}` : null,
+    delegatedRuns > 0 ? `${delegatedRuns} delegated run${delegatedRuns === 1 ? "" : "s"}` : null,
+    failedDelegations > 0 ? `${failedDelegations} failed delegation${failedDelegations === 1 ? "" : "s"}` : null,
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join(" · ");
+  return {
+    runId,
+    status,
+    phase,
+    goal,
+    activeRequests,
+    degradedRequests,
+    delegatedRuns,
+    activeDelegations,
+    failedDelegations,
+    healthState,
+    summary,
   };
 }

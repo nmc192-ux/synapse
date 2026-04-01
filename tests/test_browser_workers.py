@@ -71,6 +71,16 @@ class _SlowBrowserRuntime(_FakeBrowserRuntime):
         return await super().open(session_id, url)
 
 
+class _SlowCreateSessionRuntime(_FakeBrowserRuntime):
+    def __init__(self, worker_name: str, *, delay_seconds: float) -> None:
+        super().__init__(worker_name)
+        self.delay_seconds = delay_seconds
+
+    async def create_session(self, session_id: str, agent_id: str | None = None, run_id: str | None = None) -> BrowserSession:
+        await asyncio.sleep(self.delay_seconds)
+        return await super().create_session(session_id, agent_id=agent_id, run_id=run_id)
+
+
 def test_browser_worker_pool_dispatches_and_preserves_session_affinity() -> None:
     async def scenario() -> None:
         store = InMemoryRuntimeStateStore()
@@ -762,6 +772,48 @@ def test_browser_worker_pool_marks_long_running_request_slow_but_completes_with_
         assert request.last_progress_at is not None
         assert request.completed_at is not None
         assert request.status == "completed"
+
+    asyncio.run(scenario())
+
+
+def test_browser_worker_pool_waits_past_lease_timeout_for_slow_create_session() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        sockets = WebSocketManager(state_store=store)
+        bus = EventBus(sockets)
+        bus.set_context_resolver(lambda event: _event_context())
+        controller_id = "controller-slow-create"
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            heartbeat_interval_seconds=0.01,
+            lease_timeout_seconds=0.05,
+            durable_result_timeout_seconds=0.2,
+            runtime_factory=lambda: _SlowCreateSessionRuntime(worker_name="worker-1", delay_seconds=0.12),
+            run_store=run_store,
+            controller_id=controller_id,
+        )
+        pool.set_event_publisher(bus.publish)
+
+        await pool.start()
+        try:
+            async with sockets.subscribe("slow-create-session", organization_id="org-1", project_id="project-1") as queue:
+                session = await pool.create_session("s1", agent_id="agent-1", run_id="run-1")
+                assert session.session_id == "s1"
+                events = await asyncio.wait_for(_collect_browser_events(queue, expected=4), timeout=0.6)
+        finally:
+            await pool.stop()
+
+        event_types = [event.event_type for event in events]
+        assert EventType.WORKER_REQUEST_SLOW in event_types
+        request = await run_store.list_worker_requests(run_id="run-1", session_id="s1")
+        create_request = next(item for item in request if item.action == "create_session")
+        assert create_request.status == "completed"
+        assert create_request.status_reason in {
+            "completed after slow progress gap",
+            "completed after stalled progress gap",
+        }
 
     asyncio.run(scenario())
 

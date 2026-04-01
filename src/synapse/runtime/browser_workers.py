@@ -41,6 +41,7 @@ class BrowserWorkerPool:
         queue_factory: Callable[[str], BrowserTaskQueue] | None = None,
         run_store: RunStore | None = None,
         lease_timeout_seconds: float | None = None,
+        durable_result_timeout_seconds: float | None = None,
         controller_id: str | None = None,
     ) -> None:
         self.state_store = state_store
@@ -54,6 +55,8 @@ class BrowserWorkerPool:
         self._queue_factory = queue_factory or create_browser_task_queue
         self._run_store = run_store
         self._lease_timeout_seconds = lease_timeout_seconds or settings.scheduler_lease_timeout_seconds
+        configured_durable_timeout = durable_result_timeout_seconds or settings.browser_worker_durable_result_timeout_seconds
+        self._durable_result_timeout_seconds = max(self._lease_timeout_seconds, configured_durable_timeout)
         self._workers: dict[str, BrowserWorker] = {}
         self._session_workers: dict[str, str] = {}
         self._session_runs: dict[str, str | None] = {}
@@ -780,7 +783,7 @@ class BrowserWorkerPool:
         poll_interval = min(0.25, max(self.heartbeat_interval_seconds, 0.05))
         started = datetime.now(timezone.utc)
         while True:
-            remaining = self._lease_timeout_seconds - (datetime.now(timezone.utc) - started).total_seconds()
+            remaining = self._durable_result_timeout_seconds - (datetime.now(timezone.utc) - started).total_seconds()
             if remaining <= 0:
                 await self._maybe_mark_request_stuck(item)
                 return await self._wait_for_durable_result(item)
@@ -798,7 +801,7 @@ class BrowserWorkerPool:
         run_id = item_or_request.run_id
         action_id = item_or_request.action_id
         started = datetime.now(timezone.utc)
-        while (datetime.now(timezone.utc) - started).total_seconds() <= self._lease_timeout_seconds:
+        while (datetime.now(timezone.utc) - started).total_seconds() <= self._durable_result_timeout_seconds:
             existing = await self._run_store.get_worker_result(run_id, action_id)
             if existing is not None:
                 return BrowserTaskResult(

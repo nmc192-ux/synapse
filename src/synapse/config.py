@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     browser_worker_count: int = 1
     browser_worker_heartbeat_interval_seconds: float = 15.0
     browser_worker_queue_prefix: str = "synapse:browser:worker"
+    browser_worker_durable_result_timeout_seconds: float = 180.0
     scheduler_lease_timeout_seconds: float = 60.0
     scheduler_cleanup_interval_seconds: float = 15.0
     scheduler_max_assignment_retries: int = 3

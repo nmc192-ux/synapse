@@ -625,7 +625,7 @@ def test_browser_worker_pool_marks_stale_fencing_request_failed_when_record_exis
 
         request = await run_store.get_worker_request("run-1", "action-stale-record")
         assert request is not None
-        assert request.status == "failed"
+        assert request.status == "abandoned"
         assert request.status_reason == "late worker result rejected because lease ownership changed before durable completion"
 
     asyncio.run(scenario())
@@ -674,7 +674,7 @@ def test_browser_worker_pool_abandons_stuck_request_when_lease_moves() -> None:
             async with sockets.subscribe("lease-moved", organization_id="org-1", project_id="project-1") as queue:
                 updated = await pool._maybe_finalize_abandoned_request(request)
                 assert updated is not None
-                assert updated.status == "failed"
+                assert updated.status == "abandoned"
                 assert updated.status_reason == "durable result wait ended after lease ownership moved to controller-remote:browser-worker-1"
                 event = await asyncio.wait_for(queue.get(), timeout=0.2)
                 assert event.event_type == EventType.WORKER_UNAVAILABLE
@@ -684,7 +684,7 @@ def test_browser_worker_pool_abandons_stuck_request_when_lease_moves() -> None:
 
         stored = await run_store.get_worker_request("run-1", "action-lease-moved")
         assert stored is not None
-        assert stored.status == "failed"
+        assert stored.status == "abandoned"
 
     asyncio.run(scenario())
 

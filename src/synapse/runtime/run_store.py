@@ -471,7 +471,7 @@ class RunStore:
             recovery_class=recovery_class,
             recovery_summary=recovery_summary,
             has_result=result is not None,
-            is_active=health_state in {"queued", "dispatched", "running", "slow", "stuck", "recovered"},
+            is_active=health_state in {"queued", "dispatched", "running", "slow", "stuck", "recovered", "operator_required"},
             total_age_seconds=round(total_age_seconds, 3),
             execution_age_seconds=round(execution_age_seconds, 3) if execution_age_seconds is not None else None,
             progress_age_seconds=round(progress_age_seconds, 3) if progress_age_seconds is not None else None,
@@ -493,7 +493,13 @@ class RunStore:
             return "stalled", reason or "request has not made recent durable progress"
         if health_state == "recovered":
             return "recovered", reason or "request resumed after a recovery path"
+        if health_state == "abandoned":
+            return "abandoned", reason or "request was abandoned because execution ownership or lease state moved on"
+        if health_state == "operator_required":
+            return "operator_required", reason or "request requires operator intervention to continue safely"
         if health_state == "failed":
+            if "lease ownership changed" in lowered or "lease is no longer" in lowered:
+                return "abandoned", reason
             if "recover" in lowered:
                 return "failed_after_recovery", reason
             return "failed", reason

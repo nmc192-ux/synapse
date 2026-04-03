@@ -934,7 +934,7 @@ class BrowserWorkerPool:
         now = datetime.now(timezone.utc)
         updated = request.model_copy(
             update={
-                "status": "failed",
+                "status": "abandoned",
                 "status_reason": reason,
                 "updated_at": now,
                 "completed_at": request.completed_at or now,
@@ -967,7 +967,7 @@ class BrowserWorkerPool:
         reason = "late worker result rejected because lease ownership changed before durable completion"
         updated = request.model_copy(
             update={
-                "status": "failed",
+                "status": "abandoned",
                 "status_reason": reason,
                 "updated_at": datetime.now(timezone.utc),
                 "completed_at": request.completed_at or datetime.now(timezone.utc),

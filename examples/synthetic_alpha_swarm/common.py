@@ -549,6 +549,8 @@ def normalize_worker_request_health_to_telemetry(
         "slow": "browser.request_health.slow",
         "stuck": "browser.request_health.stuck",
         "recovered": "browser.request_health.recovered",
+        "abandoned": "browser.request_health.abandoned",
+        "operator_required": "browser.request_health.operator_required",
     }.get(health_state)
     if mapped_type is not None:
         event_details = dict(details)
@@ -1325,6 +1327,8 @@ def request_health_summary(telemetry_events: list[dict[str, Any]]) -> dict[str, 
         "slow": 0,
         "stuck": 0,
         "recovered": 0,
+        "abandoned": 0,
+        "operator_required": 0,
         "completed_after_slow": 0,
         "unresolved": 0,
     }
@@ -1336,6 +1340,8 @@ def request_health_summary(telemetry_events: list[dict[str, Any]]) -> dict[str, 
         "browser.request_health.slow",
         "browser.request_health.stuck",
         "browser.request_health.recovered",
+        "browser.request_health.abandoned",
+        "browser.request_health.operator_required",
         "browser.request_health.completed_after_slow",
     ):
         event_type = str(event.get("event_type"))
@@ -1349,6 +1355,11 @@ def request_health_summary(telemetry_events: list[dict[str, Any]]) -> dict[str, 
                 counts["unresolved"] += 1
         elif event_type in {"scheduler.request_recovered", "browser.request_health.recovered"}:
             counts["recovered"] += 1
+        elif event_type == "browser.request_health.abandoned":
+            counts["abandoned"] += 1
+        elif event_type == "browser.request_health.operator_required":
+            counts["operator_required"] += 1
+            counts["unresolved"] += 1
         elif event_type == "browser.request_health.completed_after_slow":
             counts["completed_after_slow"] += 1
     return counts
@@ -1490,6 +1501,8 @@ def assess_project_alpha_gate(snapshot: dict[str, Any]) -> dict[str, Any]:
     unresolved = int(request_health.get("unresolved", 0))
     stuck = int(request_health.get("stuck", 0))
     recovered = int(request_health.get("recovered", 0))
+    abandoned = int(request_health.get("abandoned", 0))
+    operator_required = int(request_health.get("operator_required", 0))
     completed_after_slow = int(request_health.get("completed_after_slow", 0))
     safe_degraded_recoveries = (
         int(snapshot.get("scheduler_recovery_events", 0))
@@ -1525,6 +1538,8 @@ def assess_project_alpha_gate(snapshot: dict[str, Any]) -> dict[str, Any]:
         reasons.append("stale ownership incidents exceeded hold threshold")
     if browser_crash_count >= int(ALPHA_GATE_THRESHOLDS["hold_browser_crash_count"]):
         reasons.append("browser crash count exceeded hold threshold")
+    if operator_required > 0:
+        reasons.append("operator review required for degraded browser requests")
 
     if reasons:
         recommendation = "hold"
@@ -1545,6 +1560,8 @@ def assess_project_alpha_gate(snapshot: dict[str, Any]) -> dict[str, Any]:
                 reasons.append("scheduler recovery rate remains elevated")
             if stale_ownership > 0:
                 reasons.append("stale ownership still requires monitoring")
+            if abandoned > 0:
+                reasons.append("abandoned browser request paths still require monitoring")
             if not reasons:
                 reasons.append("restricted alpha reliability remains within continue thresholds")
 
@@ -1554,7 +1571,7 @@ def assess_project_alpha_gate(snapshot: dict[str, Any]) -> dict[str, Any]:
         "safe_degraded_recoveries": safe_degraded_recoveries,
         "unresolved_degradation": unresolved_degradation,
         "unsafe_failures": unsafe_failures,
-        "manual_interventions": int(snapshot.get("intervention_count", 0)),
+        "manual_interventions": int(snapshot.get("intervention_count", 0)) + operator_required,
         "release_blockers": release_blockers,
         "reasons": reasons,
     }
@@ -1573,6 +1590,8 @@ def overall_metrics(project_snapshots: list[dict[str, Any]]) -> dict[str, Any]:
         "slow": 0,
         "stuck": 0,
         "recovered": 0,
+        "abandoned": 0,
+        "operator_required": 0,
         "completed_after_slow": 0,
         "unresolved": 0,
     }

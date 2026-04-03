@@ -248,6 +248,50 @@ def test_normalize_worker_request_health_to_telemetry_maps_request_health_states
     assert events[1]['details']['dedupe_key'].endswith(':completed-after-slow')
 
 
+def test_normalize_worker_request_health_to_telemetry_maps_abandoned_and_operator_required() -> None:
+    abandoned_events = common.normalize_worker_request_health_to_telemetry(
+        {
+            'request': {
+                'request_id': 'request-2',
+                'action_id': 'action-2',
+                'action': 'click',
+                'worker_id': 'worker-2',
+                'updated_at': '2026-03-28T00:01:00+00:00',
+                'status_reason': 'late worker result rejected after lease ownership changed',
+            },
+            'result': None,
+            'health_state': 'abandoned',
+            'has_result': False,
+            'is_active': False,
+        },
+        project_alias='steady',
+        project_id='project-1',
+        run_id='run-2',
+    )
+    operator_events = common.normalize_worker_request_health_to_telemetry(
+        {
+            'request': {
+                'request_id': 'request-3',
+                'action_id': 'action-3',
+                'action': 'type',
+                'worker_id': 'worker-3',
+                'updated_at': '2026-03-28T00:02:00+00:00',
+                'status_reason': 'request requires operator review after repeated degraded progress',
+            },
+            'result': None,
+            'health_state': 'operator_required',
+            'has_result': False,
+            'is_active': True,
+        },
+        project_alias='steady',
+        project_id='project-1',
+        run_id='run-3',
+    )
+
+    assert [event['event_type'] for event in abandoned_events] == ['browser.request_health.abandoned']
+    assert [event['event_type'] for event in operator_events] == ['browser.request_health.operator_required']
+
+
 def test_sync_project_request_health_records_deduped_request_health_events(monkeypatch) -> None:
     recorded: list[tuple[str, dict[str, object]]] = []
 
@@ -355,6 +399,31 @@ def test_request_health_summary_dedupes_runtime_and_durable_signals() -> None:
     assert metrics['scheduler_recovery_events'] == 1
 
 
+def test_request_health_summary_counts_abandoned_and_operator_required() -> None:
+    telemetry_events = [
+        {
+            'event_type': 'browser.request_health.abandoned',
+            'project_alias': 'steady',
+            'timestamp': '2026-03-28T00:00:40+00:00',
+            'run_id': 'run-1',
+            'details': {'dedupe_key': 'run-1:action-1:abandoned:t-1'},
+        },
+        {
+            'event_type': 'browser.request_health.operator_required',
+            'project_alias': 'steady',
+            'timestamp': '2026-03-28T00:00:41+00:00',
+            'run_id': 'run-1',
+            'details': {'dedupe_key': 'run-1:action-2:operator_required:t-2', 'is_active': True, 'has_result': False},
+        },
+    ]
+
+    summary = common.request_health_summary(telemetry_events)
+
+    assert summary['abandoned'] == 1
+    assert summary['operator_required'] == 1
+    assert summary['unresolved'] == 1
+
+
 def test_stale_ownership_metrics_only_count_explicit_stale_signals() -> None:
     run = common.RunState(
         run_id='run-stale',
@@ -410,7 +479,7 @@ def test_reporter_run_once_starts_project_runtime_listeners(monkeypatch, tmp_pat
     monkeypatch.setattr(reporter, 'register_role_agent', lambda *args, **kwargs: None)
     monkeypatch.setattr(reporter, 'ensure_a2a_listener', lambda: None)
     monkeypatch.setattr(reporter, 'ensure_project_runtime_listener', lambda alias: listener_calls.append(alias))
-    monkeypatch.setattr(reporter, 'collect_metrics', lambda window: ([], {'runs_started': 0, 'runs_completed': 0, 'runs_failed': 0, 'intervention_count': 0, 'browser_crash_count': 0, 'captcha_challenge_count': 0, 'session_restore_failures': 0, 'duplicate_result_recoveries': 0, 'stale_ownership_incidents': 0, 'a2a_messages_sent': 0, 'a2a_messages_succeeded': 0, 'a2a_messages_failed': 0, 'scheduler_recovery_events': 0, 'plugin_denials': 0, 'average_run_latency_seconds': 0.0, 'request_health_summary': {'slow': 0, 'stuck': 0, 'recovered': 0, 'completed_after_slow': 0, 'unresolved': 0}, 'browser_errors_by_category': {bucket: 0 for bucket in reporter.FAILURE_BUCKETS}, 'intervention_count_by_reason': {}, 'per_project_failure_rate': {}, 'failure_classification': {bucket: 0 for bucket in reporter.FAILURE_BUCKETS}, 'per_agent_outcomes': {}, 'agents_requiring_intervention': {}, 'alpha_gate': {'recommendation': 'continue', 'safe_degraded_recoveries': 0, 'unresolved_degradation': 0, 'unsafe_failures': 0, 'manual_interventions': 0, 'release_blockers': [], 'reasons': ['restricted alpha reliability remains within continue thresholds'], 'projects': {}}}))
+    monkeypatch.setattr(reporter, 'collect_metrics', lambda window: ([], {'runs_started': 0, 'runs_completed': 0, 'runs_failed': 0, 'intervention_count': 0, 'browser_crash_count': 0, 'captcha_challenge_count': 0, 'session_restore_failures': 0, 'duplicate_result_recoveries': 0, 'stale_ownership_incidents': 0, 'a2a_messages_sent': 0, 'a2a_messages_succeeded': 0, 'a2a_messages_failed': 0, 'scheduler_recovery_events': 0, 'plugin_denials': 0, 'average_run_latency_seconds': 0.0, 'request_health_summary': {'slow': 0, 'stuck': 0, 'recovered': 0, 'abandoned': 0, 'operator_required': 0, 'completed_after_slow': 0, 'unresolved': 0}, 'browser_errors_by_category': {bucket: 0 for bucket in reporter.FAILURE_BUCKETS}, 'intervention_count_by_reason': {}, 'per_project_failure_rate': {}, 'failure_classification': {bucket: 0 for bucket in reporter.FAILURE_BUCKETS}, 'per_agent_outcomes': {}, 'agents_requiring_intervention': {}, 'alpha_gate': {'recommendation': 'continue', 'safe_degraded_recoveries': 0, 'unresolved_degradation': 0, 'unsafe_failures': 0, 'manual_interventions': 0, 'release_blockers': [], 'reasons': ['restricted alpha reliability remains within continue thresholds'], 'projects': {}}}))
 
     reporter.run_once()
 
@@ -492,6 +561,8 @@ def test_assess_project_alpha_gate_recommends_expand_for_clean_project() -> None
         "slow": 1,
         "stuck": 0,
         "recovered": 1,
+        "abandoned": 0,
+        "operator_required": 0,
         "completed_after_slow": 1,
         "unresolved": 0,
     }
@@ -516,3 +587,14 @@ def test_overall_metrics_rolls_up_alpha_gate_recommendation() -> None:
     assert summary["alpha_gate"]["recommendation"] == "hold"
     assert summary["alpha_gate"]["unresolved_degradation"] >= 1
     assert any("chaos:" in reason for reason in summary["alpha_gate"]["reasons"])
+
+
+def test_assess_project_alpha_gate_counts_operator_required_as_manual_intervention() -> None:
+    snapshot = reporter.fixture_project_summary("chaos", 20, 10, 1, 2)
+    snapshot["request_health_summary"]["operator_required"] = 2
+
+    assessment = common.assess_project_alpha_gate(snapshot)
+
+    assert assessment["recommendation"] == "hold"
+    assert assessment["manual_interventions"] == 4
+    assert "operator review required for degraded browser requests" in assessment["reasons"]

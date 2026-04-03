@@ -486,6 +486,40 @@ def test_worker_request_health_classifies_abandoned_requests() -> None:
     asyncio.run(scenario())
 
 
+def test_worker_request_health_classifies_operator_required_requests() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        run = await run_store.create_run(
+            task_id="task-operator-required",
+            agent_id="agent-1",
+            project_id="development",
+            correlation_id="task-operator-required",
+        )
+        await run_store.save_worker_request(
+            BrowserTaskRequestRecord(
+                action_id="action-operator-required",
+                request_id="request-operator-required",
+                run_id=run.run_id,
+                worker_id="controller-1:browser-worker-1",
+                action="open",
+                session_id="session-operator-required",
+                task_id="task-operator-required",
+                agent_id="agent-1",
+                status="operator_required",
+                status_reason="request stalled again after a recovery path and requires operator intervention",
+            )
+        )
+
+        items = await run_store.list_worker_request_health(run_id=run.run_id)
+        assert len(items) == 1
+        assert items[0].health_state == "operator_required"
+        assert items[0].recovery_class == "operator_required"
+        assert items[0].is_active is True
+
+    asyncio.run(scenario())
+
+
 def test_task_runtime_creates_child_run_for_capability_delegation() -> None:
     async def scenario() -> None:
         store = InMemoryRuntimeStateStore()

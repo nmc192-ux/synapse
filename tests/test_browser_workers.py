@@ -1086,6 +1086,104 @@ def test_browser_worker_pool_progress_recovers_stuck_request_and_preserves_compl
     asyncio.run(scenario())
 
 
+def test_browser_worker_pool_escalates_recovered_request_to_operator_required() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        sockets = WebSocketManager(state_store=store)
+        bus = EventBus(sockets)
+        bus.set_context_resolver(lambda event: _event_context())
+        controller_id = "controller-operator-required"
+        worker_id = f"{controller_id}:browser-worker-1"
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            heartbeat_interval_seconds=0.2,
+            lease_timeout_seconds=0.05,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id=controller_id,
+        )
+        pool.set_event_publisher(bus.publish)
+        await pool.start()
+        try:
+            stale_time = datetime.now(timezone.utc) - timedelta(seconds=1)
+            await run_store.save_worker_request(
+                BrowserTaskRequestRecord(
+                    action_id="action-operator-required",
+                    request_id="request-operator-required",
+                    run_id="run-1",
+                    worker_id=worker_id,
+                    action="open",
+                    session_id="s1",
+                    status="recovered",
+                    recovered_at=stale_time,
+                    status_reason="request resumed after stalled progress gap",
+                    payload={"session_id": "s1", "url": "https://example.com/recovered"},
+                    dispatched_at=stale_time,
+                    started_at=stale_time,
+                    last_progress_at=stale_time,
+                )
+            )
+            async with sockets.subscribe("operator-required", organization_id="org-1", project_id="project-1") as queue:
+                await pool._maybe_mark_request_stuck(
+                    BrowserTaskEnvelope(
+                        action_id="action-operator-required",
+                        request_id="request-operator-required",
+                        run_id="run-1",
+                        session_id="s1",
+                        action="open",
+                    )
+                )
+                event = await asyncio.wait_for(queue.get(), timeout=0.2)
+                assert event.event_type == EventType.BROWSER_HUMAN_INTERVENTION_REQUIRED
+                assert event.payload["reason_code"] == "repeat_stall_after_recovery"
+        finally:
+            await pool.stop()
+
+        stored = await run_store.get_worker_request("run-1", "action-operator-required")
+        assert stored is not None
+        assert stored.status == "operator_required"
+        assert stored.status_reason == "request stalled again after a recovery path and requires operator intervention"
+
+    asyncio.run(scenario())
+
+
+def test_browser_worker_pool_stops_durable_wait_when_request_requires_operator() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            heartbeat_interval_seconds=0.01,
+            lease_timeout_seconds=0.05,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id="controller-operator-wait",
+        )
+        request = BrowserTaskRequestRecord(
+            action_id="action-stop-wait",
+            request_id="request-stop-wait",
+            run_id="run-1",
+            worker_id="controller-operator-wait:browser-worker-1",
+            action="open",
+            session_id="s1",
+            status="operator_required",
+            status_reason="request stalled again after a recovery path and requires operator intervention",
+        )
+        await run_store.save_worker_request(request)
+
+        try:
+            await pool._wait_for_durable_result(request)
+        except TimeoutError as exc:
+            assert "operator intervention" in str(exc)
+        else:
+            raise AssertionError("expected durable wait to stop when operator input is required")
+
+    asyncio.run(scenario())
+
+
 async def _collect_browser_events(queue: asyncio.Queue, *, expected: int) -> list:
     events = []
     seen = set()

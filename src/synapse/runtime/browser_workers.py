@@ -821,6 +821,8 @@ class BrowserWorkerPool:
             await self._maybe_mark_request_stuck(item_or_request)
             request = await self._request_record(item_or_request)
             if request is not None:
+                if request.status == "operator_required":
+                    raise TimeoutError(request.status_reason or f"Request requires operator intervention: {action_id}")
                 abandoned = await self._maybe_finalize_abandoned_request(request)
                 if abandoned is not None:
                     raise TimeoutError(abandoned.status_reason or f"Durable worker result abandoned: {action_id}")
@@ -874,6 +876,14 @@ class BrowserWorkerPool:
         anchor = request.last_progress_at or request.started_at or request.dispatched_at or request.created_at
         age_seconds = (datetime.now(timezone.utc) - anchor).total_seconds()
         if age_seconds < self._lease_timeout_seconds:
+            return
+        if request.status == "recovered":
+            await self._mark_request_operator_required(
+                request,
+                reason="request stalled again after a recovery path and requires operator intervention",
+                reason_code="repeat_stall_after_recovery",
+                age_seconds=age_seconds,
+            )
             return
         alert_key = (request.action_id, EventType.WORKER_REQUEST_STUCK)
         if alert_key in self._request_alerts:
@@ -990,6 +1000,45 @@ class BrowserWorkerPool:
             },
             severity=EventSeverity.WARNING,
         )
+
+    async def _mark_request_operator_required(
+        self,
+        request: BrowserTaskRequestRecord,
+        *,
+        reason: str,
+        reason_code: str,
+        age_seconds: float | None = None,
+    ) -> BrowserTaskRequestRecord | None:
+        if self._run_store is None:
+            return None
+        if request.status == "operator_required" and request.status_reason == reason:
+            return request
+        now = datetime.now(timezone.utc)
+        updated = request.model_copy(
+            update={
+                "status": "operator_required",
+                "status_reason": reason,
+                "updated_at": now,
+            }
+        )
+        await self._run_store.save_worker_request(updated)
+        self._request_alerts.discard((request.action_id, EventType.WORKER_REQUEST_SLOW))
+        self._request_alerts.discard((request.action_id, EventType.WORKER_REQUEST_STUCK))
+        await self._emit_worker_event(
+            EventType.BROWSER_HUMAN_INTERVENTION_REQUIRED,
+            run_id=request.run_id,
+            session_id=request.session_id,
+            payload={
+                "worker_id": request.worker_id,
+                "action_id": request.action_id,
+                "request_id": request.request_id,
+                "reason_code": reason_code,
+                "reason": reason,
+                "age_seconds": round(age_seconds, 3) if age_seconds is not None else None,
+            },
+            severity=EventSeverity.WARNING,
+        )
+        return updated
 
     def _completion_status_reason(
         self,

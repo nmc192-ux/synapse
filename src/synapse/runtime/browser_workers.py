@@ -245,9 +245,7 @@ class BrowserWorkerPool:
                 arguments={"session_id": session_id},
             ),
         )
-        self._session_workers.pop(session_id, None)
-        self._session_runs.pop(session_id, None)
-        self._session_urls.pop(session_id, None)
+        self._clear_session_assignment(session_id)
         await self._delete_session_ownership(session_id)
         self._refresh_worker_state(worker_id)
 
@@ -478,6 +476,9 @@ class BrowserWorkerPool:
         if worker_id is None:
             ownership = await self._load_session_ownership(session_id)
             if ownership is not None:
+                if ownership.status == "stale":
+                    self._clear_session_assignment(session_id)
+                    raise KeyError(f"No browser worker assigned to session: {session_id}")
                 stale, reason_code, reason = await self._worker_ownership_status(ownership)
                 if stale:
                     await self._emit_worker_event(
@@ -1050,6 +1051,7 @@ class BrowserWorkerPool:
         )
 
     async def _delete_session_ownership(self, session_id: str) -> None:
+        self._clear_session_assignment(session_id)
         if self._run_store is not None:
             await self._run_store.delete_session_ownership(session_id)
 
@@ -1066,6 +1068,9 @@ class BrowserWorkerPool:
         reason: str | None,
     ) -> None:
         if self._run_store is None:
+            return
+        self._clear_session_assignment(ownership.session_id)
+        if ownership.status == "stale" and ownership.status_reason == reason:
             return
         await self._run_store.save_session_ownership(
             ownership.model_copy(
@@ -1130,6 +1135,11 @@ class BrowserWorkerPool:
         if isinstance(reason, str) and reason:
             return f"{base}: {reason}"
         return base
+
+    def _clear_session_assignment(self, session_id: str) -> None:
+        self._session_workers.pop(session_id, None)
+        self._session_runs.pop(session_id, None)
+        self._session_urls.pop(session_id, None)
 
     def _with_computed_health(self, worker: BrowserWorkerState, now: datetime) -> BrowserWorkerState:
         age = (now - worker.last_heartbeat).total_seconds()

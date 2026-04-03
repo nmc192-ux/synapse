@@ -357,6 +357,50 @@ def test_browser_worker_pool_marks_stale_session_ownership() -> None:
     asyncio.run(scenario())
 
 
+def test_browser_worker_pool_does_not_reemit_already_stale_ownership() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        sockets = WebSocketManager(state_store=store)
+        bus = EventBus(sockets)
+        bus.set_context_resolver(lambda event: _event_context())
+        await run_store.save_session_ownership(
+            BrowserSessionOwnershipRecord(
+                session_id="s-stale-repeat",
+                worker_id="foreign-worker",
+                controller_id="foreign-controller",
+                run_id="run-repeat",
+                status="stale",
+                status_reason="session is owned by a different controller",
+            )
+        )
+
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id="controller-a",
+        )
+        pool.set_event_publisher(bus.publish)
+        await pool.start()
+        try:
+            async with sockets.subscribe("stale-repeat") as queue:
+                try:
+                    await pool.open("s-stale-repeat", "https://example.com")
+                except KeyError:
+                    pass
+                else:
+                    raise AssertionError("expected stale ownership to block dispatch")
+                with suppress(asyncio.TimeoutError):
+                    event = await asyncio.wait_for(queue.get(), timeout=0.1)
+                    raise AssertionError(f"expected no repeated stale event, got {event.event_type}")
+        finally:
+            await pool.stop()
+
+    asyncio.run(scenario())
+
+
 def test_browser_worker_pool_classifies_missing_worker_ownership_reason() -> None:
     async def scenario() -> None:
         store = InMemoryRuntimeStateStore()

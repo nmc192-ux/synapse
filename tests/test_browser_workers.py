@@ -400,6 +400,50 @@ def test_browser_worker_pool_does_not_reemit_already_stale_ownership() -> None:
     asyncio.run(scenario())
 
 
+def test_browser_worker_pool_restart_does_not_emit_stale_event_for_existing_stale_ownership() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        sockets = WebSocketManager(state_store=store)
+        bus = EventBus(sockets)
+        bus.set_context_resolver(lambda event: _event_context())
+        await run_store.save_session_ownership(
+            BrowserSessionOwnershipRecord(
+                session_id="s-stale-restart",
+                worker_id="controller-a:browser-worker-1",
+                controller_id="controller-a",
+                run_id="run-stale-restart",
+                status="stale",
+                status_reason="session is owned by a different controller",
+            )
+        )
+
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id="controller-a",
+        )
+        pool.set_event_publisher(bus.publish)
+        async with sockets.subscribe("stale-restart") as queue:
+            await pool.start()
+            try:
+                deadline = asyncio.get_running_loop().time() + 0.1
+                while True:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        break
+                    with suppress(asyncio.TimeoutError):
+                        event = await asyncio.wait_for(queue.get(), timeout=remaining)
+                        if event.event_type == EventType.WORKER_OWNERSHIP_STALE:
+                            raise AssertionError("expected no stale ownership event during restart recovery")
+            finally:
+                await pool.stop()
+
+    asyncio.run(scenario())
+
+
 def test_browser_worker_pool_classifies_missing_worker_ownership_reason() -> None:
     async def scenario() -> None:
         store = InMemoryRuntimeStateStore()

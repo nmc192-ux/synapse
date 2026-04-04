@@ -1245,6 +1245,8 @@ class BrowserWorkerPool:
             if refreshed.health_status == WorkerHealthStatus.UNAVAILABLE:
                 return True, "worker_unavailable", "owning worker is unavailable"
             return False, None, None
+        if ownership.worker_id in self._workers and ownership.controller_id == self.controller_id:
+            return False, None, None
         return True, "worker_missing", "owning worker is missing from the durable registry"
 
     def _ownership_request_reason(self, reason: str | None) -> str:
@@ -1281,18 +1283,18 @@ class BrowserWorkerPool:
                     self._session_urls[ownership.session_id] = ownership.current_url
             else:
                 stale, reason_code, reason = await self._worker_ownership_status(ownership)
-                await self._emit_worker_event(
-                    EventType.WORKER_OWNERSHIP_STALE,
-                    session_id=ownership.session_id,
-                    run_id=ownership.run_id,
-                    payload={
-                        **ownership.model_dump(mode="json"),
-                        "reason_code": reason_code,
-                        "reason": reason,
-                        "stale": stale,
-                    },
-                )
                 if stale:
+                    await self._emit_worker_event(
+                        EventType.WORKER_OWNERSHIP_STALE,
+                        session_id=ownership.session_id,
+                        run_id=ownership.run_id,
+                        payload={
+                            **ownership.model_dump(mode="json"),
+                            "reason_code": reason_code,
+                            "reason": reason,
+                            "stale": True,
+                        },
+                    )
                     await self._mark_session_ownership_stale(
                         ownership,
                         reason_code=reason_code,
@@ -1343,7 +1345,7 @@ class BrowserWorkerPool:
         recovered_run_ids = {
             ownership.run_id
             for ownership in await self._run_store.list_session_ownerships(controller_id=self.controller_id)
-            if ownership.run_id is not None
+            if ownership.run_id is not None and ownership.status == "active"
         }
         for run_id in sorted(recovered_run_ids):
             await self._emit_worker_event(

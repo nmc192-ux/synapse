@@ -967,6 +967,14 @@ class BrowserWorkerPool:
                 age_seconds=age_seconds,
             )
             return
+        if request.action == "create_session" and request.started_at is not None and progress_heartbeats == 0:
+            await self._mark_request_operator_required(
+                request,
+                reason="session bootstrap started on a worker but did not make durable progress before timeout and requires operator intervention",
+                reason_code="session_bootstrap_started_no_progress",
+                age_seconds=age_seconds,
+            )
+            return
         alert_key = (request.action_id, EventType.WORKER_REQUEST_STUCK)
         if alert_key in self._request_alerts:
             return
@@ -975,7 +983,7 @@ class BrowserWorkerPool:
         updated = request.model_copy(
             update={
                 "status": "stuck",
-                "status_reason": self._stuck_status_reason(request.action),
+                "status_reason": self._stuck_status_reason(request),
                 "updated_at": now,
             }
         )
@@ -994,9 +1002,14 @@ class BrowserWorkerPool:
             severity=EventSeverity.WARNING,
         )
 
-    def _stuck_status_reason(self, action: str) -> str:
-        if action == "create_session":
+    def _stuck_status_reason(self, request: BrowserTaskRequestRecord) -> str:
+        progress_heartbeats = self._progress_heartbeat_count(request)
+        if request.action == "create_session":
             return f"session bootstrap exceeded {self._lease_timeout_seconds:.2f}s without durable completion"
+        if request.started_at is not None and progress_heartbeats == 0:
+            return f"request started on a worker but reported no durable progress within {self._lease_timeout_seconds:.2f}s"
+        if progress_heartbeats > 0:
+            return f"request stopped reporting durable progress before completion within {self._lease_timeout_seconds:.2f}s"
         return f"request exceeded {self._lease_timeout_seconds:.2f}s without a durable result"
 
     @staticmethod

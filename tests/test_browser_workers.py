@@ -1229,7 +1229,7 @@ def test_browser_worker_pool_marks_request_stuck_when_progress_stalls() -> None:
     asyncio.run(scenario())
 
 
-def test_browser_worker_pool_marks_create_session_stuck_with_specific_reason() -> None:
+def test_browser_worker_pool_escalates_started_create_session_without_progress() -> None:
     async def scenario() -> None:
         store = InMemoryRuntimeStateStore()
         run_store = RunStore(store)
@@ -1269,14 +1269,70 @@ def test_browser_worker_pool_marks_create_session_stuck_with_specific_reason() -
             async with sockets.subscribe("create-session-stuck", organization_id="org-1", project_id="project-1") as queue:
                 await pool._maybe_mark_request_stuck(request)
                 event = await asyncio.wait_for(queue.get(), timeout=0.2)
-                assert event.event_type == EventType.WORKER_REQUEST_STUCK
+                assert event.event_type == EventType.BROWSER_HUMAN_INTERVENTION_REQUIRED
+                assert event.payload["reason_code"] == "session_bootstrap_started_no_progress"
         finally:
             await pool.stop()
 
         stored = await run_store.get_worker_request("run-1", "action-create-session-stuck")
         assert stored is not None
+        assert stored.status == "operator_required"
+        assert (
+            stored.status_reason
+            == "session bootstrap started on a worker but did not make durable progress before timeout and requires operator intervention"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_browser_worker_pool_marks_started_request_stuck_with_specific_progress_reason() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        sockets = WebSocketManager(state_store=store)
+        bus = EventBus(sockets)
+        bus.set_context_resolver(lambda event: _event_context())
+        controller_id = "controller-started-request-stuck"
+        worker_id = f"{controller_id}:browser-worker-1"
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            heartbeat_interval_seconds=0.2,
+            lease_timeout_seconds=0.05,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id=controller_id,
+        )
+        pool.set_event_publisher(bus.publish)
+
+        request = BrowserTaskRequestRecord(
+            action_id="action-open-started-stuck",
+            request_id="request-open-started-stuck",
+            run_id="run-1",
+            worker_id=worker_id,
+            action="open",
+            session_id="s1",
+            status="running",
+            payload={"session_id": "s1", "url": "https://example.com"},
+            dispatched_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+            started_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+            last_progress_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        )
+        await run_store.save_worker_request(request)
+
+        await pool.start()
+        try:
+            async with sockets.subscribe("started-request-stuck", organization_id="org-1", project_id="project-1") as queue:
+                await pool._maybe_mark_request_stuck(request)
+                event = await asyncio.wait_for(queue.get(), timeout=0.2)
+                assert event.event_type == EventType.WORKER_REQUEST_STUCK
+        finally:
+            await pool.stop()
+
+        stored = await run_store.get_worker_request("run-1", "action-open-started-stuck")
+        assert stored is not None
         assert stored.status == "stuck"
-        assert stored.status_reason == "session bootstrap exceeded 0.05s without durable completion"
+        assert stored.status_reason == "request started on a worker but reported no durable progress within 0.05s"
 
     asyncio.run(scenario())
 

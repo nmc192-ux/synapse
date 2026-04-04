@@ -577,6 +577,15 @@ class BrowserWorkerPool:
         if self._run_store is None:
             return
         now = datetime.now(timezone.utc)
+        payload = dict(item.arguments)
+        payload.update(
+            {
+                "lifecycle_stage": "dispatched",
+                "lifecycle_action": item.action,
+                "progress_heartbeat_count": 0,
+                "bootstrap_degraded": False,
+            }
+        )
         await self._run_store.save_worker_request(
             BrowserTaskRequestRecord(
                 action_id=item.action_id,
@@ -589,7 +598,7 @@ class BrowserWorkerPool:
                 agent_id=item.agent_id,
                 fencing_token=item.fencing_token,
                 status=status,
-                payload=dict(item.arguments),
+                payload=payload,
                 dispatched_at=now if status in {"dispatched", "running", "slow", "stuck"} else None,
                 started_at=now if status in {"running", "slow", "stuck"} else None,
                 last_progress_at=now if status in {"dispatched", "running", "slow", "stuck"} else None,
@@ -605,6 +614,11 @@ class BrowserWorkerPool:
                     update={
                         "worker_id": worker_id,
                         "status": "running",
+                        "payload": {
+                            **request.payload,
+                            "lifecycle_stage": "started",
+                            "lifecycle_started_at": now.isoformat(),
+                        },
                         "started_at": request.started_at or now,
                         "dispatched_at": request.dispatched_at or now,
                         "last_progress_at": now,
@@ -632,26 +646,36 @@ class BrowserWorkerPool:
         now = datetime.now(timezone.utc)
         if request.status not in {"dispatched", "running", "slow", "stuck", "recovered"}:
             return
+        progress_count = self._progress_heartbeat_count(request) + 1
         updates: dict[str, object] = {
             "worker_id": worker_id,
             "last_progress_at": now,
             "updated_at": now,
+            "payload": {
+                **request.payload,
+                "lifecycle_stage": "progressing",
+                "last_progress_heartbeat_at": now.isoformat(),
+                "progress_heartbeat_count": progress_count,
+            },
         }
         emitted_event: tuple[EventType, dict[str, object]] | None = None
         if request.status == "slow":
-            updates["status"] = "running"
-            updates["status_reason"] = "request resumed after slow progress gap"
-            emitted_event = (
-                EventType.WORKER_REQUEST_RUNNING,
-                {
-                    "worker_id": worker_id,
-                    "action_id": request.action_id,
-                    "request_id": request.request_id,
-                    "action": request.action,
-                    "resumed": True,
-                    "previous_status": "slow",
-                },
-            )
+            if request.action == "create_session":
+                updates["status_reason"] = "session bootstrap still progressing after degraded delay"
+            else:
+                updates["status"] = "running"
+                updates["status_reason"] = "request resumed after slow progress gap"
+                emitted_event = (
+                    EventType.WORKER_REQUEST_RUNNING,
+                    {
+                        "worker_id": worker_id,
+                        "action_id": request.action_id,
+                        "request_id": request.request_id,
+                        "action": request.action,
+                        "resumed": True,
+                        "previous_status": "slow",
+                    },
+                )
         elif request.status == "stuck":
             updates["status"] = "recovered"
             updates["recovered_at"] = now
@@ -846,10 +870,19 @@ class BrowserWorkerPool:
             return
         self._request_alerts.add(alert_key)
         now = datetime.now(timezone.utc)
+        payload = dict(request.payload)
+        payload.update(
+            {
+                "lifecycle_stage": "slow",
+                "bootstrap_degraded": request.action == "create_session",
+                "bootstrap_degraded_at": now.isoformat() if request.action == "create_session" else payload.get("bootstrap_degraded_at"),
+            }
+        )
         updated = request.model_copy(
             update={
                 "status": "slow",
-                "status_reason": f"request exceeded {threshold:.2f}s without a durable result",
+                "status_reason": self._slow_status_reason(request.action, threshold),
+                "payload": payload,
                 "updated_at": now,
             }
         )
@@ -879,6 +912,7 @@ class BrowserWorkerPool:
         if age_seconds < self._lease_timeout_seconds:
             return
         ownership_conflict_count = self._ownership_conflict_count(request)
+        bootstrap_degraded = bool(request.payload.get("bootstrap_degraded")) if isinstance(request.payload, dict) else False
         if request.status == "recovered":
             await self._mark_request_operator_required(
                 request,
@@ -903,7 +937,7 @@ class BrowserWorkerPool:
                 reason="repeated session ownership conflicts require operator intervention",
             )
             return
-        if request.action == "create_session" and request.status == "slow":
+        if request.action == "create_session" and (request.status == "slow" or bootstrap_degraded):
             await self._mark_request_operator_required(
                 request,
                 reason="session bootstrap stalled after degraded progress and requires operator intervention",
@@ -942,6 +976,26 @@ class BrowserWorkerPool:
         if action == "create_session":
             return f"session bootstrap exceeded {self._lease_timeout_seconds:.2f}s without durable completion"
         return f"request exceeded {self._lease_timeout_seconds:.2f}s without a durable result"
+
+    @staticmethod
+    def _slow_status_reason(action: str, threshold: float) -> str:
+        if action == "create_session":
+            return f"session bootstrap exceeded {threshold:.2f}s without durable completion"
+        return f"request exceeded {threshold:.2f}s without a durable result"
+
+    @staticmethod
+    def _progress_heartbeat_count(request: BrowserTaskRequestRecord) -> int:
+        raw = request.payload.get("progress_heartbeat_count")
+        if isinstance(raw, int):
+            return raw
+        if isinstance(raw, float):
+            return int(raw)
+        if isinstance(raw, str):
+            try:
+                return int(raw)
+            except ValueError:
+                return 0
+        return 0
 
     async def _request_record(
         self,

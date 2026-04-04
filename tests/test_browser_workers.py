@@ -898,10 +898,81 @@ def test_browser_worker_pool_waits_past_lease_timeout_for_slow_create_session() 
         request = await run_store.list_worker_requests(run_id="run-1", session_id="s1")
         create_request = next(item for item in request if item.action == "create_session")
         assert create_request.status == "completed"
+        assert create_request.payload["bootstrap_degraded"] is True
+        assert create_request.payload["progress_heartbeat_count"] >= 1
         assert create_request.status_reason in {
             "completed after slow progress gap",
             "completed after stalled progress gap",
         }
+
+    asyncio.run(scenario())
+
+
+def test_browser_worker_pool_keeps_slow_create_session_degraded_during_progress() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        sockets = WebSocketManager(state_store=store)
+        bus = EventBus(sockets)
+        bus.set_context_resolver(lambda event: _event_context())
+        controller_id = "controller-progressing-create-session"
+        worker_id = f"{controller_id}:browser-worker-1"
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            heartbeat_interval_seconds=0.2,
+            lease_timeout_seconds=0.05,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id=controller_id,
+        )
+        pool.set_event_publisher(bus.publish)
+
+        await pool.start()
+        try:
+            now = datetime.now(timezone.utc)
+            await run_store.save_worker_request(
+                BrowserTaskRequestRecord(
+                    action_id="action-progressing-create-session",
+                    request_id="request-progressing-create-session",
+                    run_id="run-1",
+                    worker_id=worker_id,
+                    action="create_session",
+                    session_id="s1",
+                    status="slow",
+                    status_reason="session bootstrap exceeded 0.03s without durable completion",
+                    payload={
+                        "session_id": "s1",
+                        "agent_id": "agent-1",
+                        "run_id": "run-1",
+                        "bootstrap_degraded": True,
+                        "progress_heartbeat_count": 0,
+                    },
+                    dispatched_at=now - timedelta(seconds=0.3),
+                    started_at=now - timedelta(seconds=0.25),
+                    last_progress_at=now - timedelta(seconds=0.2),
+                )
+            )
+            await pool._on_request_progress(
+                worker_id,
+                BrowserTaskEnvelope(
+                    action_id="action-progressing-create-session",
+                    request_id="request-progressing-create-session",
+                    run_id="run-1",
+                    session_id="s1",
+                    action="create_session",
+                ),
+            )
+        finally:
+            await pool.stop()
+
+        stored = await run_store.get_worker_request("run-1", "action-progressing-create-session")
+        assert stored is not None
+        assert stored.status == "slow"
+        assert stored.status_reason == "session bootstrap still progressing after degraded delay"
+        assert stored.payload["bootstrap_degraded"] is True
+        assert stored.payload["progress_heartbeat_count"] == 1
+        assert stored.payload["lifecycle_stage"] == "progressing"
 
     asyncio.run(scenario())
 

@@ -278,6 +278,64 @@ def test_scheduler_does_not_requeue_expired_lease_when_run_needs_operator_review
     asyncio.run(scenario())
 
 
+def test_scheduler_does_not_requeue_expired_lease_when_repeated_abandoned_conflicts_require_review() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        bus = EventBus(WebSocketManager(state_store=store))
+        bus.set_context_resolver(lambda event: _event_context())
+        scheduler = RunScheduler(
+            run_store,
+            _StubWorkerPool([BrowserWorkerState(worker_id="worker-1", queue_name="q1", status=WorkerRuntimeStatus.IDLE)]),
+            bus,
+            cleanup_interval_seconds=60,
+            retry_base_delay_seconds=0.0,
+        )
+        run = await run_store.create_run(task_id="task-abandoned-review", agent_id="agent-1")
+        await run_store.save_worker_request(
+            BrowserTaskRequestRecord(
+                action_id="action-abandoned-review",
+                request_id="request-abandoned-review",
+                run_id=run.run_id,
+                worker_id="worker-1",
+                action="open",
+                session_id="s1",
+                status="abandoned",
+                status_reason="worker lease moved to worker-2 before request completed",
+                payload={"ownership_conflict_count": 2, "ownership_conflict_reason_code": "lease_moved"},
+            )
+        )
+        await run_store.save_lease(
+            RunLeaseRecord(
+                run_id=run.run_id,
+                worker_id="worker-1",
+                acquired_at=datetime.now(timezone.utc) - timedelta(seconds=5),
+                expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+                token=1,
+                attempts=1,
+            )
+        )
+        await run_store.update_metadata(run.run_id, {"assigned_worker_id": "worker-1", "assignment_attempts": 1})
+
+        await scheduler.cleanup_expired_leases()
+
+        persisted = await run_store.get(run.run_id)
+        assert persisted.status == RunStatus.WAITING_FOR_OPERATOR
+        assert persisted.metadata["assigned_worker_id"] is None
+        assert persisted.metadata["operator_review_reason"] == (
+            "lease expired while repeated ownership conflicts abandoned browser requests and require operator review"
+        )
+        intervention = await run_store.latest_intervention_for_run(run.run_id)
+        assert intervention is not None
+        assert intervention.reason == (
+            "lease expired while repeated ownership conflicts abandoned browser requests and require operator review"
+        )
+        lease = await run_store.get_lease(run.run_id)
+        assert lease is None
+
+    asyncio.run(scenario())
+
+
 def test_scheduler_prevents_double_assignment_race() -> None:
     async def scenario() -> None:
         store = InMemoryRuntimeStateStore()
@@ -300,6 +358,52 @@ def test_scheduler_prevents_double_assignment_race() -> None:
         assert first.worker_id == "worker-1"
         assert second.worker_id == "worker-1"
         assert first.token == second.token
+
+    asyncio.run(scenario())
+
+
+def test_scheduler_defers_assignment_when_repeated_abandoned_conflicts_require_review() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        bus = EventBus(WebSocketManager(state_store=store))
+        bus.set_context_resolver(lambda event: _event_context())
+        scheduler = RunScheduler(
+            run_store,
+            _StubWorkerPool([BrowserWorkerState(worker_id="worker-1", queue_name="q1", status=WorkerRuntimeStatus.IDLE)]),
+            bus,
+            cleanup_interval_seconds=60,
+        )
+        run = await run_store.create_run(task_id="task-assign-review", agent_id="agent-1")
+        await run_store.save_worker_request(
+            BrowserTaskRequestRecord(
+                action_id="action-assign-review",
+                request_id="request-assign-review",
+                run_id=run.run_id,
+                worker_id="worker-1",
+                action="open",
+                session_id="s1",
+                status="abandoned",
+                status_reason="worker lease moved to worker-2 before request completed",
+                payload={"ownership_conflict_count": 2, "ownership_conflict_reason_code": "lease_moved"},
+            )
+        )
+
+        with pytest.raises(RunAssignmentDeferred, match="operator review"):
+            await scheduler.assign_run(run.run_id)
+
+        persisted = await run_store.get(run.run_id)
+        assert persisted.status == RunStatus.WAITING_FOR_OPERATOR
+        assert persisted.metadata["operator_review_reason"] == (
+            "repeated ownership conflicts abandoned browser requests and require operator review"
+        )
+        intervention = await run_store.latest_intervention_for_run(run.run_id)
+        assert intervention is not None
+        assert intervention.reason == (
+            "repeated ownership conflicts abandoned browser requests and require operator review"
+        )
+        lease = await run_store.get_lease(run.run_id)
+        assert lease is None
 
     asyncio.run(scenario())
 

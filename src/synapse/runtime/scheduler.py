@@ -9,7 +9,9 @@ from synapse.config import settings
 from synapse.models.run import RunState, RunStatus
 from synapse.models.runtime_event import EventSeverity, EventType
 from synapse.models.runtime_state import (
+    BrowserTaskRequestRecord,
     BrowserWorkerState,
+    OperatorInterventionState,
     RunLeaseRecord,
     RunLeaseStatus,
     WorkerHealthStatus,
@@ -80,6 +82,10 @@ class RunScheduler:
     async def assign_run(self, run_id: str) -> RunLease:
         run = await self.run_store.get(run_id)
         await self.cleanup_expired_leases()
+        operator_review_reason = await self._operator_review_reason(run_id)
+        if operator_review_reason is not None:
+            await self._park_run_for_operator_review(run, reason=operator_review_reason)
+            raise RunAssignmentDeferred("Run is waiting for operator review.")
         existing = await self._load_lease(run_id)
         if existing is not None and await self._worker_available(existing.worker_id):
             return await self.renew_lease(run_id, token=existing.token)
@@ -243,21 +249,14 @@ class RunScheduler:
         leases = await self.run_store.list_expired_leases(now=now)
         expired = [lease.run_id for lease in leases if lease.expires_at <= now]
         for run_id in expired:
-            if await self._run_requires_operator_review(run_id):
+            operator_review_reason = await self._operator_review_reason(run_id)
+            if operator_review_reason is not None:
                 run = await self.run_store.get(run_id)
                 await self.release_run(run_id)
-                if run.status != RunStatus.WAITING_FOR_OPERATOR:
-                    await self.run_store.update_status(
-                        run_id,
-                        RunStatus.WAITING_FOR_OPERATOR,
-                        current_phase="waiting_for_operator",
-                        metadata={
-                            "operator_review_reason": "lease expired while browser request required operator review",
-                            "assigned_worker_id": None,
-                            "lease_expires_at": None,
-                            "lease_token": None,
-                        },
-                    )
+                await self._park_run_for_operator_review(
+                    run,
+                    reason=f"lease expired while {operator_review_reason}",
+                )
                 continue
             # Requeue expired leases without immediate reassignment. Calling assign_run()
             # recursively from cleanup can surface transient retry-backoff state as a
@@ -291,11 +290,93 @@ class RunScheduler:
         )
 
     async def _run_requires_operator_review(self, run_id: str) -> bool:
+        return await self._operator_review_reason(run_id) is not None
+
+    async def _operator_review_reason(self, run_id: str) -> str | None:
         run = await self.run_store.get(run_id)
         if run.status == RunStatus.WAITING_FOR_OPERATOR:
-            return True
+            reason = run.metadata.get("operator_review_reason")
+            if isinstance(reason, str) and reason:
+                return reason
+            return "run is already waiting for operator review"
+        latest_intervention = await self.run_store.latest_intervention_for_run(run_id)
+        if latest_intervention is not None and latest_intervention.state == OperatorInterventionState.PENDING:
+            return latest_intervention.reason
         request_health = await self.run_store.list_worker_request_health(run_id=run_id)
-        return any(item.health_state == "operator_required" for item in request_health)
+        if any(item.health_state == "operator_required" for item in request_health):
+            return "browser request required operator review"
+        requests = await self.run_store.list_worker_requests(run_id=run_id)
+        repeated_conflict_abandons = [
+            request
+            for request in requests
+            if request.status == "abandoned" and self._ownership_conflict_count(request) >= 2
+        ]
+        if repeated_conflict_abandons:
+            return "repeated ownership conflicts abandoned browser requests and require operator review"
+        return None
+
+    async def _park_run_for_operator_review(self, run: RunState, *, reason: str) -> RunState:
+        latest_intervention = await self.run_store.latest_intervention_for_run(run.run_id)
+        if latest_intervention is not None and latest_intervention.state == OperatorInterventionState.PENDING and latest_intervention.reason == reason:
+            if run.status == RunStatus.WAITING_FOR_OPERATOR:
+                return run
+            return await self.run_store.update_status(
+                run.run_id,
+                RunStatus.WAITING_FOR_OPERATOR,
+                current_phase="waiting_for_operator",
+                metadata={
+                    "operator_review_reason": reason,
+                    "assigned_worker_id": None,
+                    "lease_expires_at": None,
+                    "lease_token": None,
+                },
+            )
+        await self.run_store.set_operator_intervention(
+            run.run_id,
+            intervention={
+                "reason": reason,
+                "payload": {
+                    "source": "scheduler",
+                    "category": "runtime_recovery",
+                    "ui": {
+                        "operator_required": True,
+                        "action_label": "Review Run",
+                        "reason": reason,
+                        "category": "runtime_recovery",
+                        "run_context": {
+                            "run_id": run.run_id,
+                            "task_id": run.task_id,
+                            "agent_id": run.agent_id,
+                            "goal": run.metadata.get("goal"),
+                        },
+                    },
+                },
+            },
+            status=RunStatus.WAITING_FOR_OPERATOR,
+        )
+        return await self.run_store.update_metadata(
+            run.run_id,
+            {
+                "operator_review_reason": reason,
+                "assigned_worker_id": None,
+                "lease_expires_at": None,
+                "lease_token": None,
+            },
+        )
+
+    @staticmethod
+    def _ownership_conflict_count(request: BrowserTaskRequestRecord) -> int:
+        raw = request.payload.get("ownership_conflict_count")
+        if isinstance(raw, int):
+            return raw
+        if isinstance(raw, float):
+            return int(raw)
+        if isinstance(raw, str):
+            try:
+                return int(raw)
+            except ValueError:
+                return 0
+        return 0
 
     @staticmethod
     def _assignment_attempts(run: RunState) -> int:

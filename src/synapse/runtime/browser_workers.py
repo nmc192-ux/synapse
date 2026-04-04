@@ -609,16 +609,19 @@ class BrowserWorkerPool:
         request = await self._load_existing_request(item.run_id, item.action_id)
         now = datetime.now(timezone.utc)
         if request is not None:
+            payload = {
+                **request.payload,
+                "lifecycle_stage": "started",
+                "lifecycle_started_at": now.isoformat(),
+            }
+            if request.action == "create_session" and bool(request.payload.get("bootstrap_dispatch_degraded")):
+                payload["bootstrap_degraded"] = True
             await self._run_store.save_worker_request(
                 request.model_copy(
                     update={
                         "worker_id": worker_id,
                         "status": "running",
-                        "payload": {
-                            **request.payload,
-                            "lifecycle_stage": "started",
-                            "lifecycle_started_at": now.isoformat(),
-                        },
+                        "payload": payload,
                         "started_at": request.started_at or now,
                         "dispatched_at": request.dispatched_at or now,
                         "last_progress_at": now,
@@ -871,17 +874,24 @@ class BrowserWorkerPool:
         self._request_alerts.add(alert_key)
         now = datetime.now(timezone.utc)
         payload = dict(request.payload)
+        slow_reason = self._slow_status_reason(request, threshold)
         payload.update(
             {
                 "lifecycle_stage": "slow",
                 "bootstrap_degraded": request.action == "create_session",
                 "bootstrap_degraded_at": now.isoformat() if request.action == "create_session" else payload.get("bootstrap_degraded_at"),
+                "bootstrap_dispatch_degraded": request.action == "create_session" and request.started_at is None,
+                "bootstrap_dispatch_degraded_at": (
+                    now.isoformat()
+                    if request.action == "create_session" and request.started_at is None
+                    else payload.get("bootstrap_dispatch_degraded_at")
+                ),
             }
         )
         updated = request.model_copy(
             update={
                 "status": "slow",
-                "status_reason": self._slow_status_reason(request.action, threshold),
+                "status_reason": slow_reason,
                 "payload": payload,
                 "updated_at": now,
             }
@@ -913,6 +923,7 @@ class BrowserWorkerPool:
             return
         ownership_conflict_count = self._ownership_conflict_count(request)
         bootstrap_degraded = bool(request.payload.get("bootstrap_degraded")) if isinstance(request.payload, dict) else False
+        bootstrap_dispatch_degraded = bool(request.payload.get("bootstrap_dispatch_degraded")) if isinstance(request.payload, dict) else False
         progress_heartbeats = self._progress_heartbeat_count(request)
         if request.status == "recovered":
             await self._mark_request_operator_required(
@@ -936,6 +947,14 @@ class BrowserWorkerPool:
             await self._maybe_escalate_run_for_ownership_conflicts(
                 request.run_id,
                 reason="repeated session ownership conflicts require operator intervention",
+            )
+            return
+        if request.action == "create_session" and (request.started_at is None or bootstrap_dispatch_degraded):
+            await self._mark_request_operator_required(
+                request,
+                reason="session bootstrap did not start on a worker before timeout and requires operator intervention",
+                reason_code="session_bootstrap_not_started",
+                age_seconds=age_seconds,
             )
             return
         if request.action == "create_session" and (
@@ -981,8 +1000,10 @@ class BrowserWorkerPool:
         return f"request exceeded {self._lease_timeout_seconds:.2f}s without a durable result"
 
     @staticmethod
-    def _slow_status_reason(action: str, threshold: float) -> str:
-        if action == "create_session":
+    def _slow_status_reason(request: BrowserTaskRequestRecord, threshold: float) -> str:
+        if request.action == "create_session" and request.started_at is None:
+            return f"session bootstrap has not started on a worker after {threshold:.2f}s"
+        if request.action == "create_session":
             return f"session bootstrap exceeded {threshold:.2f}s without durable completion"
         return f"request exceeded {threshold:.2f}s without a durable result"
 

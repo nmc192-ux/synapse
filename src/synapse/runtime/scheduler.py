@@ -243,6 +243,22 @@ class RunScheduler:
         leases = await self.run_store.list_expired_leases(now=now)
         expired = [lease.run_id for lease in leases if lease.expires_at <= now]
         for run_id in expired:
+            if await self._run_requires_operator_review(run_id):
+                run = await self.run_store.get(run_id)
+                await self.release_run(run_id)
+                if run.status != RunStatus.WAITING_FOR_OPERATOR:
+                    await self.run_store.update_status(
+                        run_id,
+                        RunStatus.WAITING_FOR_OPERATOR,
+                        current_phase="waiting_for_operator",
+                        metadata={
+                            "operator_review_reason": "lease expired while browser request required operator review",
+                            "assigned_worker_id": None,
+                            "lease_expires_at": None,
+                            "lease_token": None,
+                        },
+                    )
+                continue
             # Requeue expired leases without immediate reassignment. Calling assign_run()
             # recursively from cleanup can surface transient retry-backoff state as a
             # user-facing 500 during unrelated run creation.
@@ -273,6 +289,13 @@ class RunScheduler:
             and worker.health_status in {WorkerHealthStatus.HEALTHY, WorkerHealthStatus.DEGRADED}
             for worker in await self.browser_workers.list_registered_workers()
         )
+
+    async def _run_requires_operator_review(self, run_id: str) -> bool:
+        run = await self.run_store.get(run_id)
+        if run.status == RunStatus.WAITING_FOR_OPERATOR:
+            return True
+        request_health = await self.run_store.list_worker_request_health(run_id=run_id)
+        return any(item.health_state == "operator_required" for item in request_health)
 
     @staticmethod
     def _assignment_attempts(run: RunState) -> int:

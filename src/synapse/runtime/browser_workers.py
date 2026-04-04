@@ -969,6 +969,26 @@ class BrowserWorkerPool:
         )
         return updated
 
+    async def _lease_conflict_for_request(
+        self,
+        request: BrowserTaskRequestRecord,
+    ) -> tuple[str | None, str | None]:
+        if self._run_store is None or request.run_id is None:
+            return None, None
+        lease = await self._run_store.get_lease(request.run_id)
+        if lease is None:
+            return "lease_missing", "durable result wait ended because the run lease is no longer present"
+        if lease.status != RunLeaseStatus.ACTIVE:
+            return "lease_inactive", "durable result wait ended because the run lease is no longer active"
+        if lease.worker_id != request.worker_id:
+            return "lease_moved", f"durable result wait ended after lease ownership moved to {lease.worker_id}"
+        return None, None
+
+    @staticmethod
+    def _ownership_conflict_count(request: BrowserTaskRequestRecord) -> int:
+        raw = request.payload.get("ownership_conflict_count")
+        return raw if isinstance(raw, int) else 0
+
     async def _reject_stale_result(self, result: BrowserTaskResult) -> None:
         if self._run_store is None:
             return
@@ -1135,10 +1155,58 @@ class BrowserWorkerPool:
         for request in active_requests:
             if request.status not in {"queued", "dispatched", "running", "slow", "recovered"}:
                 continue
+            next_conflict_count = self._ownership_conflict_count(request) + 1
+            updated_payload = {
+                **request.payload,
+                "ownership_conflict_count": next_conflict_count,
+                "ownership_conflict_reason_code": reason_code,
+                "ownership_conflict_reason": reason,
+            }
+            lease_reason_code, lease_reason = await self._lease_conflict_for_request(request)
+            if lease_reason_code is not None and lease_reason is not None:
+                updated = request.model_copy(
+                    update={
+                        "status": "abandoned",
+                        "status_reason": lease_reason,
+                        "payload": updated_payload,
+                        "updated_at": now,
+                        "completed_at": request.completed_at or now,
+                    }
+                )
+                await self._run_store.save_worker_request(updated)
+                self._request_alerts.discard((request.action_id, EventType.WORKER_REQUEST_SLOW))
+                self._request_alerts.discard((request.action_id, EventType.WORKER_REQUEST_STUCK))
+                await self._emit_worker_event(
+                    EventType.WORKER_UNAVAILABLE,
+                    run_id=request.run_id,
+                    session_id=request.session_id,
+                    payload={
+                        "worker_id": request.worker_id,
+                        "action_id": request.action_id,
+                        "request_id": request.request_id,
+                        "reason_code": lease_reason_code,
+                        "reason": lease_reason,
+                    },
+                    severity=EventSeverity.WARNING,
+                )
+                continue
+            if request.status == "recovered" or next_conflict_count >= 2:
+                operator_reason = (
+                    "repeated session ownership conflicts require operator intervention"
+                    if next_conflict_count >= 2 and request.status != "recovered"
+                    else "request requires operator intervention after ownership conflict during recovery"
+                )
+                await self._mark_request_operator_required(
+                    request.model_copy(update={"payload": updated_payload}),
+                    reason=operator_reason,
+                    reason_code=reason_code or "ownership_conflict",
+                )
+                continue
             updated = request.model_copy(
                 update={
                     "status": "stuck",
                     "status_reason": self._ownership_request_reason(reason),
+                    "payload": updated_payload,
                     "updated_at": now,
                 }
             )

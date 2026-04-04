@@ -7,7 +7,7 @@ import pytest
 from synapse.models.agent import AgentDefinition, AgentKind
 from synapse.models.run import RunStatus
 from synapse.models.runtime_event import EventType
-from synapse.models.runtime_state import BrowserWorkerState, RunLeaseRecord, WorkerRuntimeStatus
+from synapse.models.runtime_state import BrowserTaskRequestRecord, BrowserWorkerState, RunLeaseRecord, WorkerRuntimeStatus
 from synapse.models.task import TaskRequest, TaskResult, TaskStatus
 from synapse.runtime.budget import AgentBudgetManager
 from synapse.runtime.checkpoint_service import CheckpointService
@@ -222,6 +222,56 @@ def test_scheduler_requeues_expired_leases() -> None:
         persisted = await run_store.get(run.run_id)
         assert persisted.status == RunStatus.PENDING
         assert persisted.metadata["assigned_worker_id"] is None
+        lease = await run_store.get_lease(run.run_id)
+        assert lease is None
+
+    asyncio.run(scenario())
+
+
+def test_scheduler_does_not_requeue_expired_lease_when_run_needs_operator_review() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        bus = EventBus(WebSocketManager(state_store=store))
+        bus.set_context_resolver(lambda event: _event_context())
+        scheduler = RunScheduler(
+            run_store,
+            _StubWorkerPool([BrowserWorkerState(worker_id="worker-1", queue_name="q1", status=WorkerRuntimeStatus.IDLE)]),
+            bus,
+            cleanup_interval_seconds=60,
+            retry_base_delay_seconds=0.0,
+        )
+        run = await run_store.create_run(task_id="task-operator", agent_id="agent-1")
+        await run_store.save_worker_request(
+            BrowserTaskRequestRecord(
+                action_id="action-operator",
+                request_id="request-operator",
+                run_id=run.run_id,
+                worker_id="worker-1",
+                action="open",
+                session_id="s1",
+                status="operator_required",
+                status_reason="repeated session ownership conflicts require operator intervention",
+            )
+        )
+        await run_store.save_lease(
+            RunLeaseRecord(
+                run_id=run.run_id,
+                worker_id="worker-1",
+                acquired_at=datetime.now(timezone.utc) - timedelta(seconds=5),
+                expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+                token=1,
+                attempts=1,
+            )
+        )
+        await run_store.update_metadata(run.run_id, {"assigned_worker_id": "worker-1", "assignment_attempts": 1})
+
+        await scheduler.cleanup_expired_leases()
+
+        persisted = await run_store.get(run.run_id)
+        assert persisted.status == RunStatus.WAITING_FOR_OPERATOR
+        assert persisted.metadata["assigned_worker_id"] is None
+        assert persisted.metadata["operator_review_reason"] == "lease expired while browser request required operator review"
         lease = await run_store.get_lease(run.run_id)
         assert lease is None
 

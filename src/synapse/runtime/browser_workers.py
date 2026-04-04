@@ -903,6 +903,14 @@ class BrowserWorkerPool:
                 reason="repeated session ownership conflicts require operator intervention",
             )
             return
+        if request.action == "create_session" and request.status == "slow":
+            await self._mark_request_operator_required(
+                request,
+                reason="session bootstrap stalled after degraded progress and requires operator intervention",
+                reason_code="session_bootstrap_stalled",
+                age_seconds=age_seconds,
+            )
+            return
         alert_key = (request.action_id, EventType.WORKER_REQUEST_STUCK)
         if alert_key in self._request_alerts:
             return
@@ -911,7 +919,7 @@ class BrowserWorkerPool:
         updated = request.model_copy(
             update={
                 "status": "stuck",
-                "status_reason": f"request exceeded {self._lease_timeout_seconds:.2f}s without a durable result",
+                "status_reason": self._stuck_status_reason(request.action),
                 "updated_at": now,
             }
         )
@@ -929,6 +937,11 @@ class BrowserWorkerPool:
             },
             severity=EventSeverity.WARNING,
         )
+
+    def _stuck_status_reason(self, action: str) -> str:
+        if action == "create_session":
+            return f"session bootstrap exceeded {self._lease_timeout_seconds:.2f}s without durable completion"
+        return f"request exceeded {self._lease_timeout_seconds:.2f}s without a durable result"
 
     async def _request_record(
         self,

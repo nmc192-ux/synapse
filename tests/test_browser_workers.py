@@ -906,6 +906,69 @@ def test_browser_worker_pool_waits_past_lease_timeout_for_slow_create_session() 
     asyncio.run(scenario())
 
 
+def test_browser_worker_pool_escalates_slow_create_session_to_operator_required() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        sockets = WebSocketManager(state_store=store)
+        bus = EventBus(sockets)
+        bus.set_context_resolver(lambda event: _event_context())
+        controller_id = "controller-slow-create-operator"
+        worker_id = f"{controller_id}:browser-worker-1"
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            heartbeat_interval_seconds=0.2,
+            lease_timeout_seconds=0.05,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id=controller_id,
+        )
+        pool.set_event_publisher(bus.publish)
+
+        await pool.start()
+        try:
+            stale_time = datetime.now(timezone.utc) - timedelta(seconds=1)
+            await run_store.save_worker_request(
+                BrowserTaskRequestRecord(
+                    action_id="action-slow-create-session",
+                    request_id="request-slow-create-session",
+                    run_id="run-1",
+                    worker_id=worker_id,
+                    action="create_session",
+                    session_id="s1",
+                    status="slow",
+                    status_reason="request exceeded 0.10s without a durable result",
+                    payload={"session_id": "s1", "agent_id": "agent-1", "run_id": "run-1"},
+                    dispatched_at=stale_time,
+                    started_at=stale_time,
+                    last_progress_at=stale_time,
+                )
+            )
+            async with sockets.subscribe("slow-create-session-operator", organization_id="org-1", project_id="project-1") as queue:
+                await pool._maybe_mark_request_stuck(
+                    BrowserTaskEnvelope(
+                        action_id="action-slow-create-session",
+                        request_id="request-slow-create-session",
+                        run_id="run-1",
+                        session_id="s1",
+                        action="create_session",
+                    )
+                )
+                event = await asyncio.wait_for(queue.get(), timeout=0.2)
+                assert event.event_type == EventType.BROWSER_HUMAN_INTERVENTION_REQUIRED
+                assert event.payload["reason_code"] == "session_bootstrap_stalled"
+        finally:
+            await pool.stop()
+
+        stored = await run_store.get_worker_request("run-1", "action-slow-create-session")
+        assert stored is not None
+        assert stored.status == "operator_required"
+        assert stored.status_reason == "session bootstrap stalled after degraded progress and requires operator intervention"
+
+    asyncio.run(scenario())
+
+
 def test_browser_worker_pool_marks_request_stuck_when_progress_stalls() -> None:
     async def scenario() -> None:
         store = InMemoryRuntimeStateStore()
@@ -976,6 +1039,58 @@ def test_browser_worker_pool_marks_request_stuck_when_progress_stalls() -> None:
         assert stored is not None
         assert stored.completed_at is not None
         assert stored.status == "completed"
+
+    asyncio.run(scenario())
+
+
+def test_browser_worker_pool_marks_create_session_stuck_with_specific_reason() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        sockets = WebSocketManager(state_store=store)
+        bus = EventBus(sockets)
+        bus.set_context_resolver(lambda event: _event_context())
+        controller_id = "controller-create-session-stuck"
+        worker_id = f"{controller_id}:browser-worker-1"
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            heartbeat_interval_seconds=0.2,
+            lease_timeout_seconds=0.05,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id=controller_id,
+        )
+        pool.set_event_publisher(bus.publish)
+
+        request = BrowserTaskRequestRecord(
+            action_id="action-create-session-stuck",
+            request_id="request-create-session-stuck",
+            run_id="run-1",
+            worker_id=worker_id,
+            action="create_session",
+            session_id="s1",
+            status="running",
+            payload={"session_id": "s1", "agent_id": "agent-1", "run_id": "run-1"},
+            dispatched_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+            started_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+            last_progress_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        )
+        await run_store.save_worker_request(request)
+
+        await pool.start()
+        try:
+            async with sockets.subscribe("create-session-stuck", organization_id="org-1", project_id="project-1") as queue:
+                await pool._maybe_mark_request_stuck(request)
+                event = await asyncio.wait_for(queue.get(), timeout=0.2)
+                assert event.event_type == EventType.WORKER_REQUEST_STUCK
+        finally:
+            await pool.stop()
+
+        stored = await run_store.get_worker_request("run-1", "action-create-session-stuck")
+        assert stored is not None
+        assert stored.status == "stuck"
+        assert stored.status_reason == "session bootstrap exceeded 0.05s without durable completion"
 
     asyncio.run(scenario())
 

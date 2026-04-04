@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     redis_required: bool = False
     runtime_state_fallback_memory: bool = True
+    runtime_events_ttl_seconds: int = 172800
+    worker_request_ttl_seconds: int = 86400
+    worker_result_ttl_seconds: int = 86400
+    run_state_ttl_seconds: int = 604800
+    session_ownership_ttl_seconds: int = 3600
+    run_lease_ttl_seconds: int = 600
+    audit_log_ttl_seconds: int = 604800
     browser_worker_count: int = 1
     browser_worker_heartbeat_interval_seconds: float = 15.0
     browser_worker_queue_prefix: str = "synapse:browser:worker"

@@ -643,6 +643,13 @@ class RedisRuntimeStateStore(RuntimeStateStore):
         self._redis_url = redis_url
         self._max_events = max_events
         self._redis: Redis | None = None
+        self._runtime_events_ttl_seconds = max(0, int(settings.runtime_events_ttl_seconds))
+        self._worker_request_ttl_seconds = max(0, int(settings.worker_request_ttl_seconds))
+        self._worker_result_ttl_seconds = max(0, int(settings.worker_result_ttl_seconds))
+        self._run_state_ttl_seconds = max(0, int(settings.run_state_ttl_seconds))
+        self._session_ownership_ttl_seconds = max(0, int(settings.session_ownership_ttl_seconds))
+        self._run_lease_ttl_seconds = max(0, int(settings.run_lease_ttl_seconds))
+        self._audit_log_ttl_seconds = max(0, int(settings.audit_log_ttl_seconds))
 
     async def start(self) -> None:
         if Redis is None:
@@ -656,6 +663,54 @@ class RedisRuntimeStateStore(RuntimeStateStore):
         if self._redis is not None:
             await self._redis.aclose()
             self._redis = None
+
+    async def _set_json(self, key: str, payload: dict[str, Any], *, ttl_seconds: int = 0) -> None:
+        redis = self._require_redis()
+        encoded = json.dumps(payload)
+        if ttl_seconds > 0:
+            await redis.set(key, encoded, ex=ttl_seconds)
+            return
+        await redis.set(key, encoded)
+
+    async def _expire_key(self, key: str, ttl_seconds: int) -> None:
+        if ttl_seconds <= 0:
+            return
+        redis = self._require_redis()
+        await redis.expire(key, ttl_seconds)
+
+    async def _add_set_member(self, key: str, member: str, *, ttl_seconds: int = 0) -> None:
+        redis = self._require_redis()
+        await redis.sadd(key, member)
+        await self._expire_key(key, ttl_seconds)
+
+    async def _push_list_member(self, key: str, member: str, *, limit: int | None = None, ttl_seconds: int = 0) -> None:
+        redis = self._require_redis()
+        await redis.lpush(key, member)
+        if limit is not None:
+            await redis.ltrim(key, 0, max(0, limit - 1))
+        await self._expire_key(key, ttl_seconds)
+
+    async def _load_json_members_from_set(self, index_key: str, members: set[str], key_builder) -> list[dict[str, Any]]:
+        redis = self._require_redis()
+        rows: list[dict[str, Any]] = []
+        for member in members:
+            decoded = self._decode(await redis.get(key_builder(member)))
+            if decoded is None:
+                await redis.srem(index_key, member)
+                continue
+            rows.append(decoded)
+        return rows
+
+    async def _load_json_members_from_list(self, index_key: str, members: list[str], key_builder) -> list[dict[str, Any]]:
+        redis = self._require_redis()
+        rows: list[dict[str, Any]] = []
+        for member in members:
+            decoded = self._decode(await redis.get(key_builder(member)))
+            if decoded is None:
+                await redis.lrem(index_key, 0, member)
+                continue
+            rows.append(decoded)
+        return rows
 
     async def register_agent(self, agent: dict[str, Any]) -> None:
         redis = self._require_redis()
@@ -796,12 +851,20 @@ class RedisRuntimeStateStore(RuntimeStateStore):
 
     async def store_run(self, run_id: str, run_data: dict[str, Any]) -> None:
         redis = self._require_redis()
-        await redis.set(self._run_key(run_id), json.dumps(run_data))
-        await redis.sadd("synapse:runs:index", run_id)
+        await self._set_json(self._run_key(run_id), run_data, ttl_seconds=self._run_state_ttl_seconds)
+        await self._add_set_member("synapse:runs:index", run_id, ttl_seconds=self._run_state_ttl_seconds)
         if isinstance(run_data.get("agent_id"), str):
-            await redis.sadd(f"synapse:runs:agent:{run_data['agent_id']}", run_id)
+            await self._add_set_member(
+                f"synapse:runs:agent:{run_data['agent_id']}",
+                run_id,
+                ttl_seconds=self._run_state_ttl_seconds,
+            )
         if isinstance(run_data.get("task_id"), str):
-            await redis.sadd(f"synapse:runs:task:{run_data['task_id']}", run_id)
+            await self._add_set_member(
+                f"synapse:runs:task:{run_data['task_id']}",
+                run_id,
+                ttl_seconds=self._run_state_ttl_seconds,
+            )
 
     async def get_run(self, run_id: str) -> dict[str, Any] | None:
         redis = self._require_redis()
@@ -816,12 +879,14 @@ class RedisRuntimeStateStore(RuntimeStateStore):
         redis = self._require_redis()
         if agent_id is not None:
             ids = await redis.smembers(f"synapse:runs:agent:{agent_id}")
+            index_key = f"synapse:runs:agent:{agent_id}"
         elif task_id is not None:
             ids = await redis.smembers(f"synapse:runs:task:{task_id}")
+            index_key = f"synapse:runs:task:{task_id}"
         else:
             ids = await redis.smembers("synapse:runs:index")
-        keys = [self._run_key(run_id) for run_id in ids]
-        records = await self._mget_json(keys)
+            index_key = "synapse:runs:index"
+        records = await self._load_json_members_from_set(index_key, ids, self._run_key)
         if task_id is not None:
             records = [record for record in records if record.get("task_id") == task_id]
         return records
@@ -835,13 +900,17 @@ class RedisRuntimeStateStore(RuntimeStateStore):
             current_value = int(current_counter) if current_counter is not None else 0
             if token > current_value:
                 await redis.set("synapse:run-leases:token", token)
-        await redis.set(self._run_lease_key(run_id), json.dumps(lease_data))
-        await redis.sadd("synapse:run-leases:index", run_id)
+        await self._set_json(self._run_lease_key(run_id), lease_data, ttl_seconds=self._run_lease_ttl_seconds)
+        await self._add_set_member("synapse:run-leases:index", run_id, ttl_seconds=self._run_lease_ttl_seconds)
         if previous is not None and isinstance(previous.get("worker_id"), str):
             await redis.srem(f"synapse:run-leases:worker:{previous['worker_id']}", run_id)
         worker_id = lease_data.get("worker_id")
         if isinstance(worker_id, str) and worker_id:
-            await redis.sadd(f"synapse:run-leases:worker:{worker_id}", run_id)
+            await self._add_set_member(
+                f"synapse:run-leases:worker:{worker_id}",
+                run_id,
+                ttl_seconds=self._run_lease_ttl_seconds,
+            )
 
     async def get_run_lease(self, run_id: str) -> dict[str, Any] | None:
         redis = self._require_redis()
@@ -852,10 +921,11 @@ class RedisRuntimeStateStore(RuntimeStateStore):
         redis = self._require_redis()
         if worker_id is None:
             ids = await redis.smembers("synapse:run-leases:index")
+            index_key = "synapse:run-leases:index"
         else:
             ids = await redis.smembers(f"synapse:run-leases:worker:{worker_id}")
-        keys = [self._run_lease_key(run_id) for run_id in ids]
-        rows = await self._mget_json(keys)
+            index_key = f"synapse:run-leases:worker:{worker_id}"
+        rows = await self._load_json_members_from_set(index_key, ids, self._run_lease_key)
         if worker_id is not None:
             rows = [row for row in rows if row.get("worker_id") == worker_id]
         return rows
@@ -897,10 +967,15 @@ class RedisRuntimeStateStore(RuntimeStateStore):
             json.dumps(payload),
         )
         resolved = self._decode(result) or payload
+        await self._expire_key(self._run_lease_key(run_id), self._run_lease_ttl_seconds)
         worker_id = resolved.get("worker_id")
         if isinstance(worker_id, str) and worker_id:
-            await redis.sadd("synapse:run-leases:index", run_id)
-            await redis.sadd(f"synapse:run-leases:worker:{worker_id}", run_id)
+            await self._add_set_member("synapse:run-leases:index", run_id, ttl_seconds=self._run_lease_ttl_seconds)
+            await self._add_set_member(
+                f"synapse:run-leases:worker:{worker_id}",
+                run_id,
+                ttl_seconds=self._run_lease_ttl_seconds,
+            )
         return resolved
 
     async def renew_run_lease(self, run_id: str, worker_id: str, token: int, lease_data: dict[str, Any]) -> dict[str, Any]:
@@ -937,8 +1012,13 @@ class RedisRuntimeStateStore(RuntimeStateStore):
         if decoded.get("error") == "stale":
             raise PermissionError("Stale fencing token for run lease renewal.")
         resolved = decoded
-        await redis.sadd("synapse:run-leases:index", run_id)
-        await redis.sadd(f"synapse:run-leases:worker:{worker_id}", run_id)
+        await self._expire_key(self._run_lease_key(run_id), self._run_lease_ttl_seconds)
+        await self._add_set_member("synapse:run-leases:index", run_id, ttl_seconds=self._run_lease_ttl_seconds)
+        await self._add_set_member(
+            f"synapse:run-leases:worker:{worker_id}",
+            run_id,
+            ttl_seconds=self._run_lease_ttl_seconds,
+        )
         return resolved
 
     async def store_worker(self, worker_id: str, worker_data: dict[str, Any]) -> None:
@@ -959,8 +1039,16 @@ class RedisRuntimeStateStore(RuntimeStateStore):
     async def store_session_ownership(self, session_id: str, ownership_data: dict[str, Any]) -> None:
         redis = self._require_redis()
         previous = await self.get_session_ownership(session_id)
-        await redis.set(self._session_ownership_key(session_id), json.dumps(ownership_data))
-        await redis.sadd("synapse:session-ownership:index", session_id)
+        await self._set_json(
+            self._session_ownership_key(session_id),
+            ownership_data,
+            ttl_seconds=self._session_ownership_ttl_seconds,
+        )
+        await self._add_set_member(
+            "synapse:session-ownership:index",
+            session_id,
+            ttl_seconds=self._session_ownership_ttl_seconds,
+        )
         if previous is not None:
             if isinstance(previous.get("worker_id"), str):
                 await redis.srem(f"synapse:session-ownership:worker:{previous['worker_id']}", session_id)
@@ -969,9 +1057,17 @@ class RedisRuntimeStateStore(RuntimeStateStore):
         worker_id = ownership_data.get("worker_id")
         controller_id = ownership_data.get("controller_id")
         if isinstance(worker_id, str) and worker_id:
-            await redis.sadd(f"synapse:session-ownership:worker:{worker_id}", session_id)
+            await self._add_set_member(
+                f"synapse:session-ownership:worker:{worker_id}",
+                session_id,
+                ttl_seconds=self._session_ownership_ttl_seconds,
+            )
         if isinstance(controller_id, str) and controller_id:
-            await redis.sadd(f"synapse:session-ownership:controller:{controller_id}", session_id)
+            await self._add_set_member(
+                f"synapse:session-ownership:controller:{controller_id}",
+                session_id,
+                ttl_seconds=self._session_ownership_ttl_seconds,
+            )
 
     async def get_session_ownership(self, session_id: str) -> dict[str, Any] | None:
         redis = self._require_redis()
@@ -986,11 +1082,14 @@ class RedisRuntimeStateStore(RuntimeStateStore):
         redis = self._require_redis()
         if worker_id is not None:
             ids = await redis.smembers(f"synapse:session-ownership:worker:{worker_id}")
+            index_key = f"synapse:session-ownership:worker:{worker_id}"
         elif controller_id is not None:
             ids = await redis.smembers(f"synapse:session-ownership:controller:{controller_id}")
+            index_key = f"synapse:session-ownership:controller:{controller_id}"
         else:
             ids = await redis.smembers("synapse:session-ownership:index")
-        rows = await self._mget_json([self._session_ownership_key(session_id) for session_id in ids])
+            index_key = "synapse:session-ownership:index"
+        rows = await self._load_json_members_from_set(index_key, ids, self._session_ownership_key)
         if worker_id is not None:
             rows = [row for row in rows if row.get("worker_id") == worker_id]
         if controller_id is not None:
@@ -1010,18 +1109,35 @@ class RedisRuntimeStateStore(RuntimeStateStore):
 
     async def store_worker_request(self, run_id: str | None, action_id: str, request_data: dict[str, Any]) -> None:
         redis = self._require_redis()
-        await redis.set(self._worker_request_key(run_id, action_id), json.dumps(request_data))
-        await redis.sadd(self._worker_request_index_key(run_id), action_id)
+        await self._set_json(
+            self._worker_request_key(run_id, action_id),
+            request_data,
+            ttl_seconds=self._worker_request_ttl_seconds,
+        )
+        await self._add_set_member(
+            self._worker_request_index_key(run_id),
+            action_id,
+            ttl_seconds=self._worker_request_ttl_seconds,
+        )
         worker_id = request_data.get("worker_id")
         session_id = request_data.get("session_id")
         if isinstance(worker_id, str) and worker_id:
-            await redis.sadd(f"synapse:worker-requests:worker:{worker_id}", self._worker_request_storage_key(run_id, action_id))
+            await self._add_set_member(
+                f"synapse:worker-requests:worker:{worker_id}",
+                self._worker_request_storage_key(run_id, action_id),
+                ttl_seconds=self._worker_request_ttl_seconds,
+            )
         if isinstance(session_id, str) and session_id:
-            await redis.sadd(f"synapse:worker-requests:session:{session_id}", self._worker_request_storage_key(run_id, action_id))
+            await self._add_set_member(
+                f"synapse:worker-requests:session:{session_id}",
+                self._worker_request_storage_key(run_id, action_id),
+                ttl_seconds=self._worker_request_ttl_seconds,
+            )
         if isinstance(request_data.get("status"), str):
-            await redis.sadd(
+            await self._add_set_member(
                 f"synapse:worker-requests:status:{request_data['status']}",
                 self._worker_request_storage_key(run_id, action_id),
+                ttl_seconds=self._worker_request_ttl_seconds,
             )
 
     async def get_worker_request(self, run_id: str | None, action_id: str) -> dict[str, Any] | None:
@@ -1040,16 +1156,29 @@ class RedisRuntimeStateStore(RuntimeStateStore):
         redis = self._require_redis()
         if worker_id is not None:
             storage_keys = await redis.smembers(f"synapse:worker-requests:worker:{worker_id}")
+            index_key = f"synapse:worker-requests:worker:{worker_id}"
         elif session_id is not None:
             storage_keys = await redis.smembers(f"synapse:worker-requests:session:{session_id}")
+            index_key = f"synapse:worker-requests:session:{session_id}"
         elif status is not None:
             storage_keys = await redis.smembers(f"synapse:worker-requests:status:{status}")
+            index_key = f"synapse:worker-requests:status:{status}"
         elif run_id is not None:
-            storage_keys = [self._worker_request_storage_key(run_id, action_id) for action_id in await redis.smembers(self._worker_request_index_key(run_id))]
+            index_key = self._worker_request_index_key(run_id)
+            storage_keys = [self._worker_request_storage_key(run_id, action_id) for action_id in await redis.smembers(index_key)]
         else:
             keys = await redis.keys("synapse:worker-requests:*:*")
             storage_keys = [item for item in (self._storage_key_from_worker_request_key(key) for key in keys) if item]
-        rows = await self._mget_json([self._worker_request_key_from_storage_key(item) for item in storage_keys])
+            index_key = ""
+        rows: list[dict[str, Any]] = []
+        for storage_key in storage_keys:
+            decoded = self._decode(await redis.get(self._worker_request_key_from_storage_key(storage_key)))
+            if decoded is None:
+                if index_key:
+                    stale_member = storage_key.rsplit(":", 1)[-1] if index_key.startswith("synapse:worker-requests:index:") else storage_key
+                    await redis.srem(index_key, stale_member)
+                continue
+            rows.append(decoded)
         if run_id is not None:
             rows = [row for row in rows if row.get("run_id") == run_id]
         if worker_id is not None:
@@ -1063,14 +1192,30 @@ class RedisRuntimeStateStore(RuntimeStateStore):
 
     async def store_worker_result(self, run_id: str | None, action_id: str, result_data: dict[str, Any]) -> None:
         redis = self._require_redis()
-        await redis.set(self._worker_result_key(run_id, action_id), json.dumps(result_data))
-        await redis.sadd(self._worker_result_index_key(run_id), action_id)
+        await self._set_json(
+            self._worker_result_key(run_id, action_id),
+            result_data,
+            ttl_seconds=self._worker_result_ttl_seconds,
+        )
+        await self._add_set_member(
+            self._worker_result_index_key(run_id),
+            action_id,
+            ttl_seconds=self._worker_result_ttl_seconds,
+        )
         worker_id = result_data.get("worker_id")
         session_id = result_data.get("session_id")
         if isinstance(worker_id, str) and worker_id:
-            await redis.sadd(f"synapse:worker-results:worker:{worker_id}", self._worker_result_storage_key(run_id, action_id))
+            await self._add_set_member(
+                f"synapse:worker-results:worker:{worker_id}",
+                self._worker_result_storage_key(run_id, action_id),
+                ttl_seconds=self._worker_result_ttl_seconds,
+            )
         if isinstance(session_id, str) and session_id:
-            await redis.sadd(f"synapse:worker-results:session:{session_id}", self._worker_result_storage_key(run_id, action_id))
+            await self._add_set_member(
+                f"synapse:worker-results:session:{session_id}",
+                self._worker_result_storage_key(run_id, action_id),
+                ttl_seconds=self._worker_result_ttl_seconds,
+            )
 
     async def get_worker_result(self, run_id: str | None, action_id: str) -> dict[str, Any] | None:
         redis = self._require_redis()
@@ -1087,14 +1232,26 @@ class RedisRuntimeStateStore(RuntimeStateStore):
         redis = self._require_redis()
         if worker_id is not None:
             storage_keys = await redis.smembers(f"synapse:worker-results:worker:{worker_id}")
+            index_key = f"synapse:worker-results:worker:{worker_id}"
         elif session_id is not None:
             storage_keys = await redis.smembers(f"synapse:worker-results:session:{session_id}")
+            index_key = f"synapse:worker-results:session:{session_id}"
         elif run_id is not None:
-            storage_keys = [self._worker_result_storage_key(run_id, action_id) for action_id in await redis.smembers(self._worker_result_index_key(run_id))]
+            index_key = self._worker_result_index_key(run_id)
+            storage_keys = [self._worker_result_storage_key(run_id, action_id) for action_id in await redis.smembers(index_key)]
         else:
             keys = await redis.keys("synapse:worker-results:*:*")
             storage_keys = [item for item in (self._storage_key_from_worker_result_key(key) for key in keys) if item]
-        rows = await self._mget_json([self._worker_result_key_from_storage_key(item) for item in storage_keys])
+            index_key = ""
+        rows: list[dict[str, Any]] = []
+        for storage_key in storage_keys:
+            decoded = self._decode(await redis.get(self._worker_result_key_from_storage_key(storage_key)))
+            if decoded is None:
+                if index_key:
+                    stale_member = storage_key.rsplit(":", 1)[-1] if index_key.startswith("synapse:worker-results:index:") else storage_key
+                    await redis.srem(index_key, stale_member)
+                continue
+            rows.append(decoded)
         if run_id is not None:
             rows = [row for row in rows if row.get("run_id") == run_id]
         if worker_id is not None:
@@ -1154,21 +1311,37 @@ class RedisRuntimeStateStore(RuntimeStateStore):
 
     async def store_runtime_event(self, event_id: str, event_data: dict[str, Any]) -> None:
         redis = self._require_redis()
-        await redis.set(self._event_key(event_id), json.dumps(event_data))
-        await redis.lpush("synapse:events:index", event_id)
-        await redis.ltrim("synapse:events:index", 0, self._max_events - 1)
+        await self._set_json(self._event_key(event_id), event_data, ttl_seconds=self._runtime_events_ttl_seconds)
+        await self._push_list_member(
+            "synapse:events:index",
+            event_id,
+            limit=self._max_events,
+            ttl_seconds=self._runtime_events_ttl_seconds,
+        )
         run_id = event_data.get("run_id")
         if isinstance(run_id, str) and run_id:
-            await redis.lpush(f"synapse:events:run:{run_id}", event_id)
-            await redis.ltrim(f"synapse:events:run:{run_id}", 0, self._max_events - 1)
+            await self._push_list_member(
+                f"synapse:events:run:{run_id}",
+                event_id,
+                limit=self._max_events,
+                ttl_seconds=self._runtime_events_ttl_seconds,
+            )
         agent_id = event_data.get("agent_id")
         if isinstance(agent_id, str) and agent_id:
-            await redis.lpush(f"synapse:events:agent:{agent_id}", event_id)
-            await redis.ltrim(f"synapse:events:agent:{agent_id}", 0, self._max_events - 1)
+            await self._push_list_member(
+                f"synapse:events:agent:{agent_id}",
+                event_id,
+                limit=self._max_events,
+                ttl_seconds=self._runtime_events_ttl_seconds,
+            )
         task_id = event_data.get("task_id")
         if isinstance(task_id, str) and task_id:
-            await redis.lpush(f"synapse:events:task:{task_id}", event_id)
-            await redis.ltrim(f"synapse:events:task:{task_id}", 0, self._max_events - 1)
+            await self._push_list_member(
+                f"synapse:events:task:{task_id}",
+                event_id,
+                limit=self._max_events,
+                ttl_seconds=self._runtime_events_ttl_seconds,
+            )
 
     async def get_runtime_events(
         self,
@@ -1179,15 +1352,18 @@ class RedisRuntimeStateStore(RuntimeStateStore):
     ) -> list[dict[str, Any]]:
         redis = self._require_redis()
         if run_id is not None:
-            ids = await redis.lrange(f"synapse:events:run:{run_id}", 0, max(0, limit - 1))
+            index_key = f"synapse:events:run:{run_id}"
+            ids = await redis.lrange(index_key, 0, max(0, limit - 1))
         elif agent_id is not None:
-            ids = await redis.lrange(f"synapse:events:agent:{agent_id}", 0, max(0, limit - 1))
+            index_key = f"synapse:events:agent:{agent_id}"
+            ids = await redis.lrange(index_key, 0, max(0, limit - 1))
         elif task_id is not None:
-            ids = await redis.lrange(f"synapse:events:task:{task_id}", 0, max(0, limit - 1))
+            index_key = f"synapse:events:task:{task_id}"
+            ids = await redis.lrange(index_key, 0, max(0, limit - 1))
         else:
-            ids = await redis.lrange("synapse:events:index", 0, max(0, limit - 1))
-        keys = [self._event_key(event_id) for event_id in ids]
-        return await self._mget_json(keys)
+            index_key = "synapse:events:index"
+            ids = await redis.lrange(index_key, 0, max(0, limit - 1))
+        return await self._load_json_members_from_list(index_key, ids, self._event_key)
 
     async def store_organization(self, organization_id: str, organization_data: dict[str, Any]) -> None:
         redis = self._require_redis()
@@ -1241,21 +1417,31 @@ class RedisRuntimeStateStore(RuntimeStateStore):
 
     async def store_audit_log(self, audit_log_id: str, audit_log_data: dict[str, Any]) -> None:
         redis = self._require_redis()
-        await redis.set(self._audit_log_key(audit_log_id), json.dumps(audit_log_data))
-        await redis.lpush("synapse:audit-logs:index", audit_log_id)
-        await redis.ltrim("synapse:audit-logs:index", 0, self._max_events - 1)
+        await self._set_json(self._audit_log_key(audit_log_id), audit_log_data, ttl_seconds=self._audit_log_ttl_seconds)
+        await self._push_list_member(
+            "synapse:audit-logs:index",
+            audit_log_id,
+            limit=self._max_events,
+            ttl_seconds=self._audit_log_ttl_seconds,
+        )
         project_id = audit_log_data.get("project_id")
         if isinstance(project_id, str) and project_id:
-            await redis.lpush(f"synapse:audit-logs:project:{project_id}", audit_log_id)
-            await redis.ltrim(f"synapse:audit-logs:project:{project_id}", 0, self._max_events - 1)
+            await self._push_list_member(
+                f"synapse:audit-logs:project:{project_id}",
+                audit_log_id,
+                limit=self._max_events,
+                ttl_seconds=self._audit_log_ttl_seconds,
+            )
 
     async def list_audit_logs(self, project_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         redis = self._require_redis()
         if project_id is not None:
-            ids = await redis.lrange(f"synapse:audit-logs:project:{project_id}", 0, max(0, limit - 1))
+            index_key = f"synapse:audit-logs:project:{project_id}"
+            ids = await redis.lrange(index_key, 0, max(0, limit - 1))
         else:
-            ids = await redis.lrange("synapse:audit-logs:index", 0, max(0, limit - 1))
-        return await self._mget_json([self._audit_log_key(item_id) for item_id in ids])
+            index_key = "synapse:audit-logs:index"
+            ids = await redis.lrange(index_key, 0, max(0, limit - 1))
+        return await self._load_json_members_from_list(index_key, ids, self._audit_log_key)
 
     def _require_redis(self) -> Redis:
         if self._redis is None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from synapse.models.browser import (
@@ -26,6 +27,19 @@ from synapse.runtime.browser.page_graph_builder import PageGraphBuilder
 class SPMExtractor:
     def __init__(self) -> None:
         self.page_graph_builder = PageGraphBuilder()
+
+    @staticmethod
+    def _is_bounding_box_timeout(error: Exception) -> bool:
+        message = str(error).lower()
+        return "bounding_box" in message and "timeout" in message
+
+    async def _safe_bounding_box(self, locator: Any) -> dict[str, float] | None:
+        try:
+            return await locator.bounding_box()
+        except Exception as exc:
+            if isinstance(exc, TimeoutError | asyncio.TimeoutError) or self._is_bounding_box_timeout(exc):
+                return None
+            raise
 
     async def snapshot_page(self, page: Any) -> StructuredPageModel:
         snapshot = await page.evaluate(
@@ -383,7 +397,7 @@ class SPMExtractor:
 
     async def inspect(self, page: Any, selector: str) -> PageInspection:
         locator = page.locator(selector).first
-        box = await locator.bounding_box()
+        box = await self._safe_bounding_box(locator)
         attributes = await locator.evaluate(
             """
             (element) => Object.fromEntries(

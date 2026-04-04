@@ -13,9 +13,15 @@ from synapse.runtime.state_store import InMemoryRuntimeStateStore
 
 
 class _FakeLocator:
-    def __init__(self, visible: bool = False, click_failures: int = 0) -> None:
+    def __init__(
+        self,
+        visible: bool = False,
+        click_failures: int = 0,
+        bounding_box_error: Exception | None = None,
+    ) -> None:
         self._visible = visible
         self._click_failures = click_failures
+        self._bounding_box_error = bounding_box_error
         self.clicked = 0
         self.uploaded: list[str] = []
 
@@ -48,6 +54,8 @@ class _FakeLocator:
         return None
 
     async def bounding_box(self):
+        if self._bounding_box_error is not None:
+            raise self._bounding_box_error
         return None
 
     async def evaluate(self, script: str):
@@ -145,6 +153,23 @@ def test_spm_extractor_find_element() -> None:
     ))
     matches = extractor.find_element(page, "sections", "paper")
     assert matches[0].selector_hint == "section.paper"
+
+
+def test_spm_extractor_inspect_tolerates_bounding_box_timeout() -> None:
+    async def scenario() -> None:
+        extractor = SPMExtractor()
+        page = _FakePage()
+        page.set_locator(".target", _FakeLocator(visible=True, bounding_box_error=TimeoutError("Locator.bounding_box: Timeout 5000ms exceeded")))
+
+        inspection = await extractor.inspect(page, ".target")
+
+        assert inspection.selector == ".target"
+        assert inspection.text == "hello"
+        assert inspection.html_tag == "button"
+        assert inspection.is_visible is True
+        assert inspection.bounding_box is None
+
+    asyncio.run(scenario())
 
 
 def test_spm_extractor_builds_compact_spm() -> None:

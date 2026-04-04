@@ -598,3 +598,30 @@ def test_assess_project_alpha_gate_counts_operator_required_as_manual_interventi
     assert assessment["recommendation"] == "hold"
     assert assessment["manual_interventions"] == 4
     assert "operator review required for degraded browser requests" in assessment["reasons"]
+
+
+def test_compute_project_metrics_uses_operator_review_fallbacks() -> None:
+    run = common.RunState(
+        run_id='run-operator',
+        task_id='task-operator',
+        agent_id='synthetic-alpha-browser-runner-1',
+        project_id='project-1',
+        status='waiting_for_operator',
+        started_at=datetime(2026, 3, 28, 0, 0, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 3, 28, 0, 2, tzinfo=timezone.utc),
+        current_phase='session bootstrap stalled',
+        metadata={},
+    )
+    intervention = common.OperatorInterventionRecord(
+        run_id='run-operator',
+        agent_id='synthetic-alpha-browser-runner-1',
+        reason='Browser human intervention required',
+        payload={'ui': {'operator_required': True}},
+    )
+
+    metrics = common.compute_project_metrics('steady', [run], [intervention], [], [])
+
+    assert metrics['waiting_for_operator_runs'] == 1
+    assert metrics['pending_operator_review_interventions'] == 1
+    assert metrics['request_health_summary']['operator_required'] == 1
+    assert metrics['request_health_summary']['unresolved'] == 1

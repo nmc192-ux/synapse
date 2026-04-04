@@ -913,6 +913,7 @@ class BrowserWorkerPool:
             return
         ownership_conflict_count = self._ownership_conflict_count(request)
         bootstrap_degraded = bool(request.payload.get("bootstrap_degraded")) if isinstance(request.payload, dict) else False
+        progress_heartbeats = self._progress_heartbeat_count(request)
         if request.status == "recovered":
             await self._mark_request_operator_required(
                 request,
@@ -937,7 +938,9 @@ class BrowserWorkerPool:
                 reason="repeated session ownership conflicts require operator intervention",
             )
             return
-        if request.action == "create_session" and (request.status == "slow" or bootstrap_degraded):
+        if request.action == "create_session" and (
+            request.status == "slow" or bootstrap_degraded or progress_heartbeats > 0
+        ):
             await self._mark_request_operator_required(
                 request,
                 reason="session bootstrap stalled after degraded progress and requires operator intervention",

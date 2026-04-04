@@ -102,6 +102,8 @@ def build_daily_report(projects: list[dict[str, object]], summary: dict[str, obj
         f"- Scheduler recovery events: {summary['scheduler_recovery_events']}",
         f"- Plugin denials: {summary['plugin_denials']}",
         f"- Average run latency (s): {summary['average_run_latency_seconds']}",
+        f"- Runs waiting for operator: {summary.get('waiting_for_operator_runs', 0)}",
+        f"- Pending operator-review interventions: {summary.get('pending_operator_review_interventions', 0)}",
         "",
         "## Durable Request Health",
         f"- Slow requests observed: {summary['request_health_summary']['slow']}",
@@ -152,6 +154,8 @@ def build_daily_report(projects: list[dict[str, object]], summary: dict[str, obj
                 f"- Scheduler recovery events: {project['scheduler_recovery_events']}",
                 f"- Plugin denials: {project['plugin_denials']}",
                 f"- Average run latency (s): {project['average_run_latency_seconds']}",
+                f"- Runs waiting for operator: {project.get('waiting_for_operator_runs', 0)}",
+                f"- Pending operator-review interventions: {project.get('pending_operator_review_interventions', 0)}",
                 f"- Failure rate: {project['per_project_failure_rate']:.2%}",
                 f"- Request health slow/stuck/recovered/abandoned/operator-required/completed-after-slow/unresolved: {project['request_health_summary']['slow']}/{project['request_health_summary']['stuck']}/{project['request_health_summary']['recovered']}/{project['request_health_summary']['abandoned']}/{project['request_health_summary']['operator_required']}/{project['request_health_summary']['completed_after_slow']}/{project['request_health_summary']['unresolved']}",
                 f"- Alpha gate blockers: {', '.join(project_gate.get('release_blockers', [])) or 'none'}",
@@ -180,6 +184,8 @@ def build_weekly_review(projects: list[dict[str, object]], summary: dict[str, ob
         f"- Mean run latency (s): {summary['average_run_latency_seconds']}",
         f"- Unresolved degradation signals: {alpha_gate['unresolved_degradation']}",
         f"- Active unresolved request-health signals: {summary['request_health_summary']['unresolved']}",
+        f"- Runs waiting for operator: {summary.get('waiting_for_operator_runs', 0)}",
+        f"- Pending operator-review interventions: {summary.get('pending_operator_review_interventions', 0)}",
         "",
         "## Key Risks",
         f"- Browser issues: {summary['failure_classification'].get('browser issue', 0)}",
@@ -235,7 +241,7 @@ def build_dashboard_html(daily_summary: dict[str, object], weekly_summary: dict[
         f"<h1>Synthetic Alpha Review</h1><p>Generated {utc_now().isoformat()}</p>"
         "<div class='grid'>"
         f"<section class='card'><h2>Alpha Gate</h2><p>Recommendation: {daily_gate['recommendation']}</p><p>Safe degraded: {daily_gate['safe_degraded_recoveries']}</p><p>Unresolved: {daily_gate['unresolved_degradation']}</p><p>Unsafe: {daily_gate['unsafe_failures']}</p><p>Manual: {daily_gate['manual_interventions']}</p><ul>{gate_reasons}</ul></section>"
-        f"<section class='card'><h2>Daily Summary</h2><p>Runs started: {daily_summary['runs_started']}</p><p>Runs failed: {daily_summary['runs_failed']}</p><p>A2A failures: {daily_summary['a2a_messages_failed']}</p><p>Avg latency: {daily_summary['average_run_latency_seconds']}s</p></section>"
+        f"<section class='card'><h2>Daily Summary</h2><p>Runs started: {daily_summary['runs_started']}</p><p>Runs failed: {daily_summary['runs_failed']}</p><p>A2A failures: {daily_summary['a2a_messages_failed']}</p><p>Avg latency: {daily_summary['average_run_latency_seconds']}s</p><p>Waiting for operator: {daily_summary.get('waiting_for_operator_runs', 0)}</p><p>Pending operator review: {daily_summary.get('pending_operator_review_interventions', 0)}</p></section>"
         f"<section class='card'><h2>Weekly Summary</h2><p>Runs started: {weekly_summary['runs_started']}</p><p>Runs failed: {weekly_summary['runs_failed']}</p><p>Interventions: {weekly_summary['intervention_count']}</p><p>Plugin denials: {weekly_summary['plugin_denials']}</p></section>"
         f"<section class='card'><h2>Request Health</h2><p>Slow: {daily_summary['request_health_summary']['slow']}</p><p>Stuck: {daily_summary['request_health_summary']['stuck']}</p><p>Recovered: {daily_summary['request_health_summary']['recovered']}</p><p>Abandoned: {daily_summary['request_health_summary']['abandoned']}</p><p>Operator-required: {daily_summary['request_health_summary']['operator_required']}</p><p>Completed after slow: {daily_summary['request_health_summary']['completed_after_slow']}</p><p>Unresolved: {daily_summary['request_health_summary']['unresolved']}</p></section>"
         f"<section class='card'><h2>Top Failure Categories</h2><ul>{top_failures}</ul></section>"

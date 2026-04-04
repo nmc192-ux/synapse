@@ -1467,6 +1467,20 @@ def compute_project_metrics(
     )
     plugin_denials += sum(1 for event in telemetry_events if str(event.get("event_type")) == "plugin.denial")
     request_health = request_health_summary(telemetry_events)
+    waiting_for_operator_runs = sum(1 for run in runs if run.status.value == "waiting_for_operator")
+    pending_operator_review_interventions = sum(
+        1
+        for item in interventions
+        if item.state.value == "pending"
+        and isinstance(item.payload, dict)
+        and isinstance(item.payload.get("ui"), dict)
+        and bool(item.payload["ui"].get("operator_required"))
+    )
+    operator_review_fallback = max(waiting_for_operator_runs, pending_operator_review_interventions)
+    if operator_review_fallback > request_health["operator_required"]:
+        request_health["operator_required"] = operator_review_fallback
+    if request_health["operator_required"] > request_health["unresolved"]:
+        request_health["unresolved"] = request_health["operator_required"]
     snapshot = {
         "project_alias": project_alias,
         "runs_started": started,
@@ -1483,6 +1497,8 @@ def compute_project_metrics(
         "a2a_messages_failed": a2a_failed,
         "scheduler_recovery_events": scheduler_recoveries,
         "plugin_denials": plugin_denials,
+        "waiting_for_operator_runs": waiting_for_operator_runs,
+        "pending_operator_review_interventions": pending_operator_review_interventions,
         "average_run_latency_seconds": round(sum(latencies) / len(latencies), 2) if latencies else 0.0,
         "per_project_failure_rate": round(failure_rate, 4),
         "request_health_summary": request_health,
@@ -1595,6 +1611,8 @@ def overall_metrics(project_snapshots: list[dict[str, Any]]) -> dict[str, Any]:
         "completed_after_slow": 0,
         "unresolved": 0,
     }
+    waiting_for_operator_runs = 0
+    pending_operator_review_interventions = 0
     alpha_gate_projects: dict[str, dict[str, Any]] = {}
     for snapshot in project_snapshots:
         for key in totals:
@@ -1616,6 +1634,8 @@ def overall_metrics(project_snapshots: list[dict[str, Any]]) -> dict[str, Any]:
             intervention_agents[agent_id] = intervention_agents.get(agent_id, 0) + int(count)
         for key, count in snapshot.get("request_health_summary", {}).items():
             request_health_totals[key] = request_health_totals.get(key, 0) + int(count)
+        waiting_for_operator_runs += int(snapshot.get("waiting_for_operator_runs", 0))
+        pending_operator_review_interventions += int(snapshot.get("pending_operator_review_interventions", 0))
         alpha_gate_projects[str(snapshot.get("project_alias"))] = dict(snapshot.get("alpha_gate", {}))
     for values in agent_outcomes.values():
         started = int(values["runs_started"])
@@ -1631,6 +1651,8 @@ def overall_metrics(project_snapshots: list[dict[str, Any]]) -> dict[str, Any]:
     totals["per_agent_outcomes"] = dict(sorted(agent_outcomes.items()))
     totals["agents_requiring_intervention"] = dict(sorted(intervention_agents.items(), key=lambda item: (-item[1], item[0])))
     totals["request_health_summary"] = request_health_totals
+    totals["waiting_for_operator_runs"] = waiting_for_operator_runs
+    totals["pending_operator_review_interventions"] = pending_operator_review_interventions
     totals["alpha_gate"] = assess_overall_alpha_gate(project_snapshots, alpha_gate_projects)
     return totals
 

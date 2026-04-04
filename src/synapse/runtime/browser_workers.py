@@ -915,7 +915,7 @@ class BrowserWorkerPool:
         if self._run_store is None:
             return
         request = await self._request_record(item_or_request)
-        if request is None or request.status not in {"dispatched", "running", "slow", "recovered"}:
+        if request is None or request.status not in {"dispatched", "running", "slow", "stuck", "recovered"}:
             return
         anchor = request.last_progress_at or request.started_at or request.dispatched_at or request.created_at
         age_seconds = (datetime.now(timezone.utc) - anchor).total_seconds()
@@ -972,6 +972,14 @@ class BrowserWorkerPool:
                 request,
                 reason="session bootstrap started on a worker but did not make durable progress before timeout and requires operator intervention",
                 reason_code="session_bootstrap_started_no_progress",
+                age_seconds=age_seconds,
+            )
+            return
+        if self._should_force_aged_degraded_operator_review(request, age_seconds):
+            await self._mark_request_operator_required(
+                request,
+                reason=self._aged_degraded_reason(request),
+                reason_code="aged_degraded_request",
                 age_seconds=age_seconds,
             )
             return
@@ -1033,6 +1041,28 @@ class BrowserWorkerPool:
             except ValueError:
                 return 0
         return 0
+
+    def _should_force_aged_degraded_operator_review(
+        self,
+        request: BrowserTaskRequestRecord,
+        age_seconds: float,
+    ) -> bool:
+        if request.status not in {"slow", "stuck"}:
+            return False
+        if request.run_id is None:
+            return False
+        return age_seconds >= self._aged_degraded_threshold_seconds()
+
+    def _aged_degraded_threshold_seconds(self) -> float:
+        return max(self._lease_timeout_seconds * 3, 0.15)
+
+    def _aged_degraded_reason(self, request: BrowserTaskRequestRecord) -> str:
+        progress_heartbeats = self._progress_heartbeat_count(request)
+        if request.started_at is not None and progress_heartbeats > 0:
+            return "request remained degraded after repeated progress heartbeats and requires operator intervention"
+        if request.started_at is not None:
+            return "request remained degraded after worker start without durable convergence and requires operator intervention"
+        return "request remained degraded without durable convergence and requires operator intervention"
 
     async def _request_record(
         self,

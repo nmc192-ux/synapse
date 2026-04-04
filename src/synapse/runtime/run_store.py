@@ -437,6 +437,34 @@ class RunStore:
         rows = await self.state_store.list_worker_results(run_id=run_id, worker_id=worker_id, session_id=session_id)
         return [BrowserTaskResultRecord.model_validate(row) for row in rows]
 
+    async def ownership_conflict_summary(self, run_id: str) -> dict[str, int]:
+        requests = await self.list_worker_requests(run_id=run_id)
+        requests_with_conflicts = 0
+        repeated_conflicts = 0
+        max_conflict_count = 0
+        operator_required_requests = 0
+        abandoned_requests = 0
+
+        for request in requests:
+            conflict_count = self._ownership_conflict_count(request)
+            if conflict_count > 0:
+                requests_with_conflicts += 1
+                max_conflict_count = max(max_conflict_count, conflict_count)
+            if conflict_count >= 2:
+                repeated_conflicts += 1
+            if request.status == "operator_required":
+                operator_required_requests += 1
+            if request.status == "abandoned":
+                abandoned_requests += 1
+
+        return {
+            "requests_with_conflicts": requests_with_conflicts,
+            "repeated_conflicts": repeated_conflicts,
+            "max_conflict_count": max_conflict_count,
+            "operator_required_requests": operator_required_requests,
+            "abandoned_requests": abandoned_requests,
+        }
+
     def _build_worker_request_health(
         self,
         request: BrowserTaskRequestRecord,
@@ -512,6 +540,20 @@ class RunStore:
                 return "failed", result.error
             return "steady", reason
         return "steady", reason
+
+    @staticmethod
+    def _ownership_conflict_count(request: BrowserTaskRequestRecord) -> int:
+        raw = request.payload.get("ownership_conflict_count")
+        if isinstance(raw, int):
+            return raw
+        if isinstance(raw, float):
+            return int(raw)
+        if isinstance(raw, str):
+            try:
+                return int(raw)
+            except ValueError:
+                return 0
+        return 0
 
     async def validate_fencing_token(self, run_id: str | None, worker_id: str, token: int | None) -> bool:
         if run_id is None or token is None:

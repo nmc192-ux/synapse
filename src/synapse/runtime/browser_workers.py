@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from synapse.config import settings
+from synapse.models.run import RunStatus
 from synapse.models.runtime_event import EventSeverity, EventType, RuntimeEvent
 from synapse.models.runtime_state import (
     BrowserSessionState,
@@ -1196,11 +1197,13 @@ class BrowserWorkerPool:
                     if next_conflict_count >= 2 and request.status != "recovered"
                     else "request requires operator intervention after ownership conflict during recovery"
                 )
+                operator_request = request.model_copy(update={"payload": updated_payload})
                 await self._mark_request_operator_required(
-                    request.model_copy(update={"payload": updated_payload}),
+                    operator_request,
                     reason=operator_reason,
                     reason_code=reason_code or "ownership_conflict",
                 )
+                await self._maybe_escalate_run_for_ownership_conflicts(operator_request.run_id, reason=operator_reason)
                 continue
             updated = request.model_copy(
                 update={
@@ -1248,6 +1251,50 @@ class BrowserWorkerPool:
         if ownership.worker_id in self._workers and ownership.controller_id == self.controller_id:
             return False, None, None
         return True, "worker_missing", "owning worker is missing from the durable registry"
+
+    async def _maybe_escalate_run_for_ownership_conflicts(self, run_id: str | None, *, reason: str) -> None:
+        if self._run_store is None or run_id is None:
+            return
+        summary = await self._run_store.ownership_conflict_summary(run_id)
+        if summary["operator_required_requests"] == 0 and summary["repeated_conflicts"] < 2:
+            return
+        run = await self._run_store.get(run_id)
+        if run.status == RunStatus.WAITING_FOR_OPERATOR:
+            return
+        await self._run_store.set_operator_intervention(
+            run_id,
+            intervention={
+                "reason": reason,
+                "payload": {
+                    "source": "browser_workers",
+                    "category": "runtime_recovery",
+                    "ownership_conflict_summary": summary,
+                    "ui": {
+                        "operator_required": True,
+                        "action_label": "Review Run",
+                        "reason": reason,
+                        "category": "runtime_recovery",
+                        "run_context": {
+                            "run_id": run.run_id,
+                            "task_id": run.task_id,
+                            "agent_id": run.agent_id,
+                            "goal": run.metadata.get("goal"),
+                        },
+                    },
+                },
+            },
+            status=RunStatus.WAITING_FOR_OPERATOR,
+        )
+        await self._run_store.update_metadata(
+            run_id,
+            {
+                "operator_review_reason": reason,
+                "assigned_worker_id": None,
+                "lease_expires_at": None,
+                "lease_token": None,
+                "ownership_conflict_summary": summary,
+            },
+        )
 
     def _ownership_request_reason(self, reason: str | None) -> str:
         base = "session ownership conflict blocked continued dispatch"

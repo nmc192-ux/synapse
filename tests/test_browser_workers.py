@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from contextlib import suppress
 
 from synapse.models.browser import BrowserState, StructuredPageModel
+from synapse.models.run import RunStatus
 from synapse.models.runtime_event import EventType
 from synapse.models.runtime_state import (
     BrowserSessionOwnershipRecord,
@@ -1261,6 +1262,98 @@ def test_browser_worker_pool_marks_ownership_conflict_during_recovery_operator_r
         assert stored is not None
         assert stored.status == "operator_required"
         assert stored.payload["ownership_conflict_count"] == 1
+
+    asyncio.run(scenario())
+
+
+def test_browser_worker_pool_escalates_run_after_repeated_ownership_conflicts() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        sockets = WebSocketManager(state_store=store)
+        bus = EventBus(sockets)
+        bus.set_context_resolver(lambda event: _event_context())
+        run = await run_store.create_run(task_id="task-run-escalation", agent_id="agent-1", correlation_id="task-run-escalation")
+        await run_store.save_session_ownership(
+            BrowserSessionOwnershipRecord(
+                session_id="s-run-escalation",
+                worker_id="foreign-worker",
+                controller_id="foreign-controller",
+                run_id=run.run_id,
+            )
+        )
+        await run_store.save_worker_request(
+            BrowserTaskRequestRecord(
+                action_id="action-run-escalation-1",
+                request_id="request-run-escalation-1",
+                run_id=run.run_id,
+                worker_id="foreign-worker",
+                action="open",
+                session_id="s-run-escalation",
+                status="running",
+                payload={"session_id": "s-run-escalation", "ownership_conflict_count": 1},
+            )
+        )
+        await run_store.save_worker_request(
+            BrowserTaskRequestRecord(
+                action_id="action-run-escalation-2",
+                request_id="request-run-escalation-2",
+                run_id=run.run_id,
+                worker_id="foreign-worker",
+                action="extract",
+                session_id="s-run-escalation",
+                status="running",
+                payload={"session_id": "s-run-escalation", "ownership_conflict_count": 1},
+            )
+        )
+        await run_store.save_worker(
+            BrowserWorkerState(
+                worker_id="foreign-worker",
+                queue_name="q-foreign",
+                controller_id="foreign-controller",
+                health_status=WorkerHealthStatus.STALE,
+            )
+        )
+        await run_store.save_lease(
+            RunLeaseRecord(
+                run_id=run.run_id,
+                worker_id="foreign-worker",
+                acquired_at=datetime.now(timezone.utc) - timedelta(seconds=2),
+                expires_at=datetime.now(timezone.utc) + timedelta(seconds=30),
+                token=1,
+            )
+        )
+
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id="controller-a",
+        )
+        pool.set_event_publisher(bus.publish)
+        await pool.start()
+        try:
+            try:
+                await pool.open("s-run-escalation", "https://example.com")
+            except KeyError:
+                pass
+            else:
+                raise AssertionError("expected ownership conflict to block dispatch")
+        finally:
+            await pool.stop()
+
+        run = await run_store.get(run.run_id)
+        assert run.status == RunStatus.WAITING_FOR_OPERATOR
+        assert run.metadata["operator_review_reason"] == "repeated session ownership conflicts require operator intervention"
+        conflict_summary = run.metadata["ownership_conflict_summary"]
+        assert conflict_summary["repeated_conflicts"] >= 1
+        assert conflict_summary["requests_with_conflicts"] >= 1
+        assert conflict_summary["max_conflict_count"] >= 2
+        assert conflict_summary["operator_required_requests"] >= 1
+        intervention = await run_store.latest_intervention_for_run(run.run_id)
+        assert intervention is not None
+        assert intervention.reason == "repeated session ownership conflicts require operator intervention"
 
     asyncio.run(scenario())
 

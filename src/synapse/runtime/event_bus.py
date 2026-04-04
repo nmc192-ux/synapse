@@ -17,6 +17,11 @@ from synapse.transports.websocket_manager import WebSocketManager
 logger = logging.getLogger(__name__)
 
 class EventBus:
+    _TENANT_OPTIONAL_EVENT_TYPES = {
+        EventType.BROWSER_WORKER_STATUS_UPDATED,
+        EventType.BROWSER_WORKER_HEARTBEAT,
+    }
+
     def __init__(
         self,
         sockets: WebSocketManager,
@@ -203,6 +208,20 @@ class EventBus:
         normalized = await self._enrich_event(self._normalize_event(event))
         if normalized.organization_id and normalized.project_id:
             return normalized
+        if self._is_tenant_optional_event(normalized):
+            logger.debug(
+                "Skipping tenant-less infrastructure runtime event",
+                extra={
+                    "event_type": normalized.event_type.value,
+                    "event_id": normalized.event_id,
+                    "source": normalized.source,
+                    "run_id": normalized.run_id,
+                    "agent_id": normalized.agent_id,
+                    "task_id": normalized.task_id,
+                    "session_id": normalized.session_id,
+                },
+            )
+            return None
         logger.warning(
             "Blocking external runtime event without tenant context",
             extra={
@@ -218,3 +237,18 @@ class EventBus:
             },
         )
         return None
+
+    def _is_tenant_optional_event(self, event: RuntimeEvent) -> bool:
+        if event.event_type not in self._TENANT_OPTIONAL_EVENT_TYPES:
+            return False
+        return all(
+            value is None
+            for value in (
+                event.organization_id,
+                event.project_id,
+                event.run_id,
+                event.agent_id,
+                event.task_id,
+                event.session_id,
+            )
+        )

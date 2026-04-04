@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
 
 from synapse.models.a2a import AgentRegistrationRequest
@@ -39,6 +40,34 @@ def test_event_bus_blocks_external_events_without_tenant_context() -> None:
                 raise AssertionError("expected tenant-less runtime event to be blocked")
 
         assert await store.get_runtime_events(run_id="run-1") == []
+
+    asyncio.run(scenario())
+
+
+def test_event_bus_skips_tenantless_infrastructure_events_without_warning(caplog) -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        sockets = WebSocketManager(state_store=store)
+        bus = EventBus(sockets)
+
+        with caplog.at_level(logging.WARNING, logger="synapse.runtime.event_bus"):
+            async with sockets.subscribe("infra-events") as queue:
+                await bus.publish(
+                    RuntimeEvent(
+                        event_type=EventType.BROWSER_WORKER_HEARTBEAT,
+                        source="browser_worker",
+                        payload={"worker_id": "worker-1"},
+                    )
+                )
+                try:
+                    await asyncio.wait_for(queue.get(), timeout=0.05)
+                except TimeoutError:
+                    pass
+                else:
+                    raise AssertionError("expected tenant-less infrastructure event to be skipped")
+
+        assert await store.get_runtime_events() == []
+        assert "Blocking external runtime event without tenant context" not in caplog.text
 
     asyncio.run(scenario())
 

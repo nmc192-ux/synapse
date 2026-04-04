@@ -878,12 +878,29 @@ class BrowserWorkerPool:
         age_seconds = (datetime.now(timezone.utc) - anchor).total_seconds()
         if age_seconds < self._lease_timeout_seconds:
             return
+        ownership_conflict_count = self._ownership_conflict_count(request)
         if request.status == "recovered":
             await self._mark_request_operator_required(
                 request,
                 reason="request stalled again after a recovery path and requires operator intervention",
                 reason_code="repeat_stall_after_recovery",
                 age_seconds=age_seconds,
+            )
+            await self._maybe_escalate_run_for_ownership_conflicts(
+                request.run_id,
+                reason="request stalled again after a recovery path and requires operator intervention",
+            )
+            return
+        if ownership_conflict_count >= 2:
+            await self._mark_request_operator_required(
+                request,
+                reason="repeated session ownership conflicts require operator intervention",
+                reason_code="ownership_conflict",
+                age_seconds=age_seconds,
+            )
+            await self._maybe_escalate_run_for_ownership_conflicts(
+                request.run_id,
+                reason="repeated session ownership conflicts require operator intervention",
             )
             return
         alert_key = (request.action_id, EventType.WORKER_REQUEST_STUCK)
@@ -1258,7 +1275,10 @@ class BrowserWorkerPool:
         summary = await self._run_store.ownership_conflict_summary(run_id)
         if summary["operator_required_requests"] == 0 and summary["repeated_conflicts"] < 2:
             return
-        run = await self._run_store.get(run_id)
+        try:
+            run = await self._run_store.get(run_id)
+        except KeyError:
+            return
         if run.status == RunStatus.WAITING_FOR_OPERATOR:
             return
         await self._run_store.set_operator_intervention(

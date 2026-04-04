@@ -1193,6 +1193,71 @@ def test_browser_worker_pool_escalates_recovered_request_to_operator_required() 
     asyncio.run(scenario())
 
 
+def test_browser_worker_pool_escalates_repeated_ownership_conflict_request_before_stuck() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        sockets = WebSocketManager(state_store=store)
+        bus = EventBus(sockets)
+        bus.set_context_resolver(lambda event: _event_context())
+        controller_id = "controller-ownership-timeout"
+        worker_id = f"{controller_id}:browser-worker-1"
+        run = await run_store.create_run(task_id="task-ownership-timeout", agent_id="agent-1", correlation_id="task-ownership-timeout")
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            heartbeat_interval_seconds=0.2,
+            lease_timeout_seconds=0.05,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id=controller_id,
+        )
+        pool.set_event_publisher(bus.publish)
+        await pool.start()
+        try:
+            stale_time = datetime.now(timezone.utc) - timedelta(seconds=1)
+            await run_store.save_worker_request(
+                BrowserTaskRequestRecord(
+                    action_id="action-ownership-timeout",
+                    request_id="request-ownership-timeout",
+                    run_id=run.run_id,
+                    worker_id=worker_id,
+                    action="open",
+                    session_id="s1",
+                    status="running",
+                    status_reason="session ownership conflict blocked continued dispatch",
+                    payload={"session_id": "s1", "url": "https://example.com", "ownership_conflict_count": 2},
+                    dispatched_at=stale_time,
+                    started_at=stale_time,
+                    last_progress_at=stale_time,
+                )
+            )
+            async with sockets.subscribe("ownership-timeout", organization_id="org-1", project_id="project-1") as queue:
+                await pool._maybe_mark_request_stuck(
+                    BrowserTaskEnvelope(
+                        action_id="action-ownership-timeout",
+                        request_id="request-ownership-timeout",
+                        run_id=run.run_id,
+                        session_id="s1",
+                        action="open",
+                    )
+                )
+                event = await asyncio.wait_for(queue.get(), timeout=0.2)
+                assert event.event_type == EventType.BROWSER_HUMAN_INTERVENTION_REQUIRED
+                assert event.payload["reason_code"] == "ownership_conflict"
+        finally:
+            await pool.stop()
+
+        stored = await run_store.get_worker_request(run.run_id, "action-ownership-timeout")
+        assert stored is not None
+        assert stored.status == "operator_required"
+        assert stored.status_reason == "repeated session ownership conflicts require operator intervention"
+        waiting = await run_store.get(run.run_id)
+        assert waiting.status == RunStatus.WAITING_FOR_OPERATOR
+
+    asyncio.run(scenario())
+
+
 def test_browser_worker_pool_marks_ownership_conflict_during_recovery_operator_required() -> None:
     async def scenario() -> None:
         store = InMemoryRuntimeStateStore()

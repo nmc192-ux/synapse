@@ -92,6 +92,8 @@ class RunAttentionSummary(BaseModel):
     reasons: list[str] = Field(default_factory=list)
     degraded_requests: int = 0
     stuck_requests: int = 0
+    abandoned_requests: int = 0
+    operator_required_requests: int = 0
     unresolved_interventions: int = 0
     active_delegations: int = 0
     failed_delegations: int = 0

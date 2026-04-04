@@ -452,6 +452,58 @@ def test_run_attention_summary_prioritizes_stuck_requests_and_interventions() ->
     asyncio.run(scenario())
 
 
+def test_run_attention_summary_prioritizes_operator_required_and_abandoned_requests() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        run = await run_store.create_run(
+            task_id="task-attention-operator",
+            agent_id="agent-1",
+            project_id="development",
+            correlation_id="task-attention-operator",
+        )
+        await run_store.save_worker_request(
+            BrowserTaskRequestRecord(
+                action_id="action-operator-review",
+                request_id="request-operator-review",
+                run_id=run.run_id,
+                worker_id="controller-1:browser-worker-1",
+                action="open",
+                session_id="session-operator-review",
+                task_id="task-attention-operator",
+                agent_id="agent-1",
+                status="operator_required",
+                status_reason="repeated ownership conflicts require operator intervention",
+            )
+        )
+        await run_store.save_worker_request(
+            BrowserTaskRequestRecord(
+                action_id="action-abandoned-attention",
+                request_id="request-abandoned-attention",
+                run_id=run.run_id,
+                worker_id="controller-1:browser-worker-1",
+                action="open",
+                session_id="session-abandoned-attention",
+                task_id="task-attention-operator",
+                agent_id="agent-1",
+                status="abandoned",
+                status_reason="worker lease moved to another worker before completion",
+            )
+        )
+
+        summary = await run_store.get_attention_summary(run.run_id)
+
+        assert summary.priority == "urgent"
+        assert summary.attention_score >= 80
+        assert summary.operator_required_requests == 1
+        assert summary.abandoned_requests == 1
+        assert any("require operator review" in reason for reason in summary.reasons)
+        assert any("abandoned request path" in reason for reason in summary.reasons)
+        assert summary.recommended_action == "review_immediately"
+
+    asyncio.run(scenario())
+
+
 def test_worker_request_health_classifies_abandoned_requests() -> None:
     async def scenario() -> None:
         store = InMemoryRuntimeStateStore()

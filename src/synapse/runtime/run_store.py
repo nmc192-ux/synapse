@@ -665,6 +665,8 @@ class RunStore:
 
         degraded_requests = sum(1 for item in request_health if item.health_state in {"slow", "stuck", "recovered"})
         stuck_requests = sum(1 for item in request_health if item.health_state == "stuck")
+        abandoned_requests = sum(1 for item in request_health if item.health_state == "abandoned")
+        operator_required_requests = sum(1 for item in request_health if item.health_state == "operator_required")
         unresolved_interventions = sum(
             1
             for item in interventions
@@ -681,12 +683,23 @@ class RunStore:
             score += 60
             reasons.append("run waiting for operator")
 
-        if stuck_requests:
+        if operator_required_requests:
+            score += 85
+            reasons.append(
+                f"{operator_required_requests} request{'s' if operator_required_requests != 1 else ''} require operator review"
+            )
+        elif stuck_requests:
             score += 80
             reasons.append(f"{stuck_requests} stuck request{'s' if stuck_requests != 1 else ''}")
         elif degraded_requests:
             score += 30
             reasons.append(f"{degraded_requests} degraded request{'s' if degraded_requests != 1 else ''}")
+
+        if abandoned_requests:
+            score += 20
+            reasons.append(
+                f"{abandoned_requests} abandoned request path{'s' if abandoned_requests != 1 else ''}"
+            )
 
         if unresolved_interventions:
             score += 70
@@ -728,6 +741,8 @@ class RunStore:
             reasons=reasons,
             degraded_requests=degraded_requests,
             stuck_requests=stuck_requests,
+            abandoned_requests=abandoned_requests,
+            operator_required_requests=operator_required_requests,
             unresolved_interventions=unresolved_interventions,
             active_delegations=delegation.active_runs,
             failed_delegations=delegation.failed_runs,

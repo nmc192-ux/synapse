@@ -614,6 +614,36 @@ def test_loop_planner_builds_mac_mini_validation_prompt_with_commit() -> None:
     assert 'Reduce bootstrap pre-start starvation' in prompt
 
 
+def test_loop_planner_builds_loop_status_summary() -> None:
+    payload = {
+        'daily': {
+            'summary': {
+                'runs_started': 20,
+                'runs_completed': 9,
+                'average_run_latency_seconds': 61.5,
+                'waiting_for_operator_runs': 14,
+                'request_health_summary': {
+                    'operator_required': 14,
+                    'unresolved': 4,
+                    'operator_review_timed_out': 10,
+                },
+                'request_backlog_subtypes': {
+                    'operator_required:bootstrap_not_started': 11,
+                },
+                'alpha_gate': {'recommendation': 'hold'},
+            }
+        },
+        'weekly': {'summary': {'runs_started': 140}},
+    }
+
+    status = loop_planner.build_loop_status(payload, commit_head='cafebabe')
+
+    assert status['git_head'] == 'cafebabe'
+    assert status['phase_key'] == 'bootstrap_not_started'
+    assert status['dominant_backlog_subtype'] == 'operator_required:bootstrap_not_started'
+    assert status['alpha_gate_recommendation'] == 'hold'
+
+
 def test_reporter_run_once_emits_loop_artifacts(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv('SYNTHETIC_ALPHA_SWARM_OUTPUT_DIR', str(tmp_path / 'runtime'))
     monkeypatch.setenv('SYNTHETIC_ALPHA_SWARM_REPORTS_DIR', str(tmp_path / 'reports'))
@@ -683,9 +713,15 @@ def test_reporter_run_once_emits_loop_artifacts(monkeypatch, tmp_path) -> None:
 
     loop_plan = tmp_path / 'reports' / 'development_loop_latest.json'
     macbook_brief = tmp_path / 'reports' / 'macbook_iteration_brief_latest.txt'
+    loop_status = tmp_path / 'reports' / 'loop_status_latest.json'
+    loop_status_html = tmp_path / 'reports' / 'loop_status_latest.html'
     assert loop_plan.exists()
     assert macbook_brief.exists()
+    assert loop_status.exists()
+    assert loop_status_html.exists()
     assert 'bootstrap_not_started' in loop_plan.read_text()
+    assert 'bootstrap_not_started' in loop_status.read_text()
+    assert 'Synthetic Alpha Loop Status' in loop_status_html.read_text()
 
 
 def test_sync_project_runtime_events_records_mapped_worker_events(monkeypatch) -> None:

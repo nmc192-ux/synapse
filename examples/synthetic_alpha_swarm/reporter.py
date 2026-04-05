@@ -28,7 +28,7 @@ from common import (
     write_report_json,
     write_report_text,
 )
-from loop_planner import write_next_iteration_artifacts
+from loop_planner import write_loop_status_artifacts, write_next_iteration_artifacts
 from synapse.models.agent import AgentKind
 
 
@@ -395,6 +395,9 @@ def run_once() -> None:
     loop_paths = write_next_iteration_artifacts(
         {"daily": {"projects": daily_projects, "summary": daily_summary}, "weekly": {"projects": weekly_projects, "summary": weekly_summary}}
     )
+    loop_status_paths = write_loop_status_artifacts(
+        {"daily": {"projects": daily_projects, "summary": daily_summary}, "weekly": {"projects": weekly_projects, "summary": weekly_summary}}
+    )
     print(
         {
             "daily": daily_paths,
@@ -403,6 +406,7 @@ def run_once() -> None:
             "latest": latest_paths,
             "dashboard": dashboard_paths,
             "loop": loop_paths,
+            "loop_status": loop_status_paths,
         }
     )
 

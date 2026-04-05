@@ -215,6 +215,63 @@ Output:
 """
 
 
+def build_loop_status(summary_payload: dict[str, Any], *, commit_head: str | None = None) -> dict[str, Any]:
+    plan = derive_next_iteration(summary_payload)
+    daily = summary_payload.get("daily", {})
+    daily_summary = daily.get("summary", {}) if isinstance(daily, dict) else {}
+    alpha_gate = daily_summary.get("alpha_gate", {}) if isinstance(daily_summary, dict) else {}
+    report_generated_at = utc_now().isoformat()
+    return {
+        "generated_at": report_generated_at,
+        "git_head": commit_head or current_git_head(),
+        "alpha_gate_recommendation": str(alpha_gate.get("recommendation", "unknown")),
+        "dominant_backlog_subtype": plan["dominant_backlog_subtype"],
+        "dominant_backlog_count": plan["dominant_backlog_count"],
+        "phase_key": plan["phase_key"],
+        "phase_title": plan["phase_title"],
+        "macbook_commit_message": plan["commit_message"],
+        "waiting_for_operator_runs": plan["waiting_for_operator_runs"],
+        "operator_required": plan["operator_required"],
+        "unresolved": plan["unresolved"],
+        "operator_review_timed_out": plan["operator_review_timed_out"],
+        "daily_runs_started": plan["daily_runs_started"],
+        "daily_runs_completed": plan["daily_runs_completed"],
+        "daily_average_latency_seconds": plan["daily_average_latency_seconds"],
+        "report_paths": {
+            "summary_latest": "synthetic_alpha_summary_latest.json",
+            "dashboard_latest": "synthetic_alpha_dashboard_latest.html",
+            "development_loop_latest": "development_loop_latest.json",
+            "macbook_iteration_brief_latest": "macbook_iteration_brief_latest.txt",
+        },
+        "validation_focus": list(plan["validation_focus"]),
+    }
+
+
+def build_loop_status_html(status: dict[str, Any]) -> str:
+    focus_items = "".join(f"<li>{item}</li>" for item in status.get("validation_focus", []))
+    return (
+        "<!doctype html><html><head><meta charset='utf-8'><title>Synthetic Alpha Loop Status</title>"
+        "<style>body{font-family:ui-sans-serif,system-ui;margin:32px;background:#0f1720;color:#dbe7ff}"
+        ".grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px}"
+        ".card{background:#162130;border:1px solid #30425f;padding:18px}h1,h2{margin:0 0 12px}"
+        "code{background:#0b1118;padding:2px 6px}ul{padding-left:18px}</style></head><body>"
+        f"<h1>Synthetic Alpha Loop Status</h1><p>Generated {status['generated_at']}</p>"
+        "<div class='grid'>"
+        f"<section class='card'><h2>Current Phase</h2><p><strong>{status['phase_title']}</strong></p>"
+        f"<p>Key: <code>{status['phase_key']}</code></p><p>Commit message: <code>{status['macbook_commit_message']}</code></p></section>"
+        f"<section class='card'><h2>Dominant Backlog</h2><p><strong>{status['dominant_backlog_subtype']}</strong></p>"
+        f"<p>Count: {status['dominant_backlog_count']}</p><p>Alpha gate: {status['alpha_gate_recommendation']}</p></section>"
+        f"<section class='card'><h2>Current Pressure</h2><p>Operator required: {status['operator_required']}</p>"
+        f"<p>Unresolved: {status['unresolved']}</p><p>Timed out in review: {status['operator_review_timed_out']}</p>"
+        f"<p>Waiting for operator: {status['waiting_for_operator_runs']}</p></section>"
+        f"<section class='card'><h2>Latest Run Window</h2><p>Runs started: {status['daily_runs_started']}</p>"
+        f"<p>Runs completed: {status['daily_runs_completed']}</p><p>Avg latency: {status['daily_average_latency_seconds']}s</p>"
+        f"<p>Git head: <code>{status['git_head']}</code></p></section>"
+        f"<section class='card'><h2>Validation Focus</h2><ul>{focus_items or '<li>none</li>'}</ul></section>"
+        "</div></body></html>"
+    )
+
+
 def write_next_iteration_artifacts(summary_payload: dict[str, Any]) -> dict[str, dict[str, str]]:
     plan = derive_next_iteration(summary_payload)
     slug = timestamp_slug()
@@ -245,6 +302,21 @@ def write_mac_mini_validation_artifacts(summary_payload: dict[str, Any], *, comm
     return {"mac_mini": validation_paths, "mac_mini_latest": latest_validation_paths}
 
 
+def write_loop_status_artifacts(summary_payload: dict[str, Any], *, commit_head: str | None = None) -> dict[str, dict[str, str]]:
+    status = build_loop_status(summary_payload, commit_head=commit_head)
+    slug = timestamp_slug()
+    json_paths = write_report_json(f"loop_status_{slug}.json", status)
+    latest_json_paths = write_report_json("loop_status_latest.json", status)
+    html_paths = write_report_text(f"loop_status_{slug}.html", build_loop_status_html(status))
+    latest_html_paths = write_report_text("loop_status_latest.html", build_loop_status_html(status))
+    return {
+        "status": json_paths,
+        "status_latest": latest_json_paths,
+        "status_html": html_paths,
+        "status_html_latest": latest_html_paths,
+    }
+
+
 def run_once(*, prepare_validation: bool = False) -> None:
     from reporter import collect_metrics
 
@@ -252,6 +324,7 @@ def run_once(*, prepare_validation: bool = False) -> None:
     weekly_projects, weekly_summary = collect_metrics("weekly")
     payload = {"daily": {"projects": daily_projects, "summary": daily_summary}, "weekly": {"projects": weekly_projects, "summary": weekly_summary}}
     outputs = write_next_iteration_artifacts(payload)
+    outputs["status"] = write_loop_status_artifacts(payload)
     if prepare_validation:
         outputs["validation"] = write_mac_mini_validation_artifacts(payload)
     print(outputs)

@@ -26,6 +26,7 @@ class BrowserWorker:
         event_publisher: EventPublisher | None = None,
         heartbeat_interval_seconds: float = 15.0,
         heartbeat_callback: HeartbeatCallback | None = None,
+        request_claimed_callback: RequestLifecycleCallback | None = None,
         request_started_callback: RequestLifecycleCallback | None = None,
         request_progress_callback: RequestLifecycleCallback | None = None,
     ) -> None:
@@ -36,6 +37,7 @@ class BrowserWorker:
         self.event_publisher = event_publisher
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self.heartbeat_callback = heartbeat_callback
+        self.request_claimed_callback = request_claimed_callback
         self.request_started_callback = request_started_callback
         self.request_progress_callback = request_progress_callback
         self.runtime: Any | None = None
@@ -94,6 +96,8 @@ class BrowserWorker:
                 self.state.status = WorkerRuntimeStatus.BUSY
                 self.state.current_request_id = item.request_id
                 self._current_item = item
+                if self.request_claimed_callback is not None:
+                    await self.request_claimed_callback(self.worker_id, item)
                 if self.request_started_callback is not None:
                     await self.request_started_callback(self.worker_id, item)
                 await self._emit_status_event()

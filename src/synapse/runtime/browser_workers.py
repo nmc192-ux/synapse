@@ -95,6 +95,7 @@ class BrowserWorkerPool:
                 event_publisher=self._event_publisher,
                 heartbeat_interval_seconds=self.heartbeat_interval_seconds,
                 heartbeat_callback=self._on_worker_heartbeat,
+                request_claimed_callback=self._on_request_claimed,
                 request_started_callback=self._on_request_started,
                 request_progress_callback=self._on_request_progress,
             )
@@ -624,6 +625,9 @@ class BrowserWorkerPool:
                 "lifecycle_action": item.action,
                 "progress_heartbeat_count": 0,
                 "bootstrap_degraded": False,
+                "worker_claimed_at": None,
+                "execution_started_at": None,
+                "first_progress_at": None,
             }
         )
         await self._run_store.save_worker_request(
@@ -645,8 +649,29 @@ class BrowserWorkerPool:
             )
         )
 
-    async def _on_request_started(self, worker_id: str, item: BrowserTaskEnvelope) -> None:
+    async def _on_request_claimed(self, worker_id: str, item: BrowserTaskEnvelope) -> None:
         self._release_dispatch_backlog(worker_id)
+        request = await self._load_existing_request(item.run_id, item.action_id)
+        now = datetime.now(timezone.utc)
+        if request is not None and self._run_store is not None:
+            payload = {
+                **request.payload,
+                "lifecycle_stage": "claimed",
+                "worker_claimed_at": request.payload.get("worker_claimed_at") or now.isoformat(),
+                "execution_started_at": request.payload.get("execution_started_at"),
+                "first_progress_at": request.payload.get("first_progress_at"),
+            }
+            await self._run_store.save_worker_request(
+                request.model_copy(
+                    update={
+                        "worker_id": worker_id,
+                        "payload": payload,
+                        "updated_at": now,
+                    }
+                )
+            )
+
+    async def _on_request_started(self, worker_id: str, item: BrowserTaskEnvelope) -> None:
         request = await self._load_existing_request(item.run_id, item.action_id)
         now = datetime.now(timezone.utc)
         if request is not None:
@@ -654,7 +679,8 @@ class BrowserWorkerPool:
                 **request.payload,
                 "lifecycle_stage": "started",
                 "lifecycle_started_at": now.isoformat(),
-                "worker_claimed_at": now.isoformat(),
+                "worker_claimed_at": request.payload.get("worker_claimed_at") or now.isoformat(),
+                "execution_started_at": request.payload.get("execution_started_at") or now.isoformat(),
             }
             if request.action == "create_session" and bool(request.payload.get("bootstrap_dispatch_degraded")):
                 payload["bootstrap_degraded"] = True
@@ -703,6 +729,7 @@ class BrowserWorkerPool:
                 "lifecycle_stage": "progressing",
                 "last_progress_heartbeat_at": now.isoformat(),
                 "progress_heartbeat_count": progress_count,
+                "first_progress_at": request.payload.get("first_progress_at") or now.isoformat(),
             },
         }
         emitted_event: tuple[EventType, dict[str, object]] | None = None
@@ -994,6 +1021,14 @@ class BrowserWorkerPool:
             )
             return
         if request.action == "create_session" and (request.started_at is None or bootstrap_dispatch_degraded):
+            if self._worker_claimed_at(request) is not None and self._execution_started_at(request) is None:
+                await self._mark_request_operator_required(
+                    request,
+                    reason="session bootstrap was claimed by a worker but did not enter execution before timeout and requires operator intervention",
+                    reason_code="session_bootstrap_claimed_not_entered",
+                    age_seconds=age_seconds,
+                )
+                return
             await self._mark_request_operator_required(
                 request,
                 reason="session bootstrap did not start on a worker before timeout and requires operator intervention",
@@ -1057,6 +1092,11 @@ class BrowserWorkerPool:
     def _stuck_status_reason(self, request: BrowserTaskRequestRecord) -> str:
         progress_heartbeats = self._progress_heartbeat_count(request)
         if request.action == "create_session":
+            if self._worker_claimed_at(request) is not None and self._execution_started_at(request) is None:
+                return (
+                    f"session bootstrap was claimed by a worker but did not enter execution within "
+                    f"{self._lease_timeout_seconds:.2f}s"
+                )
             return f"session bootstrap exceeded {self._lease_timeout_seconds:.2f}s without durable completion"
         if request.started_at is not None and progress_heartbeats == 0:
             return f"request started on a worker but reported no durable progress within {self._lease_timeout_seconds:.2f}s"
@@ -1066,6 +1106,15 @@ class BrowserWorkerPool:
 
     @staticmethod
     def _slow_status_reason(request: BrowserTaskRequestRecord, threshold: float) -> str:
+        claimed_at = request.payload.get("worker_claimed_at")
+        execution_started_at = request.payload.get("execution_started_at")
+        if (
+            request.action == "create_session"
+            and isinstance(claimed_at, str)
+            and claimed_at
+            and not (isinstance(execution_started_at, str) and execution_started_at)
+        ):
+            return f"session bootstrap was claimed by a worker but has not entered execution after {threshold:.2f}s"
         if request.action == "create_session" and request.started_at is None:
             return f"session bootstrap has not started on a worker after {threshold:.2f}s"
         if request.action == "create_session":
@@ -1085,6 +1134,16 @@ class BrowserWorkerPool:
             except ValueError:
                 return 0
         return 0
+
+    @staticmethod
+    def _worker_claimed_at(request: BrowserTaskRequestRecord) -> str | None:
+        raw = request.payload.get("worker_claimed_at")
+        return raw if isinstance(raw, str) and raw else None
+
+    @staticmethod
+    def _execution_started_at(request: BrowserTaskRequestRecord) -> str | None:
+        raw = request.payload.get("execution_started_at")
+        return raw if isinstance(raw, str) and raw else None
 
     def _should_force_aged_degraded_operator_review(
         self,

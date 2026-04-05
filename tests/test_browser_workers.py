@@ -1101,6 +1101,120 @@ def test_browser_worker_pool_marks_dispatched_create_session_slow_with_specific_
     asyncio.run(scenario())
 
 
+def test_browser_worker_pool_records_worker_claim_before_execution_start() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        controller_id = "controller-create-session-claim"
+        worker_id = f"{controller_id}:browser-worker-1"
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            heartbeat_interval_seconds=0.2,
+            lease_timeout_seconds=0.05,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id=controller_id,
+        )
+
+        await run_store.save_worker_request(
+            BrowserTaskRequestRecord(
+                action_id="action-create-session-claim",
+                request_id="request-create-session-claim",
+                run_id="run-1",
+                worker_id=worker_id,
+                action="create_session",
+                session_id="s1",
+                status="dispatched",
+                payload={"session_id": "s1", "agent_id": "agent-1", "run_id": "run-1"},
+                dispatched_at=datetime.now(timezone.utc) - timedelta(seconds=0.1),
+                last_progress_at=datetime.now(timezone.utc) - timedelta(seconds=0.1),
+            )
+        )
+
+        await pool._on_request_claimed(
+            worker_id,
+            BrowserTaskEnvelope(
+                action_id="action-create-session-claim",
+                request_id="request-create-session-claim",
+                run_id="run-1",
+                session_id="s1",
+                action="create_session",
+            ),
+        )
+
+        stored = await run_store.get_worker_request("run-1", "action-create-session-claim")
+        assert stored is not None
+        assert stored.started_at is None
+        assert stored.payload["lifecycle_stage"] == "claimed"
+        assert isinstance(stored.payload["worker_claimed_at"], str)
+        assert stored.payload["execution_started_at"] is None
+
+    asyncio.run(scenario())
+
+
+def test_browser_worker_pool_records_execution_start_after_claim() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        controller_id = "controller-create-session-entry"
+        worker_id = f"{controller_id}:browser-worker-1"
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            heartbeat_interval_seconds=0.2,
+            lease_timeout_seconds=0.05,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id=controller_id,
+        )
+
+        await run_store.save_worker_request(
+            BrowserTaskRequestRecord(
+                action_id="action-create-session-entry",
+                request_id="request-create-session-entry",
+                run_id="run-1",
+                worker_id=worker_id,
+                action="create_session",
+                session_id="s1",
+                status="dispatched",
+                payload={"session_id": "s1", "agent_id": "agent-1", "run_id": "run-1"},
+                dispatched_at=datetime.now(timezone.utc) - timedelta(seconds=0.1),
+                last_progress_at=datetime.now(timezone.utc) - timedelta(seconds=0.1),
+            )
+        )
+
+        await pool._on_request_claimed(
+            worker_id,
+            BrowserTaskEnvelope(
+                action_id="action-create-session-entry",
+                request_id="request-create-session-entry",
+                run_id="run-1",
+                session_id="s1",
+                action="create_session",
+            ),
+        )
+        await pool._on_request_started(
+            worker_id,
+            BrowserTaskEnvelope(
+                action_id="action-create-session-entry",
+                request_id="request-create-session-entry",
+                run_id="run-1",
+                session_id="s1",
+                action="create_session",
+            ),
+        )
+
+        stored = await run_store.get_worker_request("run-1", "action-create-session-entry")
+        assert stored is not None
+        assert stored.started_at is not None
+        assert stored.payload["lifecycle_stage"] == "started"
+        assert isinstance(stored.payload["worker_claimed_at"], str)
+        assert isinstance(stored.payload["execution_started_at"], str)
+
+    asyncio.run(scenario())
+
+
 def test_browser_worker_pool_clears_dispatch_degraded_flag_when_create_session_starts() -> None:
     async def scenario() -> None:
         store = InMemoryRuntimeStateStore()
@@ -1248,6 +1362,131 @@ def test_browser_worker_pool_escalates_create_session_that_never_started() -> No
     asyncio.run(scenario())
 
 
+def test_browser_worker_pool_marks_claimed_create_session_slow_with_specific_reason() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        controller_id = "controller-create-session-claimed-slow"
+        worker_id = f"{controller_id}:browser-worker-1"
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            heartbeat_interval_seconds=0.2,
+            lease_timeout_seconds=0.05,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id=controller_id,
+        )
+
+        stale_time = datetime.now(timezone.utc) - timedelta(seconds=1)
+        await run_store.save_worker_request(
+            BrowserTaskRequestRecord(
+                action_id="action-create-session-claimed-slow",
+                request_id="request-create-session-claimed-slow",
+                run_id="run-1",
+                worker_id=worker_id,
+                action="create_session",
+                session_id="s1",
+                status="dispatched",
+                payload={
+                    "session_id": "s1",
+                    "agent_id": "agent-1",
+                    "run_id": "run-1",
+                    "worker_claimed_at": stale_time.isoformat(),
+                    "execution_started_at": None,
+                },
+                dispatched_at=stale_time,
+                last_progress_at=stale_time,
+            )
+        )
+
+        await pool._maybe_mark_request_slow(
+            BrowserTaskEnvelope(
+                action_id="action-create-session-claimed-slow",
+                request_id="request-create-session-claimed-slow",
+                run_id="run-1",
+                session_id="s1",
+                action="create_session",
+            )
+        )
+
+        stored = await run_store.get_worker_request("run-1", "action-create-session-claimed-slow")
+        assert stored is not None
+        assert stored.status == "slow"
+        assert stored.status_reason == "session bootstrap was claimed by a worker but has not entered execution after 0.40s"
+
+    asyncio.run(scenario())
+
+
+def test_browser_worker_pool_escalates_claimed_create_session_that_never_entered_execution() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        sockets = WebSocketManager(state_store=store)
+        bus = EventBus(sockets)
+        bus.set_context_resolver(lambda event: _event_context())
+        controller_id = "controller-create-session-claimed-operator"
+        worker_id = f"{controller_id}:browser-worker-1"
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            heartbeat_interval_seconds=0.2,
+            lease_timeout_seconds=0.05,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id=controller_id,
+        )
+        pool.set_event_publisher(bus.publish)
+
+        stale_time = datetime.now(timezone.utc) - timedelta(seconds=1)
+        await run_store.save_worker_request(
+            BrowserTaskRequestRecord(
+                action_id="action-create-session-claimed-operator",
+                request_id="request-create-session-claimed-operator",
+                run_id="run-1",
+                worker_id=worker_id,
+                action="create_session",
+                session_id="s1",
+                status="slow",
+                status_reason="session bootstrap was claimed by a worker but has not entered execution after 0.10s",
+                payload={
+                    "session_id": "s1",
+                    "agent_id": "agent-1",
+                    "run_id": "run-1",
+                    "worker_claimed_at": stale_time.isoformat(),
+                    "execution_started_at": None,
+                    "bootstrap_dispatch_degraded": True,
+                },
+                dispatched_at=stale_time,
+                last_progress_at=stale_time,
+            )
+        )
+
+        async with sockets.subscribe("create-session-claimed-operator", organization_id="org-1", project_id="project-1") as queue:
+            await pool._maybe_mark_request_stuck(
+                BrowserTaskEnvelope(
+                    action_id="action-create-session-claimed-operator",
+                    request_id="request-create-session-claimed-operator",
+                    run_id="run-1",
+                    session_id="s1",
+                    action="create_session",
+                )
+            )
+            event = await asyncio.wait_for(queue.get(), timeout=0.2)
+            assert event.event_type == EventType.BROWSER_HUMAN_INTERVENTION_REQUIRED
+            assert event.payload["reason_code"] == "session_bootstrap_claimed_not_entered"
+
+        stored = await run_store.get_worker_request("run-1", "action-create-session-claimed-operator")
+        assert stored is not None
+        assert stored.status == "operator_required"
+        assert (
+            stored.status_reason
+            == "session bootstrap was claimed by a worker but did not enter execution before timeout and requires operator intervention"
+        )
+
+    asyncio.run(scenario())
+
+
 def test_browser_worker_pool_prefers_less_loaded_worker_for_create_session() -> None:
     async def scenario() -> None:
         store = InMemoryRuntimeStateStore()
@@ -1286,6 +1525,66 @@ def test_browser_worker_pool_prefers_less_loaded_worker_for_create_session() -> 
                 if isinstance(runtime, _BlockingCreateSessionRuntime):
                     runtime.release.set()
             await pool.stop()
+
+    asyncio.run(scenario())
+
+
+def test_browser_worker_pool_records_first_progress_timestamp() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        controller_id = "controller-create-session-progress"
+        worker_id = f"{controller_id}:browser-worker-1"
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            heartbeat_interval_seconds=0.2,
+            lease_timeout_seconds=0.05,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id=controller_id,
+        )
+
+        now = datetime.now(timezone.utc)
+        await run_store.save_worker_request(
+            BrowserTaskRequestRecord(
+                action_id="action-create-session-progress",
+                request_id="request-create-session-progress",
+                run_id="run-1",
+                worker_id=worker_id,
+                action="create_session",
+                session_id="s1",
+                status="running",
+                payload={
+                    "session_id": "s1",
+                    "agent_id": "agent-1",
+                    "run_id": "run-1",
+                    "worker_claimed_at": (now - timedelta(seconds=0.2)).isoformat(),
+                    "execution_started_at": (now - timedelta(seconds=0.15)).isoformat(),
+                    "first_progress_at": None,
+                    "progress_heartbeat_count": 0,
+                },
+                dispatched_at=now - timedelta(seconds=0.3),
+                started_at=now - timedelta(seconds=0.15),
+                last_progress_at=now - timedelta(seconds=0.15),
+            )
+        )
+
+        await pool._on_request_progress(
+            worker_id,
+            BrowserTaskEnvelope(
+                action_id="action-create-session-progress",
+                request_id="request-create-session-progress",
+                run_id="run-1",
+                session_id="s1",
+                action="create_session",
+            ),
+        )
+
+        stored = await run_store.get_worker_request("run-1", "action-create-session-progress")
+        assert stored is not None
+        assert stored.payload["progress_heartbeat_count"] == 1
+        assert isinstance(stored.payload["first_progress_at"], str)
 
     asyncio.run(scenario())
 

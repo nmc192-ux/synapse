@@ -28,6 +28,7 @@ from common import (
     write_report_json,
     write_report_text,
 )
+from loop_planner import write_next_iteration_artifacts
 from synapse.models.agent import AgentKind
 
 
@@ -391,7 +392,19 @@ def run_once() -> None:
         {"daily": {"projects": daily_projects, "summary": daily_summary}, "weekly": {"projects": weekly_projects, "summary": weekly_summary}},
     )
     dashboard_paths = write_report_text("synthetic_alpha_dashboard_latest.html", build_dashboard_html(daily_summary, weekly_summary))
-    print({"daily": daily_paths, "weekly": weekly_paths, "metrics": metrics_paths, "latest": latest_paths, "dashboard": dashboard_paths})
+    loop_paths = write_next_iteration_artifacts(
+        {"daily": {"projects": daily_projects, "summary": daily_summary}, "weekly": {"projects": weekly_projects, "summary": weekly_summary}}
+    )
+    print(
+        {
+            "daily": daily_paths,
+            "weekly": weekly_paths,
+            "metrics": metrics_paths,
+            "latest": latest_paths,
+            "dashboard": dashboard_paths,
+            "loop": loop_paths,
+        }
+    )
 
 
 def main() -> None:

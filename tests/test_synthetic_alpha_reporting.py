@@ -14,6 +14,14 @@ sys.modules[COMMON_SPEC.name] = common
 sys.modules["common"] = common
 COMMON_SPEC.loader.exec_module(common)
 
+LOOP_PLANNER_PATH = REPO_ROOT / 'examples' / 'synthetic_alpha_swarm' / 'loop_planner.py'
+LOOP_PLANNER_SPEC = importlib.util.spec_from_file_location('synthetic_alpha_swarm_loop_planner_reporting', LOOP_PLANNER_PATH)
+loop_planner = importlib.util.module_from_spec(LOOP_PLANNER_SPEC)
+assert LOOP_PLANNER_SPEC is not None and LOOP_PLANNER_SPEC.loader is not None
+sys.modules[LOOP_PLANNER_SPEC.name] = loop_planner
+sys.modules["loop_planner"] = loop_planner
+LOOP_PLANNER_SPEC.loader.exec_module(loop_planner)
+
 REPORTER_PATH = REPO_ROOT / 'examples' / 'synthetic_alpha_swarm' / 'reporter.py'
 REPORTER_SPEC = importlib.util.spec_from_file_location('synthetic_alpha_swarm_reporter_reporting', REPORTER_PATH)
 reporter = importlib.util.module_from_spec(REPORTER_SPEC)
@@ -524,6 +532,160 @@ def test_reporter_run_once_starts_project_runtime_listeners(monkeypatch, tmp_pat
     reporter.run_once()
 
     assert listener_calls == ['steady', 'chaos']
+
+
+def test_loop_planner_prefers_bootstrap_not_started_subtype() -> None:
+    payload = {
+        'daily': {
+            'summary': {
+                'runs_started': 855,
+                'runs_completed': 186,
+                'average_run_latency_seconds': 57.19,
+                'waiting_for_operator_runs': 544,
+                'request_health_summary': {
+                    'operator_required': 546,
+                    'unresolved': 187,
+                    'operator_review_timed_out': 522,
+                },
+                'request_backlog_subtypes': {
+                    'operator_required:bootstrap_not_started': 508,
+                    'unresolved:generic_timeout_before_start': 71,
+                },
+            }
+        },
+        'weekly': {'summary': {'runs_started': 1200}},
+    }
+
+    plan = loop_planner.derive_next_iteration(payload)
+
+    assert plan['phase_key'] == 'bootstrap_not_started'
+    assert plan['dominant_backlog_subtype'] == 'operator_required:bootstrap_not_started'
+    assert plan['commit_message'] == 'fix: reduce bootstrap pre-start starvation'
+
+
+def test_loop_planner_prefers_claimed_not_entered_subtype() -> None:
+    payload = {
+        'daily': {
+            'summary': {
+                'waiting_for_operator_runs': 20,
+                'request_health_summary': {
+                    'operator_required': 20,
+                    'unresolved': 5,
+                    'operator_review_timed_out': 0,
+                },
+                'request_backlog_subtypes': {
+                    'operator_required:bootstrap_claimed_not_entered': 12,
+                    'operator_required:bootstrap_not_started': 4,
+                },
+            }
+        },
+        'weekly': {'summary': {'runs_started': 100}},
+    }
+
+    plan = loop_planner.derive_next_iteration(payload)
+
+    assert plan['phase_key'] == 'bootstrap_claimed_not_entered'
+    assert plan['phase_title'] == 'Fix claimed-not-entered bootstrap gap'
+
+
+def test_loop_planner_builds_mac_mini_validation_prompt_with_commit() -> None:
+    payload = {
+        'daily': {
+            'summary': {
+                'waiting_for_operator_runs': 10,
+                'request_health_summary': {
+                    'operator_required': 12,
+                    'unresolved': 3,
+                    'operator_review_timed_out': 8,
+                },
+                'request_backlog_subtypes': {
+                    'operator_required:bootstrap_not_started': 9,
+                },
+            }
+        },
+        'weekly': {'summary': {'runs_started': 50}},
+    }
+
+    plan = loop_planner.derive_next_iteration(payload)
+    prompt = loop_planner.build_mac_mini_validation_prompt(plan, commit_head='deadbeef')
+
+    assert 'deadbeef' in prompt
+    assert 'operator_required:bootstrap_not_started = 9' in prompt
+    assert 'Reduce bootstrap pre-start starvation' in prompt
+
+
+def test_reporter_run_once_emits_loop_artifacts(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv('SYNTHETIC_ALPHA_SWARM_OUTPUT_DIR', str(tmp_path / 'runtime'))
+    monkeypatch.setenv('SYNTHETIC_ALPHA_SWARM_REPORTS_DIR', str(tmp_path / 'reports'))
+    monkeypatch.setattr(reporter, 'register_role_agent', lambda *args, **kwargs: None)
+    monkeypatch.setattr(reporter, 'ensure_a2a_listener', lambda: None)
+    monkeypatch.setattr(reporter, 'ensure_runtime_listeners', lambda: None)
+    monkeypatch.setattr(
+        reporter,
+        'collect_metrics',
+        lambda window: (
+            [],
+            {
+                'runs_started': 10,
+                'runs_completed': 8,
+                'runs_failed': 0,
+                'intervention_count': 0,
+                'browser_crash_count': 0,
+                'captcha_challenge_count': 0,
+                'session_restore_failures': 0,
+                'duplicate_result_recoveries': 0,
+                'stale_ownership_incidents': 0,
+                'a2a_messages_sent': 0,
+                'a2a_messages_succeeded': 0,
+                'a2a_messages_failed': 0,
+                'scheduler_recovery_events': 0,
+                'plugin_denials': 0,
+                'average_run_latency_seconds': 0.0,
+                'request_health_summary': {
+                    'slow': 0,
+                    'stuck': 0,
+                    'recovered': 0,
+                    'abandoned': 0,
+                    'operator_required': 3,
+                    'operator_review_overdue': 0,
+                    'operator_review_timed_out': 0,
+                    'completed_after_slow': 0,
+                    'unresolved': 1,
+                },
+                'browser_errors_by_category': {bucket: 0 for bucket in reporter.FAILURE_BUCKETS},
+                'intervention_count_by_reason': {},
+                'per_project_failure_rate': {},
+                'failure_classification': {bucket: 0 for bucket in reporter.FAILURE_BUCKETS},
+                'per_agent_outcomes': {},
+                'agents_requiring_intervention': {},
+                'request_backlog_subtypes': {'operator_required:bootstrap_not_started': 3},
+                'stale_waiting_for_operator_runs': 0,
+                'timed_out_operator_review_runs': 0,
+                'pending_operator_review_interventions': 0,
+                'overdue_operator_review_interventions': 0,
+                'timed_out_operator_review_interventions': 0,
+                'waiting_for_operator_runs': 3,
+                'alpha_gate': {
+                    'recommendation': 'hold',
+                    'safe_degraded_recoveries': 0,
+                    'unresolved_degradation': 1,
+                    'unsafe_failures': 0,
+                    'manual_interventions': 3,
+                    'release_blockers': ['steady: unresolved browser request health signals observed'],
+                    'reasons': ['steady: unresolved browser request health signals observed'],
+                    'projects': {},
+                },
+            },
+        ),
+    )
+
+    reporter.run_once()
+
+    loop_plan = tmp_path / 'reports' / 'development_loop_latest.json'
+    macbook_brief = tmp_path / 'reports' / 'macbook_iteration_brief_latest.txt'
+    assert loop_plan.exists()
+    assert macbook_brief.exists()
+    assert 'bootstrap_not_started' in loop_plan.read_text()
 
 
 def test_sync_project_runtime_events_records_mapped_worker_events(monkeypatch) -> None:

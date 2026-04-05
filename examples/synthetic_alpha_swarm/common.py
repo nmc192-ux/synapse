@@ -1334,6 +1334,7 @@ def request_health_summary(telemetry_events: list[dict[str, Any]]) -> dict[str, 
         "abandoned": 0,
         "operator_required": 0,
         "operator_review_overdue": 0,
+        "operator_review_timed_out": 0,
         "completed_after_slow": 0,
         "unresolved": 0,
     }
@@ -1579,6 +1580,7 @@ def compute_project_metrics(
         request_health["operator_required"] = operator_review_fallback
     operator_review_overdue = max(stale_waiting_for_operator_runs, overdue_operator_review_interventions)
     request_health["operator_review_overdue"] = operator_review_overdue
+    request_health["operator_review_timed_out"] = operator_review_overdue
     active_operator_required = max(0, request_health["operator_required"] - operator_review_overdue)
     request_health["unresolved"] = max(active_operator_required, request_health["unresolved"] - operator_review_overdue)
     snapshot = {
@@ -1599,8 +1601,10 @@ def compute_project_metrics(
         "plugin_denials": plugin_denials,
         "waiting_for_operator_runs": waiting_for_operator_runs,
         "stale_waiting_for_operator_runs": stale_waiting_for_operator_runs,
+        "timed_out_operator_review_runs": stale_waiting_for_operator_runs,
         "pending_operator_review_interventions": pending_operator_review_interventions,
         "overdue_operator_review_interventions": overdue_operator_review_interventions,
+        "timed_out_operator_review_interventions": overdue_operator_review_interventions,
         "average_run_latency_seconds": round(sum(latencies) / len(latencies), 2) if latencies else 0.0,
         "per_project_failure_rate": round(failure_rate, 4),
         "request_health_summary": request_health,
@@ -1623,6 +1627,7 @@ def assess_project_alpha_gate(snapshot: dict[str, Any]) -> dict[str, Any]:
     abandoned = int(request_health.get("abandoned", 0))
     operator_required = int(request_health.get("operator_required", 0))
     operator_review_overdue = int(request_health.get("operator_review_overdue", 0))
+    operator_review_timed_out = int(request_health.get("operator_review_timed_out", 0))
     completed_after_slow = int(request_health.get("completed_after_slow", 0))
     safe_degraded_recoveries = (
         int(snapshot.get("scheduler_recovery_events", 0))
@@ -1662,6 +1667,8 @@ def assess_project_alpha_gate(snapshot: dict[str, Any]) -> dict[str, Any]:
         reasons.append("operator review required for degraded browser requests")
     if operator_review_overdue > 0:
         reasons.append("stale operator review backlog requires bounded convergence")
+    if operator_review_timed_out > 0:
+        reasons.append("synthetic operator review timed out without human response")
 
     if reasons:
         recommendation = "hold"
@@ -1716,13 +1723,16 @@ def overall_metrics(project_snapshots: list[dict[str, Any]]) -> dict[str, Any]:
         "abandoned": 0,
         "operator_required": 0,
         "operator_review_overdue": 0,
+        "operator_review_timed_out": 0,
         "completed_after_slow": 0,
         "unresolved": 0,
     }
     waiting_for_operator_runs = 0
     stale_waiting_for_operator_runs = 0
+    timed_out_operator_review_runs = 0
     pending_operator_review_interventions = 0
     overdue_operator_review_interventions = 0
+    timed_out_operator_review_interventions = 0
     alpha_gate_projects: dict[str, dict[str, Any]] = {}
     for snapshot in project_snapshots:
         for key in totals:
@@ -1748,8 +1758,10 @@ def overall_metrics(project_snapshots: list[dict[str, Any]]) -> dict[str, Any]:
             request_backlog_subtypes[key] = request_backlog_subtypes.get(key, 0) + int(count)
         waiting_for_operator_runs += int(snapshot.get("waiting_for_operator_runs", 0))
         stale_waiting_for_operator_runs += int(snapshot.get("stale_waiting_for_operator_runs", 0))
+        timed_out_operator_review_runs += int(snapshot.get("timed_out_operator_review_runs", 0))
         pending_operator_review_interventions += int(snapshot.get("pending_operator_review_interventions", 0))
         overdue_operator_review_interventions += int(snapshot.get("overdue_operator_review_interventions", 0))
+        timed_out_operator_review_interventions += int(snapshot.get("timed_out_operator_review_interventions", 0))
         alpha_gate_projects[str(snapshot.get("project_alias"))] = dict(snapshot.get("alpha_gate", {}))
     for values in agent_outcomes.values():
         started = int(values["runs_started"])
@@ -1768,8 +1780,10 @@ def overall_metrics(project_snapshots: list[dict[str, Any]]) -> dict[str, Any]:
     totals["request_backlog_subtypes"] = dict(sorted(request_backlog_subtypes.items(), key=lambda item: (-item[1], item[0])))
     totals["waiting_for_operator_runs"] = waiting_for_operator_runs
     totals["stale_waiting_for_operator_runs"] = stale_waiting_for_operator_runs
+    totals["timed_out_operator_review_runs"] = timed_out_operator_review_runs
     totals["pending_operator_review_interventions"] = pending_operator_review_interventions
     totals["overdue_operator_review_interventions"] = overdue_operator_review_interventions
+    totals["timed_out_operator_review_interventions"] = timed_out_operator_review_interventions
     totals["alpha_gate"] = assess_overall_alpha_gate(project_snapshots, alpha_gate_projects)
     return totals
 

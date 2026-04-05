@@ -2,6 +2,22 @@ import { NextRequest, NextResponse } from "next/server";
 
 const allowedPaths = new Set(["runs", "agents", "interventions"]);
 
+function isAllowedPath(path: string[]) {
+  if (!path.length) {
+    return false;
+  }
+  if (allowedPaths.has(path[0])) {
+    return true;
+  }
+  if (path[0] === "cloud" && path[1] === "admin" && path[2] === "workers") {
+    return true;
+  }
+  if (path[0] !== "runs" || path.length < 3) {
+    return false;
+  }
+  return new Set(["worker-requests", "delegation-summary", "attention", "events", "timeline"]).has(path[2]);
+}
+
 function sortMergedPayload(path: string[], records: unknown[]): unknown[] {
   if (path[0] === "runs") {
     return [...records].sort((left, right) => {
@@ -63,8 +79,7 @@ export async function GET(
   context: { params: Promise<{ path: string[] }> },
 ) {
   const { path } = await context.params;
-  const nestedRunPath = path[0] === "runs" && path[2] === "worker-requests";
-  if (!path.length || (!allowedPaths.has(path[0]) && !nestedRunPath)) {
+  if (!isAllowedPath(path)) {
     return NextResponse.json({ detail: "Not found" }, { status: 404 });
   }
 
@@ -73,7 +88,7 @@ export async function GET(
     return NextResponse.json({ detail: "Dashboard proxy is not configured." }, { status: 503 });
   }
 
-  if (path[0] === "runs" && path.length > 1) {
+  if ((path[0] === "runs" && path.length > 1) || (path[0] === "cloud" && path[1] === "admin" && path[2] === "workers")) {
     for (const project of projects) {
       const targetUrl = new URL(buildTargetUrl(path));
       targetUrl.search = request.nextUrl.search;

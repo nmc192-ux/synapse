@@ -170,6 +170,17 @@ export const initialState: DashboardState = {
       resolvedAt: null,
     },
   ],
+  workers: [
+    {
+      workerId: "browser-worker-1",
+      queueName: "browser-default",
+      status: "idle",
+      healthStatus: "healthy",
+      activeSessions: 1,
+      currentRuns: ["run-301"],
+      lastHeartbeat: new Date().toISOString(),
+    },
+  ],
   page: {
     url: "https://example.com",
     title: "Example Domain",

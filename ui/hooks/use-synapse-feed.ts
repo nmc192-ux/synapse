@@ -15,6 +15,7 @@ import {
   TaskItem,
   ThoughtItem,
   AgentBudgetItem,
+  WorkerHealthItem,
 } from "@/lib/types";
 
 const defaultSocketUrl =
@@ -100,12 +101,13 @@ export function useSynapseFeed(): DashboardFeed {
     try {
       const headers = useServerProxy ? undefined : buildSynapseHeaders(auth);
       const apiRoot = useServerProxy ? defaultProxyBaseUrl : `${defaultApiBaseUrl}/api`;
-      const [runsResponse, agentsResponse, interventionsResponse] = await Promise.all([
+      const [runsResponse, agentsResponse, interventionsResponse, workersResponse] = await Promise.all([
         fetch(`${apiRoot}/runs`, { headers, cache: "no-store" }),
         fetch(`${apiRoot}/agents`, { headers, cache: "no-store" }),
         fetch(`${apiRoot}/interventions`, { headers, cache: "no-store" }),
+        fetch(`${apiRoot}/cloud/admin/workers`, { headers, cache: "no-store" }),
       ]);
-      const failed = [runsResponse, agentsResponse, interventionsResponse].find((response) => !response.ok);
+      const failed = [runsResponse, agentsResponse, interventionsResponse, workersResponse].find((response) => !response.ok);
       if (failed) {
         handleAuthFailure(failed.status);
         return;
@@ -113,9 +115,11 @@ export function useSynapseFeed(): DashboardFeed {
       const runs = sortRunsByRecency((await runsResponse.json()) as Record<string, unknown>[]).slice(0, 24);
       const agents = sortAgentsByRecency((await agentsResponse.json()) as Record<string, unknown>[]).slice(0, 24);
       const interventions = (await interventionsResponse.json()) as Record<string, unknown>[];
+      const workers = (await workersResponse.json()) as Record<string, unknown>[];
       const requestHealth = await loadRequestHealth(apiRoot, headers, runs);
       const runHealth = await loadRunHealth(apiRoot, headers, runs, requestHealth);
-      setState(buildStateFromSnapshot(runs, agents, interventions, requestHealth, runHealth));
+      const events = await loadRunEvents(apiRoot, headers, runs);
+      setState(buildStateFromSnapshot(runs, agents, interventions, requestHealth, runHealth, workers, events));
       setAuthStatus("ready");
       setAuthError(null);
     } catch {
@@ -248,6 +252,7 @@ function applyEvent(current: DashboardState, event: SynapseEvent): DashboardStat
     budgets: budget ? mergeBudget(current.budgets, budget).slice(0, 6) : current.budgets,
     interventions: intervention ? mergeIntervention(current.interventions, intervention).slice(0, 8) : current.interventions,
     runHealth: current.runHealth,
+    workers: current.workers,
     page: derivePage(current.page, event, payload),
   };
 }
@@ -607,6 +612,7 @@ function createEmptyState(): DashboardState {
     interventions: [],
     requestHealth: [],
     runHealth: [],
+    workers: [],
     page: {
       url: "",
       title: "No live page selected",
@@ -624,6 +630,8 @@ function buildStateFromSnapshot(
   interventions: Record<string, unknown>[],
   requestHealth: RequestHealthItem[],
   runHealth: RunHealthItem[],
+  workers: Record<string, unknown>[],
+  events: SynapseEvent[],
 ): DashboardState {
   const sortedRuns = sortRunsByRecency(runs);
   const latestRun = sortedRuns[0];
@@ -673,7 +681,7 @@ function buildStateFromSnapshot(
     "Waiting for browser extraction and page navigation events.";
 
   return {
-    events: [],
+    events,
     activity,
     thoughts: agents.slice(0, 6).map((agent, index) => ({
       id: `agent-thought-${stringify(agent.agent_id) ?? index}`,
@@ -694,6 +702,7 @@ function buildStateFromSnapshot(
     interventions: interventions.map(toInterventionItem).filter(Boolean) as InterventionItem[],
     requestHealth,
     runHealth,
+    workers: workers.map(toWorkerHealthItem).filter(Boolean) as WorkerHealthItem[],
     page: {
       url: pageUrl,
       title: pageTitle,
@@ -813,6 +822,33 @@ async function loadRunHealth(
     .filter(Boolean) as RunHealthItem[];
 }
 
+async function loadRunEvents(
+  apiRoot: string,
+  headers: HeadersInit | undefined,
+  runs: Record<string, unknown>[],
+): Promise<SynapseEvent[]> {
+  const runIds = runs
+    .map((run) => stringify(run.run_id))
+    .filter((value): value is string => Boolean(value))
+    .slice(0, 6);
+  if (runIds.length === 0) {
+    return [];
+  }
+  const responses = await Promise.all(
+    runIds.map(async (runId) => {
+      const response = await fetch(`${apiRoot}/runs/${runId}/events`, {
+        headers,
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        return [];
+      }
+      return (await response.json()) as SynapseEvent[];
+    }),
+  );
+  return responses.flat().sort((left, right) => String(right.timestamp ?? "").localeCompare(String(left.timestamp ?? ""))).slice(0, 40);
+}
+
 function toRecordArray(value: unknown): Record<string, unknown>[] {
   if (!Array.isArray(value)) {
     return [];
@@ -905,6 +941,10 @@ function toRequestHealthItem(value: Record<string, unknown> | null | undefined):
     healthState: stringify(value.health_state) ?? "unknown",
     recoveryClass: stringify(value.recovery_class) ?? "steady",
     recoverySummary: stringify(value.recovery_summary),
+    statusReason: stringify(request.status_reason),
+    startedAt: stringify(request.started_at),
+    lastProgressAt: stringify(request.last_progress_at),
+    updatedAt: stringify(request.updated_at),
     progressAgeSeconds: typeof value.progress_age_seconds === "number" ? value.progress_age_seconds : null,
     executionAgeSeconds: typeof value.execution_age_seconds === "number" ? value.execution_age_seconds : null,
     totalAgeSeconds: typeof value.total_age_seconds === "number" ? value.total_age_seconds : 0,
@@ -946,8 +986,11 @@ function toRunHealthItem(
   const attentionScore = delegation?.attentionScore ?? 0;
   const attentionPriority = (delegation?.attentionPriority ?? "low") as RunHealthItem["attentionPriority"];
   const attentionAction = delegation?.attentionAction ?? "continue_monitoring";
+  const operatorRequiredRequests = runRequests.filter((item) => item.healthState === "operator_required").length;
+  const stuckRequests = runRequests.filter((item) => item.healthState === "stuck").length;
+  const abandonedRequests = runRequests.filter((item) => item.healthState === "abandoned").length;
   let healthState: RunHealthItem["healthState"] = "healthy";
-  if (status === "failed" || degradedRequests > 0 || failedDelegations > 0) {
+  if (status === "waiting_for_operator" || operatorRequiredRequests > 0 || status === "failed" || degradedRequests > 0 || failedDelegations > 0 || stuckRequests > 0 || abandonedRequests > 0) {
     healthState = "needs_operator";
   } else if (activeRequests > 0 || activeDelegations > 0 || status === "running" || status === "paused") {
     healthState = "watch";
@@ -977,5 +1020,25 @@ function toRunHealthItem(
     attentionAction,
     healthState,
     summary,
+  };
+}
+
+function toWorkerHealthItem(value: Record<string, unknown> | null | undefined): WorkerHealthItem | null {
+  if (!value) {
+    return null;
+  }
+  const workerId = stringify(value.worker_id);
+  const queueName = stringify(value.queue_name);
+  if (!workerId || !queueName) {
+    return null;
+  }
+  return {
+    workerId,
+    queueName,
+    status: stringify(value.status) ?? "unknown",
+    healthStatus: stringify(value.health_status) ?? "unknown",
+    activeSessions: typeof value.active_sessions === "number" ? value.active_sessions : 0,
+    currentRuns: Array.isArray(value.current_runs) ? value.current_runs.map(String) : [],
+    lastHeartbeat: stringify(value.last_heartbeat),
   };
 }

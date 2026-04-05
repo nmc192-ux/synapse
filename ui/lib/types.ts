@@ -113,6 +113,10 @@ export type RequestHealthItem = {
   healthState: string;
   recoveryClass: string;
   recoverySummary?: string | null;
+  statusReason?: string | null;
+  startedAt?: string | null;
+  lastProgressAt?: string | null;
+  updatedAt?: string | null;
   progressAgeSeconds?: number | null;
   executionAgeSeconds?: number | null;
   totalAgeSeconds: number;
@@ -149,5 +153,16 @@ export type DashboardState = {
   interventions: InterventionItem[];
   requestHealth: RequestHealthItem[];
   runHealth: RunHealthItem[];
+  workers: WorkerHealthItem[];
   page: PageState;
+};
+
+export type WorkerHealthItem = {
+  workerId: string;
+  queueName: string;
+  status: string;
+  healthStatus: string;
+  activeSessions: number;
+  currentRuns: string[];
+  lastHeartbeat?: string | null;
 };

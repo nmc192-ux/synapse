@@ -64,6 +64,7 @@ class BrowserWorkerPool:
         self._session_urls: dict[str, str | None] = {}
         self._pending: dict[str, asyncio.Future[BrowserTaskResult]] = {}
         self._request_alerts: set[tuple[str, EventType]] = set()
+        self._worker_dispatch_backlog: dict[str, int] = {}
         self._next_worker_index = 0
 
     def set_state_store(self, state_store: RuntimeStateStore) -> None:
@@ -98,6 +99,7 @@ class BrowserWorkerPool:
                 request_progress_callback=self._on_request_progress,
             )
             self._workers[worker_id] = worker
+            self._worker_dispatch_backlog[worker_id] = 0
             await worker.start()
             worker.state.controller_id = self.controller_id
             worker.state.health_status = WorkerHealthStatus.HEALTHY
@@ -109,6 +111,7 @@ class BrowserWorkerPool:
             await worker.stop()
             await self._persist_worker_state(worker.worker_id)
         self._workers.clear()
+        self._worker_dispatch_backlog.clear()
         self._session_workers.clear()
         self._session_runs.clear()
         self._session_urls.clear()
@@ -125,7 +128,7 @@ class BrowserWorkerPool:
         run_id: str | None = None,
         worker_id: str | None = None,
     ) -> BrowserSession:
-        worker_id = worker_id or self._choose_worker_id(session_id=session_id)
+        worker_id = worker_id or await self._choose_create_session_worker_id(session_id=session_id)
         payload = await self._dispatch(
             worker_id,
             BrowserTaskEnvelope(
@@ -422,6 +425,7 @@ class BrowserWorkerPool:
         self._request_alerts.discard((item.action_id, EventType.WORKER_REQUEST_SLOW))
         self._request_alerts.discard((item.action_id, EventType.WORKER_REQUEST_STUCK))
         await self._persist_request(worker_id, item, status="dispatched")
+        self._increment_dispatch_backlog(worker_id)
         await worker.queue.put(item)
         if self._event_publisher is not None:
             await self._event_publisher(
@@ -451,6 +455,7 @@ class BrowserWorkerPool:
     async def _handle_result(self, result: BrowserTaskResult) -> None:
         if not await self._accept_result(result):
             return
+        self._release_dispatch_backlog(result.worker_id)
         future = self._pending.pop(result.action_id, None)
         if future is not None and not future.done():
             future.set_result(result)
@@ -469,7 +474,16 @@ class BrowserWorkerPool:
         workers = await self.list_registered_workers()
         if not workers:
             raise RuntimeError("No dispatchable browser workers available.")
-        workers.sort(key=lambda item: (item.active_sessions, item.last_heartbeat))
+        workers.sort(key=self._dispatch_score)
+        return workers[0].worker_id
+
+    async def _choose_create_session_worker_id(self, *, session_id: str | None = None) -> str:
+        if session_id is not None and session_id in self._session_workers:
+            return self._session_workers[session_id]
+        workers = await self.list_registered_workers()
+        if not workers:
+            return self._choose_worker_id(session_id=session_id)
+        workers.sort(key=self._dispatch_score)
         return workers[0].worker_id
 
     async def _require_worker_id(self, session_id: str) -> str:
@@ -528,6 +542,32 @@ class BrowserWorkerPool:
             session_id for session_id, assigned in self._session_workers.items() if assigned == worker_id
         )
         asyncio.create_task(self._persist_worker_state(worker_id))
+
+    def _dispatch_score(self, worker: BrowserWorkerState) -> tuple[int, int, int, int, int, float, str]:
+        health_rank = 0 if worker.health_status == WorkerHealthStatus.HEALTHY else 1
+        backlog = self._worker_dispatch_backlog.get(worker.worker_id, 0)
+        busy_rank = 1 if worker.status == WorkerRuntimeStatus.BUSY or worker.current_request_id is not None else 0
+        return (
+            health_rank,
+            backlog,
+            busy_rank,
+            worker.active_sessions,
+            len(worker.current_runs),
+            -worker.last_heartbeat.timestamp(),
+            worker.worker_id,
+        )
+
+    def _increment_dispatch_backlog(self, worker_id: str) -> None:
+        self._worker_dispatch_backlog[worker_id] = self._worker_dispatch_backlog.get(worker_id, 0) + 1
+
+    def _release_dispatch_backlog(self, worker_id: str | None) -> None:
+        if worker_id is None:
+            return
+        current = self._worker_dispatch_backlog.get(worker_id, 0)
+        if current <= 0:
+            self._worker_dispatch_backlog[worker_id] = 0
+            return
+        self._worker_dispatch_backlog[worker_id] = current - 1
 
     def _update_session_url(self, session_id: str, payload: Any) -> None:
         url: str | None = None
@@ -606,6 +646,7 @@ class BrowserWorkerPool:
         )
 
     async def _on_request_started(self, worker_id: str, item: BrowserTaskEnvelope) -> None:
+        self._release_dispatch_backlog(worker_id)
         request = await self._load_existing_request(item.run_id, item.action_id)
         now = datetime.now(timezone.utc)
         if request is not None:
@@ -613,9 +654,12 @@ class BrowserWorkerPool:
                 **request.payload,
                 "lifecycle_stage": "started",
                 "lifecycle_started_at": now.isoformat(),
+                "worker_claimed_at": now.isoformat(),
             }
             if request.action == "create_session" and bool(request.payload.get("bootstrap_dispatch_degraded")):
                 payload["bootstrap_degraded"] = True
+                payload["bootstrap_dispatch_degraded"] = False
+                payload["bootstrap_dispatch_cleared_at"] = now.isoformat()
             await self._run_store.save_worker_request(
                 request.model_copy(
                     update={
@@ -1104,6 +1148,8 @@ class BrowserWorkerPool:
             }
         )
         await self._run_store.save_worker_request(updated)
+        if request.started_at is None:
+            self._release_dispatch_backlog(request.worker_id)
         self._request_alerts.discard((request.action_id, EventType.WORKER_REQUEST_SLOW))
         self._request_alerts.discard((request.action_id, EventType.WORKER_REQUEST_STUCK))
         await self._emit_worker_event(
@@ -1157,6 +1203,8 @@ class BrowserWorkerPool:
             }
         )
         await self._run_store.save_worker_request(updated)
+        if request.started_at is None:
+            self._release_dispatch_backlog(request.worker_id)
         self._request_alerts.discard((request.action_id, EventType.WORKER_REQUEST_SLOW))
         self._request_alerts.discard((request.action_id, EventType.WORKER_REQUEST_STUCK))
         await self._emit_worker_event(
@@ -1194,6 +1242,8 @@ class BrowserWorkerPool:
             }
         )
         await self._run_store.save_worker_request(updated)
+        if request.started_at is None:
+            self._release_dispatch_backlog(request.worker_id)
         self._request_alerts.discard((request.action_id, EventType.WORKER_REQUEST_SLOW))
         self._request_alerts.discard((request.action_id, EventType.WORKER_REQUEST_STUCK))
         await self._emit_worker_event(
@@ -1511,6 +1561,7 @@ class BrowserWorkerPool:
                     await self._run_store.save_worker_request(
                         request.model_copy(update={"status": result.status, "updated_at": datetime.now(timezone.utc)})
                     )
+                    self._release_dispatch_backlog(request.worker_id)
                     await self._emit_worker_event(
                         EventType.WORKER_RESULT_REPLAYED,
                         run_id=request.run_id,
@@ -1533,6 +1584,8 @@ class BrowserWorkerPool:
                             }
                         )
                     )
+                    if request.started_at is None:
+                        self._release_dispatch_backlog(request.worker_id)
                     await self._emit_worker_event(
                         EventType.WORKER_REQUEST_RECOVERED,
                         run_id=request.run_id,

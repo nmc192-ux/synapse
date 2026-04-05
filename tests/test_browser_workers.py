@@ -1529,6 +1529,59 @@ def test_browser_worker_pool_prefers_less_loaded_worker_for_create_session() -> 
     asyncio.run(scenario())
 
 
+def test_browser_worker_pool_prefers_live_local_worker_state_over_stale_registry() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=2,
+            heartbeat_interval_seconds=0.05,
+            lease_timeout_seconds=0.1,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker"),
+            run_store=run_store,
+            controller_id="controller-live-worker-state",
+        )
+
+        await pool.start()
+        try:
+            worker_one_id = "controller-live-worker-state:browser-worker-1"
+            worker_two_id = "controller-live-worker-state:browser-worker-2"
+
+            # Durable state may still say both workers are idle; local state must win for dispatch.
+            await run_store.save_worker(
+                BrowserWorkerState(
+                    worker_id=worker_one_id,
+                    queue_name="queue-1",
+                    controller_id="controller-live-worker-state",
+                    status=WorkerRuntimeStatus.IDLE,
+                    health_status=WorkerHealthStatus.HEALTHY,
+                )
+            )
+            await run_store.save_worker(
+                BrowserWorkerState(
+                    worker_id=worker_two_id,
+                    queue_name="queue-2",
+                    controller_id="controller-live-worker-state",
+                    status=WorkerRuntimeStatus.IDLE,
+                    health_status=WorkerHealthStatus.HEALTHY,
+                )
+            )
+
+            pool._workers[worker_one_id].state.status = WorkerRuntimeStatus.BUSY
+            pool._workers[worker_one_id].state.current_request_id = "request-busy"
+            pool._workers[worker_two_id].state.status = WorkerRuntimeStatus.IDLE
+            pool._workers[worker_two_id].state.current_request_id = None
+
+            chosen = await pool._choose_create_session_worker_id()
+
+            assert chosen == worker_two_id
+        finally:
+            await pool.stop()
+
+    asyncio.run(scenario())
+
+
 def test_browser_worker_pool_records_first_progress_timestamp() -> None:
     async def scenario() -> None:
         store = InMemoryRuntimeStateStore()

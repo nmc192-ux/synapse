@@ -328,22 +328,35 @@ class BrowserWorkerPool:
         return [worker.state.model_copy(deep=True) for worker in self._workers.values()]
 
     async def list_registered_workers(self) -> list[BrowserWorkerState]:
+        local_workers = {
+            worker_id: self._with_computed_health(worker.state.model_copy(deep=True), datetime.now(timezone.utc))
+            for worker_id, worker in self._workers.items()
+        }
         if self._run_store is not None:
             registered = await self._run_store.list_workers()
             if registered:
                 now = datetime.now(timezone.utc)
                 dispatchable: list[BrowserWorkerState] = []
+                seen_worker_ids: set[str] = set()
                 for worker in registered:
-                    if worker.controller_id != self.controller_id:
+                    if worker.controller_id != self.controller_id and worker.worker_id not in local_workers:
                         continue
-                    refreshed = self._with_computed_health(worker, now)
+                    refreshed = local_workers.get(worker.worker_id) or self._with_computed_health(worker, now)
                     if not self._worker_dispatchable(refreshed):
                         continue
                     if refreshed.health_status in {WorkerHealthStatus.HEALTHY, WorkerHealthStatus.DEGRADED}:
                         dispatchable.append(refreshed)
+                        seen_worker_ids.add(refreshed.worker_id)
+                for worker_id, worker in local_workers.items():
+                    if worker_id in seen_worker_ids:
+                        continue
+                    if not self._worker_dispatchable(worker):
+                        continue
+                    if worker.health_status in {WorkerHealthStatus.HEALTHY, WorkerHealthStatus.DEGRADED}:
+                        dispatchable.append(worker)
                 if dispatchable:
                     return dispatchable
-        return self.list_workers()
+        return list(local_workers.values()) if local_workers else self.list_workers()
 
     @staticmethod
     def _worker_dispatchable(worker: BrowserWorkerState) -> bool:
@@ -481,11 +494,35 @@ class BrowserWorkerPool:
     async def _choose_create_session_worker_id(self, *, session_id: str | None = None) -> str:
         if session_id is not None and session_id in self._session_workers:
             return self._session_workers[session_id]
-        workers = await self.list_registered_workers()
+        workers = await self._wait_for_idle_create_session_worker()
         if not workers:
             return self._choose_worker_id(session_id=session_id)
         workers.sort(key=self._dispatch_score)
         return workers[0].worker_id
+
+    async def _wait_for_idle_create_session_worker(self) -> list[BrowserWorkerState]:
+        deadline = datetime.now(timezone.utc).timestamp() + self._create_session_dispatch_wait_seconds()
+        best_workers: list[BrowserWorkerState] = []
+        while True:
+            workers = await self.list_registered_workers()
+            if not workers:
+                return best_workers
+            best_workers = workers
+            idle_workers = [
+                worker
+                for worker in workers
+                if worker.status == WorkerRuntimeStatus.IDLE
+                and worker.current_request_id is None
+                and self._worker_dispatch_backlog.get(worker.worker_id, 0) == 0
+            ]
+            if idle_workers:
+                return idle_workers
+            if datetime.now(timezone.utc).timestamp() >= deadline:
+                return best_workers
+            await asyncio.sleep(0.01)
+
+    def _create_session_dispatch_wait_seconds(self) -> float:
+        return min(0.25, max(0.03, self.heartbeat_interval_seconds))
 
     async def _require_worker_id(self, session_id: str) -> str:
         worker_id = self._session_workers.get(session_id)

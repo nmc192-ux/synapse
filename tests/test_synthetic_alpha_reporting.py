@@ -426,6 +426,44 @@ def test_request_health_summary_counts_abandoned_and_operator_required() -> None
     assert summary['unresolved'] == 1
 
 
+def test_request_backlog_subtype_summary_classifies_operator_review_and_unresolved() -> None:
+    telemetry_events = [
+        {
+            'event_type': 'browser.request_health.operator_required',
+            'project_alias': 'steady',
+            'timestamp': '2026-03-28T00:00:41+00:00',
+            'run_id': 'run-1',
+            'details': {
+                'request_signal_key': 'run-1:action-1:operator_required:t-1',
+                'action': 'create_session',
+                'status_reason': 'session bootstrap stalled after degraded progress and requires operator intervention',
+                'started_at': None,
+                'last_progress_at': '2026-03-28T00:00:40+00:00',
+            },
+        },
+        {
+            'event_type': 'browser.request_health.stuck',
+            'project_alias': 'steady',
+            'timestamp': '2026-03-28T00:00:42+00:00',
+            'run_id': 'run-1',
+            'details': {
+                'request_signal_key': 'run-1:action-2:stuck:t-2',
+                'action': 'click',
+                'status_reason': 'request started on a worker but reported no durable progress within 60.00s',
+                'started_at': '2026-03-28T00:00:10+00:00',
+                'last_progress_at': '2026-03-28T00:00:12+00:00',
+                'is_active': True,
+                'has_result': False,
+            },
+        },
+    ]
+
+    summary = common.request_backlog_subtype_summary(telemetry_events)
+
+    assert summary['operator_required:bootstrap_stalled'] == 1
+    assert summary['unresolved:started_no_durable_progress'] == 1
+
+
 def test_stale_ownership_metrics_only_count_explicit_stale_signals() -> None:
     run = common.RunState(
         run_id='run-stale',
@@ -633,6 +671,7 @@ def test_compute_project_metrics_uses_operator_review_fallbacks(monkeypatch: pyt
     assert metrics['request_health_summary']['operator_required'] == 1
     assert metrics['request_health_summary']['operator_review_overdue'] == 0
     assert metrics['request_health_summary']['unresolved'] == 1
+    assert metrics['request_backlog_subtypes'] == {}
 
 
 def test_compute_project_metrics_bounds_stale_operator_review_backlog(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -666,3 +705,14 @@ def test_compute_project_metrics_bounds_stale_operator_review_backlog(monkeypatc
     assert metrics['request_health_summary']['operator_required'] == 1
     assert metrics['request_health_summary']['operator_review_overdue'] == 1
     assert metrics['request_health_summary']['unresolved'] == 0
+
+
+def test_build_daily_report_includes_backlog_subtypes() -> None:
+    steady = reporter.fixture_project_summary("steady", 48, 42, 6, 3)
+    chaos = reporter.fixture_project_summary("chaos", 28, 22, 6, 5)
+    summary = common.overall_metrics([steady, chaos])
+
+    report = reporter.build_daily_report([steady, chaos], summary)
+
+    assert "## Backlog Subtypes" in report
+    assert "operator_required:bootstrap_stalled" in report

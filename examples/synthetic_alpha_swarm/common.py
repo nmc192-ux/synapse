@@ -542,6 +542,8 @@ def normalize_worker_request_health_to_telemetry(
         "execution_age_seconds": health_view.get("execution_age_seconds"),
         "progress_age_seconds": health_view.get("progress_age_seconds"),
         "status_reason": status_reason,
+        "started_at": request.get("started_at"),
+        "last_progress_at": request.get("last_progress_at"),
         "updated_at": request.get("updated_at"),
         "completed_at": request.get("completed_at") or result.get("completed_at"),
     }
@@ -1368,6 +1370,75 @@ def request_health_summary(telemetry_events: list[dict[str, Any]]) -> dict[str, 
     return counts
 
 
+def _request_backlog_reason_family(details: dict[str, Any]) -> str:
+    reason = str(details.get("status_reason") or "").strip().lower()
+    action = str(details.get("action") or "").strip().lower()
+    started_at = details.get("started_at")
+    last_progress_at = details.get("last_progress_at")
+
+    if "ownership conflict" in reason or "owned by a different controller" in reason:
+        return "ownership_conflict"
+    if "lease ownership moved" in reason or "lease is no longer present" in reason or "lease moved" in reason:
+        return "lease_moved"
+    if "bootstrap did not start" in reason or "has not started on a worker" in reason:
+        return "bootstrap_not_started"
+    if "session bootstrap stalled" in reason or "bootstrap exceeded" in reason:
+        return "bootstrap_stalled"
+    if "reported no durable progress" in reason:
+        return "started_no_durable_progress"
+    if "repeated progress heartbeats" in reason or "stopped reporting durable progress" in reason:
+        return "progress_heartbeat_stall"
+    if "after worker start without durable convergence" in reason:
+        return "aged_after_start"
+    if "recovery path" in reason:
+        return "recovery_path_regressed"
+    if "requires operator intervention" in reason and action == "create_session":
+        return "bootstrap_operator_review"
+    if "requires operator intervention" in reason:
+        return "operator_review_other"
+    if "without a durable result" in reason:
+        return "generic_timeout_after_start" if started_at else "generic_timeout_before_start"
+    if action == "create_session" and started_at is None and last_progress_at:
+        return "bootstrap_not_started"
+    if action == "create_session":
+        return "bootstrap_other"
+    return "other"
+
+
+def request_backlog_subtype_summary(telemetry_events: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    seen_signals: set[str] = set()
+    seen_events: set[str] = set()
+    for event in telemetry_events:
+        event_type = str(event.get("event_type") or "")
+        if event_type not in {"browser.request_stuck", "browser.request_health.stuck", "browser.request_health.operator_required"}:
+            continue
+        details = event.get("details")
+        details = details if isinstance(details, dict) else {}
+        if event_type in {"browser.request_stuck", "browser.request_health.stuck"} and not (
+            details.get("is_active") and not details.get("has_result")
+        ):
+            continue
+        prefix = "operator_required" if event_type == "browser.request_health.operator_required" else "unresolved"
+        signal_id = request_signal_identity(event)
+        if signal_id:
+            dedupe_id = f"{prefix}:{signal_id}"
+            if dedupe_id in seen_signals:
+                continue
+            seen_signals.add(dedupe_id)
+        else:
+            event_id = telemetry_dedupe_key(event_type, details)
+            if event_id:
+                dedupe_id = f"{prefix}:{event_id}"
+                if dedupe_id in seen_events:
+                    continue
+                seen_events.add(dedupe_id)
+        subtype = _request_backlog_reason_family(details)
+        key = f"{prefix}:{subtype}"
+        counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
 def request_signal_identity(event: dict[str, Any]) -> str | None:
     event_type = str(event.get("event_type") or "")
     details = event.get("details")
@@ -1478,6 +1549,7 @@ def compute_project_metrics(
     )
     plugin_denials += sum(1 for event in telemetry_events if str(event.get("event_type")) == "plugin.denial")
     request_health = request_health_summary(telemetry_events)
+    request_backlog_subtypes = request_backlog_subtype_summary(telemetry_events)
     waiting_for_operator_runs = sum(1 for run in runs if run.status.value == "waiting_for_operator")
     pending_operator_review_interventions = sum(
         1
@@ -1532,6 +1604,7 @@ def compute_project_metrics(
         "average_run_latency_seconds": round(sum(latencies) / len(latencies), 2) if latencies else 0.0,
         "per_project_failure_rate": round(failure_rate, 4),
         "request_health_summary": request_health,
+        "request_backlog_subtypes": request_backlog_subtypes,
         "failure_classification": classifications,
         "browser_errors_by_category": browser_categories,
         "intervention_count_by_reason": intervention_reasons,
@@ -1635,6 +1708,7 @@ def overall_metrics(project_snapshots: list[dict[str, Any]]) -> dict[str, Any]:
     intervention_reasons: dict[str, int] = {}
     agent_outcomes: dict[str, dict[str, float | int]] = {}
     intervention_agents: dict[str, int] = {}
+    request_backlog_subtypes: dict[str, int] = {}
     request_health_totals = {
         "slow": 0,
         "stuck": 0,
@@ -1670,6 +1744,8 @@ def overall_metrics(project_snapshots: list[dict[str, Any]]) -> dict[str, Any]:
             intervention_agents[agent_id] = intervention_agents.get(agent_id, 0) + int(count)
         for key, count in snapshot.get("request_health_summary", {}).items():
             request_health_totals[key] = request_health_totals.get(key, 0) + int(count)
+        for key, count in snapshot.get("request_backlog_subtypes", {}).items():
+            request_backlog_subtypes[key] = request_backlog_subtypes.get(key, 0) + int(count)
         waiting_for_operator_runs += int(snapshot.get("waiting_for_operator_runs", 0))
         stale_waiting_for_operator_runs += int(snapshot.get("stale_waiting_for_operator_runs", 0))
         pending_operator_review_interventions += int(snapshot.get("pending_operator_review_interventions", 0))
@@ -1689,6 +1765,7 @@ def overall_metrics(project_snapshots: list[dict[str, Any]]) -> dict[str, Any]:
     totals["per_agent_outcomes"] = dict(sorted(agent_outcomes.items()))
     totals["agents_requiring_intervention"] = dict(sorted(intervention_agents.items(), key=lambda item: (-item[1], item[0])))
     totals["request_health_summary"] = request_health_totals
+    totals["request_backlog_subtypes"] = dict(sorted(request_backlog_subtypes.items(), key=lambda item: (-item[1], item[0])))
     totals["waiting_for_operator_runs"] = waiting_for_operator_runs
     totals["stale_waiting_for_operator_runs"] = stale_waiting_for_operator_runs
     totals["pending_operator_review_interventions"] = pending_operator_review_interventions

@@ -136,6 +136,9 @@ def build_daily_report(projects: list[dict[str, object]], summary: dict[str, obj
     lines.extend(["", "## Agents Requiring Intervention"])
     for agent_id, count in summary["agents_requiring_intervention"].items():
         lines.append(f"- {agent_id}: {count}")
+    lines.extend(["", "## Backlog Subtypes"])
+    for subtype, count in summary.get("request_backlog_subtypes", {}).items():
+        lines.append(f"- {subtype}: {count}")
     for project in projects:
         project_gate = project["alpha_gate"]
         lines.extend(
@@ -163,6 +166,7 @@ def build_daily_report(projects: list[dict[str, object]], summary: dict[str, obj
                 f"- Pending operator-review interventions beyond timeout: {project.get('overdue_operator_review_interventions', 0)}",
                 f"- Failure rate: {project['per_project_failure_rate']:.2%}",
                 f"- Request health slow/stuck/recovered/abandoned/operator-required/operator-review-overdue/completed-after-slow/unresolved: {project['request_health_summary']['slow']}/{project['request_health_summary']['stuck']}/{project['request_health_summary']['recovered']}/{project['request_health_summary']['abandoned']}/{project['request_health_summary']['operator_required']}/{project['request_health_summary']['operator_review_overdue']}/{project['request_health_summary']['completed_after_slow']}/{project['request_health_summary']['unresolved']}",
+                f"- Backlog subtypes: {', '.join(f'{name}={count}' for name, count in project.get('request_backlog_subtypes', {}).items()) or 'none'}",
                 f"- Alpha gate blockers: {', '.join(project_gate.get('release_blockers', [])) or 'none'}",
                 f"- Alpha gate reasons: {', '.join(project_gate['reasons'])}",
             ]
@@ -218,6 +222,9 @@ def build_weekly_review(projects: list[dict[str, object]], summary: dict[str, ob
         f"- Completed after slow/stuck: {summary['request_health_summary']['completed_after_slow']}",
         f"- Unresolved: {summary['request_health_summary']['unresolved']}",
         "",
+        "## Backlog Subtypes",
+        *([f"- {name}: {count}" for name, count in summary.get("request_backlog_subtypes", {}).items()] or ["- none"]),
+        "",
         "## Recommendations",
         *[f"- {reason}" for reason in alpha_gate["reasons"]],
         "",
@@ -252,6 +259,7 @@ def build_dashboard_html(daily_summary: dict[str, object], weekly_summary: dict[
         f"<section class='card'><h2>Daily Summary</h2><p>Runs started: {daily_summary['runs_started']}</p><p>Runs failed: {daily_summary['runs_failed']}</p><p>A2A failures: {daily_summary['a2a_messages_failed']}</p><p>Avg latency: {daily_summary['average_run_latency_seconds']}s</p><p>Waiting for operator: {daily_summary.get('waiting_for_operator_runs', 0)}</p><p>Waiting beyond timeout: {daily_summary.get('stale_waiting_for_operator_runs', 0)}</p><p>Pending operator review: {daily_summary.get('pending_operator_review_interventions', 0)}</p><p>Overdue operator review: {daily_summary.get('overdue_operator_review_interventions', 0)}</p></section>"
         f"<section class='card'><h2>Weekly Summary</h2><p>Runs started: {weekly_summary['runs_started']}</p><p>Runs failed: {weekly_summary['runs_failed']}</p><p>Interventions: {weekly_summary['intervention_count']}</p><p>Plugin denials: {weekly_summary['plugin_denials']}</p></section>"
         f"<section class='card'><h2>Request Health</h2><p>Slow: {daily_summary['request_health_summary']['slow']}</p><p>Stuck: {daily_summary['request_health_summary']['stuck']}</p><p>Recovered: {daily_summary['request_health_summary']['recovered']}</p><p>Abandoned: {daily_summary['request_health_summary']['abandoned']}</p><p>Operator-required: {daily_summary['request_health_summary']['operator_required']}</p><p>Operator-review overdue: {daily_summary['request_health_summary']['operator_review_overdue']}</p><p>Completed after slow: {daily_summary['request_health_summary']['completed_after_slow']}</p><p>Unresolved: {daily_summary['request_health_summary']['unresolved']}</p></section>"
+        f"<section class='card'><h2>Backlog Subtypes</h2><ul>{''.join(f'<li><strong>{name}</strong>: {count}</li>' for name, count in daily_summary.get('request_backlog_subtypes', {}).items()) or '<li>none</li>'}</ul></section>"
         f"<section class='card'><h2>Top Failure Categories</h2><ul>{top_failures}</ul></section>"
         f"<section class='card'><h2>Agents Requiring Intervention</h2><ul>{top_agents}</ul></section>"
         "</div></body></html>"
@@ -291,6 +299,7 @@ def fixture_project_summary(project_alias: str, started: int, completed: int, fa
             "completed_after_slow": 1,
             "unresolved": 0 if project_alias == "steady" else 1,
         },
+        "request_backlog_subtypes": {} if project_alias == "steady" else {"operator_required:bootstrap_stalled": 1},
         "failure_classification": {
             "browser issue": 2 if project_alias == "steady" else 1,
             "scheduler issue": 1 if project_alias == "steady" else 2,

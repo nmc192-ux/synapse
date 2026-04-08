@@ -520,11 +520,11 @@ class BrowserWorkerPool:
             if idle_workers:
                 return idle_workers
             if datetime.now(timezone.utc).timestamp() >= deadline:
-                return best_workers
+                return []
             await asyncio.sleep(0.01)
 
     def _create_session_dispatch_wait_seconds(self) -> float:
-        return min(0.25, max(0.03, self.heartbeat_interval_seconds))
+        return min(1.0, max(self._lease_timeout_seconds, self.heartbeat_interval_seconds * 3))
 
     async def _require_worker_id(self, session_id: str) -> str:
         worker_id = self._session_workers.get(session_id)

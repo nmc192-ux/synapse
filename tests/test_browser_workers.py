@@ -1709,6 +1709,46 @@ def test_browser_worker_pool_prefers_live_local_worker_state_over_stale_registry
     asyncio.run(scenario())
 
 
+def test_browser_worker_pool_waits_for_idle_bootstrap_slot_before_dispatching_create_session() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        controller_id = "controller-bootstrap-admission"
+        worker_id = f"{controller_id}:browser-worker-1"
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            heartbeat_interval_seconds=0.05,
+            lease_timeout_seconds=0.5,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id=controller_id,
+        )
+
+        await pool.start()
+        try:
+            pool._workers[worker_id].state.status = WorkerRuntimeStatus.BUSY
+            pool._workers[worker_id].state.current_request_id = "request-busy"
+
+            async def release_worker() -> None:
+                await asyncio.sleep(0.35)
+                pool._workers[worker_id].state.status = WorkerRuntimeStatus.IDLE
+                pool._workers[worker_id].state.current_request_id = None
+
+            release_task = asyncio.create_task(release_worker())
+            started = datetime.now(timezone.utc)
+            chosen = await pool._choose_create_session_worker_id()
+            waited = (datetime.now(timezone.utc) - started).total_seconds()
+
+            assert chosen == worker_id
+            assert waited >= 0.3
+            await release_task
+        finally:
+            await pool.stop()
+
+    asyncio.run(scenario())
+
+
 def test_browser_worker_pool_records_first_progress_timestamp() -> None:
     async def scenario() -> None:
         store = InMemoryRuntimeStateStore()

@@ -34,7 +34,7 @@ class _StubWorkerPool:
 
 
 class _StubBrowserService:
-    def __init__(self) -> None:
+    def __init__(self, *, create_session_error: Exception | None = None) -> None:
         self.browser = object()
         self.sandbox = SimpleNamespace(set_run_policy=lambda run_id, policy: None)
         self.budget_service = SimpleNamespace(
@@ -43,6 +43,7 @@ class _StubBrowserService:
         )
         self.created_sessions: list[dict[str, object]] = []
         self.saved_sessions: list[dict[str, object]] = []
+        self.create_session_error = create_session_error
 
     async def _ensure_run_budget(self, agent_id: str, run_id: str | None = None) -> None:
         return None
@@ -54,6 +55,8 @@ class _StubBrowserService:
         run_id: str | None = None,
         worker_id: str | None = None,
     ):
+        if self.create_session_error is not None:
+            raise self.create_session_error
         self.created_sessions.append(
             {"session_id": session_id, "agent_id": agent_id, "run_id": run_id, "worker_id": worker_id}
         )
@@ -165,6 +168,26 @@ def test_scheduler_requeues_when_no_workers_available() -> None:
 
         persisted = await run_store.get(run.run_id)
         assert persisted.status == RunStatus.PENDING
+
+    asyncio.run(scenario())
+
+
+def test_scheduler_records_bootstrap_capacity_requeue_reason_code() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        bus = EventBus(WebSocketManager(state_store=store))
+        bus.set_context_resolver(lambda event: _event_context())
+        scheduler = RunScheduler(run_store, _StubWorkerPool([]), bus, cleanup_interval_seconds=60, retry_base_delay_seconds=0.0)
+        run = await run_store.create_run(task_id="task-bootstrap-capacity", agent_id="agent-1")
+
+        await scheduler.mark_assignment_failed(run.run_id, reason="No bootstrap-ready browser workers available.")
+
+        persisted = await run_store.get(run.run_id)
+        assert persisted.status == RunStatus.PENDING
+        assert persisted.metadata["assignment_failure_reason"] == "No bootstrap-ready browser workers available."
+        assert persisted.metadata["assignment_failure_reason_code"] == "bootstrap_capacity_unavailable"
+        assert persisted.metadata["requeue_reason_code"] == "bootstrap_capacity_unavailable"
 
     asyncio.run(scenario())
 
@@ -592,5 +615,52 @@ def test_task_runtime_uses_scheduler_assignment_for_session_creation() -> None:
         result = await runtime.execute_task(TaskRequest(task_id="task-1", agent_id="agent-1", goal="Do work"))
         assert result.run_id is not None
         assert browser_service.created_sessions[0]["worker_id"] == "worker-7"
+
+    asyncio.run(scenario())
+
+
+def test_task_runtime_preserves_bootstrap_capacity_failure_reason() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        agents = AgentRegistry(state_store=store)
+        agent = agents.register(AgentDefinition(agent_id="agent-1", kind=AgentKind.CUSTOM, name="Agent One"))
+        await agents.save_to_store(agent)
+        agents.build_adapter = lambda *args, **kwargs: _StubAdapter()  # type: ignore[method-assign]
+
+        browser_service = _StubBrowserService(create_session_error=RuntimeError("No bootstrap-ready browser workers available."))
+        events = EventBus(WebSocketManager(state_store=store))
+        checkpoint_service = CheckpointService(store, browser_service, events)
+        run_store = RunStore(store)
+        scheduler = RunScheduler(
+            run_store,
+            _StubWorkerPool([BrowserWorkerState(worker_id="worker-7", queue_name="q7", status=WorkerRuntimeStatus.IDLE)]),
+            events,
+            cleanup_interval_seconds=60,
+            retry_base_delay_seconds=0.0,
+        )
+        runtime = TaskRuntime(
+            agents=agents,
+            browser_service=browser_service,
+            tool_service=_StubToolService(),
+            memory_service=MemoryService(_StubMemoryManager()),
+            task_manager=_StubTaskManager(),
+            checkpoint_service=checkpoint_service,
+            run_store=run_store,
+            events=events,
+            safety=_StubSafety(),
+            llm=None,
+            scheduler=scheduler,
+        )
+
+        with pytest.raises(RuntimeError, match="No bootstrap-ready browser workers available."):
+            await runtime.execute_task(TaskRequest(task_id="task-bootstrap-capacity", agent_id="agent-1", goal="Do work"))
+
+        runs = await run_store.list(task_id="task-bootstrap-capacity", agent_id="agent-1")
+        assert len(runs) == 1
+        persisted = runs[0]
+        assert persisted.status == RunStatus.PENDING
+        assert persisted.metadata["assignment_failure_reason"] == "No bootstrap-ready browser workers available."
+        assert persisted.metadata["assignment_failure_reason_code"] == "bootstrap_capacity_unavailable"
+        assert persisted.metadata["requeue_reason_code"] == "bootstrap_capacity_unavailable"
 
     asyncio.run(scenario())

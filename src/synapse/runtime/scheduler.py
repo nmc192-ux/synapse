@@ -176,19 +176,33 @@ class RunScheduler:
     async def mark_assignment_failed(self, run_id: str, *, reason: str) -> RunLease:
         run = await self.run_store.get(run_id)
         attempts = self._assignment_attempts(run) + 1
+        reason_code = self._assignment_reason_code(reason)
         if attempts > self.max_assignment_retries:
             await self.run_store.update_status(
                 run_id,
                 RunStatus.FAILED,
                 current_phase="failed",
-                metadata={"assignment_failure_reason": reason, "assignment_attempts": attempts},
+                metadata={
+                    "assignment_failure_reason": reason,
+                    "assignment_failure_reason_code": reason_code,
+                    "assignment_attempts": attempts,
+                },
             )
             raise RuntimeError(reason)
         await self.run_store.update_metadata(
             run_id,
-            {"assignment_failure_reason": reason, "assignment_attempts": attempts},
+            {
+                "assignment_failure_reason": reason,
+                "assignment_failure_reason_code": reason_code,
+                "assignment_attempts": attempts,
+            },
         )
-        return await self.requeue_run(run_id, reason=reason, attempts=attempts, reassign=True)
+        return await self.requeue_run(
+            run_id,
+            reason=reason,
+            attempts=attempts,
+            reassign=reason_code != "bootstrap_capacity_unavailable",
+        )
 
     async def requeue_run(
         self,
@@ -212,6 +226,7 @@ class RunScheduler:
                 "assigned_worker_id": None,
                 "lease_expires_at": None,
                 "requeue_reason": reason,
+                "requeue_reason_code": self._assignment_reason_code(reason),
                 "assignment_attempts": next_attempts,
                 "next_retry_at": next_retry_at.isoformat(),
                 "retry_backoff_seconds": backoff_seconds,
@@ -223,7 +238,12 @@ class RunScheduler:
             agent_id=run.agent_id,
             task_id=run.task_id,
             source="scheduler",
-            payload={"reason": reason, "attempts": next_attempts, "backoff_seconds": backoff_seconds},
+            payload={
+                "reason": reason,
+                "reason_code": self._assignment_reason_code(reason),
+                "attempts": next_attempts,
+                "backoff_seconds": backoff_seconds,
+            },
             severity=EventSeverity.WARNING,
             correlation_id=run.correlation_id,
         )
@@ -234,7 +254,12 @@ class RunScheduler:
                 agent_id=run.agent_id,
                 task_id=run.task_id,
                 source="scheduler",
-                payload={"reason": reason, "attempts": next_attempts, "backoff_seconds": backoff_seconds},
+                payload={
+                    "reason": reason,
+                    "reason_code": self._assignment_reason_code(reason),
+                    "attempts": next_attempts,
+                    "backoff_seconds": backoff_seconds,
+                },
                 severity=EventSeverity.WARNING,
                 correlation_id=run.correlation_id,
             )
@@ -424,3 +449,14 @@ class RunScheduler:
     def _retry_delay_seconds(self, attempts: int) -> float:
         exponent = max(0, attempts - 1)
         return round(self.retry_base_delay_seconds * (2**exponent), 3)
+
+    @staticmethod
+    def _assignment_reason_code(reason: str) -> str:
+        lowered = reason.lower()
+        if "bootstrap-ready" in lowered:
+            return "bootstrap_capacity_unavailable"
+        if "no browser workers available" in lowered:
+            return "no_browser_workers_available"
+        if "bootstrap failed" in lowered:
+            return "browser_session_bootstrap_failed"
+        return "assignment_failed"

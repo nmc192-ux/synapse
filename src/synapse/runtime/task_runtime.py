@@ -114,12 +114,12 @@ class TaskRuntime:
                         str(uuid.uuid4()),
                         **create_session_kwargs,
                     )
-            except Exception:
+            except Exception as exc:
                 if self.scheduler is not None:
                     try:
                         await self.scheduler.mark_assignment_failed(
                             run.run_id,
-                            reason="Browser session bootstrap failed.",
+                            reason=self._browser_session_failure_reason(exc),
                         )
                     except RuntimeError:
                         pass
@@ -345,6 +345,13 @@ class TaskRuntime:
         finding = self.safety.validate_task(request)
         if finding is not None:
             await self._raise_security_alert(request.agent_id, request.session_id, finding)
+
+    @staticmethod
+    def _browser_session_failure_reason(exc: Exception) -> str:
+        message = str(exc).strip()
+        if message == "No bootstrap-ready browser workers available.":
+            return message
+        return "Browser session bootstrap failed."
 
     async def _raise_security_alert(
         self,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from synapse.config import settings
@@ -362,10 +362,20 @@ class BrowserWorkerPool:
 
     @staticmethod
     def _worker_dispatchable(worker: BrowserWorkerState) -> bool:
-        drain_state = str(worker.metadata.get("drain_state", "")).lower() if isinstance(worker.metadata, dict) else ""
+        metadata = worker.metadata if isinstance(worker.metadata, dict) else {}
+        drain_state = str(metadata.get("drain_state", "")).lower()
+        quarantine_until = metadata.get("bootstrap_quarantine_until")
+        if isinstance(quarantine_until, str) and quarantine_until:
+            try:
+                if datetime.fromisoformat(quarantine_until) > datetime.now(timezone.utc):
+                    return False
+            except ValueError:
+                return False
         if drain_state in {"draining", "maintenance"}:
             return False
-        if isinstance(worker.metadata, dict) and worker.metadata.get("dispatchable") is False:
+        if drain_state == "bootstrap_quarantine":
+            return False
+        if metadata.get("dispatchable") is False:
             return False
         return True
 
@@ -597,6 +607,59 @@ class BrowserWorkerPool:
             worker.worker_id,
         )
 
+    def _bootstrap_quarantine_threshold(self) -> int:
+        return 2
+
+    def _bootstrap_quarantine_seconds(self) -> float:
+        return max(1.0, self._lease_timeout_seconds * 4)
+
+    def _clear_worker_bootstrap_penalty(self, worker_id: str | None) -> None:
+        if worker_id is None:
+            return
+        worker = self._workers.get(worker_id)
+        if worker is None:
+            return
+        metadata = dict(worker.state.metadata)
+        changed = False
+        for key in (
+            "bootstrap_failure_streak",
+            "bootstrap_last_failure_reason_code",
+            "bootstrap_quarantine_until",
+            "bootstrap_quarantined_at",
+        ):
+            if key in metadata:
+                metadata.pop(key, None)
+                changed = True
+        if metadata.get("drain_state") == "bootstrap_quarantine":
+            metadata.pop("drain_state", None)
+            changed = True
+        if metadata.get("dispatchable") is False:
+            metadata.pop("dispatchable", None)
+            changed = True
+        if not changed:
+            return
+        worker.state.metadata = metadata
+        self._refresh_worker_state(worker_id)
+
+    def _record_worker_bootstrap_failure(self, worker_id: str | None, *, reason_code: str) -> None:
+        if worker_id is None:
+            return
+        worker = self._workers.get(worker_id)
+        if worker is None:
+            return
+        now = datetime.now(timezone.utc)
+        metadata = dict(worker.state.metadata)
+        streak = int(metadata.get("bootstrap_failure_streak", 0)) + 1
+        metadata["bootstrap_failure_streak"] = streak
+        metadata["bootstrap_last_failure_reason_code"] = reason_code
+        if streak >= self._bootstrap_quarantine_threshold():
+            metadata["dispatchable"] = False
+            metadata["drain_state"] = "bootstrap_quarantine"
+            metadata["bootstrap_quarantined_at"] = now.isoformat()
+            metadata["bootstrap_quarantine_until"] = (now + timedelta(seconds=self._bootstrap_quarantine_seconds())).isoformat()
+        worker.state.metadata = metadata
+        self._refresh_worker_state(worker_id)
+
     def _increment_dispatch_backlog(self, worker_id: str) -> None:
         self._worker_dispatch_backlog[worker_id] = self._worker_dispatch_backlog.get(worker_id, 0) + 1
 
@@ -731,6 +794,7 @@ class BrowserWorkerPool:
         }
 
         if milestone == "runtime_entered":
+            self._clear_worker_bootstrap_penalty(worker_id)
             payload["worker_claimed_at"] = payload.get("worker_claimed_at") or now.isoformat()
             payload["execution_started_at"] = payload.get("execution_started_at") or now.isoformat()
             if bool(payload.get("bootstrap_dispatch_degraded")):
@@ -1435,6 +1499,11 @@ class BrowserWorkerPool:
             }
         )
         await self._run_store.save_worker_request(updated)
+        if request.action == "create_session" and reason_code in {
+            "session_bootstrap_not_started",
+            "session_bootstrap_claimed_not_entered",
+        }:
+            self._record_worker_bootstrap_failure(request.worker_id, reason_code=reason_code)
         if request.started_at is None:
             self._release_dispatch_backlog(request.worker_id)
         self._request_alerts.discard((request.action_id, EventType.WORKER_REQUEST_SLOW))

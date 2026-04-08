@@ -1749,6 +1749,41 @@ def test_browser_worker_pool_waits_for_idle_bootstrap_slot_before_dispatching_cr
     asyncio.run(scenario())
 
 
+def test_browser_worker_pool_quarantines_worker_after_repeated_bootstrap_pre_start_failures() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        controller_id = "controller-bootstrap-quarantine"
+        worker_one_id = f"{controller_id}:browser-worker-1"
+        worker_two_id = f"{controller_id}:browser-worker-2"
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=2,
+            heartbeat_interval_seconds=0.05,
+            lease_timeout_seconds=0.1,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker"),
+            run_store=run_store,
+            controller_id=controller_id,
+        )
+
+        await pool.start()
+        try:
+            pool._record_worker_bootstrap_failure(worker_one_id, reason_code="session_bootstrap_not_started")
+            pool._record_worker_bootstrap_failure(worker_one_id, reason_code="session_bootstrap_not_started")
+
+            chosen = await pool._choose_create_session_worker_id()
+
+            assert chosen == worker_two_id
+            worker_one = pool._workers[worker_one_id].state
+            assert worker_one.metadata["drain_state"] == "bootstrap_quarantine"
+            assert worker_one.metadata["dispatchable"] is False
+            assert isinstance(worker_one.metadata["bootstrap_quarantine_until"], str)
+        finally:
+            await pool.stop()
+
+    asyncio.run(scenario())
+
+
 def test_browser_worker_pool_records_first_progress_timestamp() -> None:
     async def scenario() -> None:
         store = InMemoryRuntimeStateStore()

@@ -541,6 +541,8 @@ def normalize_worker_request_health_to_telemetry(
         "total_age_seconds": health_view.get("total_age_seconds"),
         "execution_age_seconds": health_view.get("execution_age_seconds"),
         "progress_age_seconds": health_view.get("progress_age_seconds"),
+        "recovery_class": health_view.get("recovery_class"),
+        "recovery_summary": health_view.get("recovery_summary"),
         "status_reason": status_reason,
         "started_at": request.get("started_at"),
         "last_progress_at": request.get("last_progress_at"),
@@ -1374,9 +1376,12 @@ def request_health_summary(telemetry_events: list[dict[str, Any]]) -> dict[str, 
 def _request_backlog_reason_family(details: dict[str, Any]) -> str:
     reason = str(details.get("status_reason") or "").strip().lower()
     action = str(details.get("action") or "").strip().lower()
+    recovery_class = str(details.get("recovery_class") or "").strip().lower()
     started_at = details.get("started_at")
     last_progress_at = details.get("last_progress_at")
 
+    if recovery_class == "bootstrap_requeue":
+        return "bootstrap_requeue_claimed_not_entered"
     if "ownership conflict" in reason or "owned by a different controller" in reason:
         return "ownership_conflict"
     if "lease ownership moved" in reason or "lease is no longer present" in reason or "lease moved" in reason:
@@ -1412,7 +1417,12 @@ def request_backlog_subtype_summary(telemetry_events: list[dict[str, Any]]) -> d
     seen_events: set[str] = set()
     for event in telemetry_events:
         event_type = str(event.get("event_type") or "")
-        if event_type not in {"browser.request_stuck", "browser.request_health.stuck", "browser.request_health.operator_required"}:
+        if event_type not in {
+            "browser.request_stuck",
+            "browser.request_health.stuck",
+            "browser.request_health.operator_required",
+            "browser.request_health.abandoned",
+        }:
             continue
         details = event.get("details")
         details = details if isinstance(details, dict) else {}
@@ -1420,7 +1430,12 @@ def request_backlog_subtype_summary(telemetry_events: list[dict[str, Any]]) -> d
             details.get("is_active") and not details.get("has_result")
         ):
             continue
-        prefix = "operator_required" if event_type == "browser.request_health.operator_required" else "unresolved"
+        if event_type == "browser.request_health.operator_required":
+            prefix = "operator_required"
+        elif event_type == "browser.request_health.abandoned":
+            prefix = "abandoned"
+        else:
+            prefix = "unresolved"
         signal_id = request_signal_identity(event)
         if signal_id:
             dedupe_id = f"{prefix}:{signal_id}"

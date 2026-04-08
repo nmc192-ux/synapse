@@ -522,6 +522,8 @@ class RunStore:
         if health_state == "recovered":
             return "recovered", reason or "request resumed after a recovery path"
         if health_state == "abandoned":
+            if RunStore._is_bootstrap_requeue_abandonment(request, lowered):
+                return "bootstrap_requeue", reason or "session bootstrap was abandoned for bounded requeue before worker execution began"
             return "abandoned", reason or "request was abandoned because execution ownership or lease state moved on"
         if health_state == "operator_required":
             return "operator_required", reason or "request requires operator intervention to continue safely"
@@ -540,6 +542,13 @@ class RunStore:
                 return "failed", result.error
             return "steady", reason
         return "steady", reason
+
+    @staticmethod
+    def _is_bootstrap_requeue_abandonment(request: BrowserTaskRequestRecord, lowered_reason: str) -> bool:
+        return request.action == "create_session" and (
+            "requeueing bootstrap on another worker" in lowered_reason
+            or "claimed by a worker but did not enter execution" in lowered_reason
+        )
 
     @staticmethod
     def _ownership_conflict_count(request: BrowserTaskRequestRecord) -> int:

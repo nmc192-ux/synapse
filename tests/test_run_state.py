@@ -538,6 +538,41 @@ def test_worker_request_health_classifies_abandoned_requests() -> None:
     asyncio.run(scenario())
 
 
+def test_worker_request_health_classifies_bootstrap_requeue_abandonment() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        run = await run_store.create_run(
+            task_id="task-bootstrap-requeue",
+            agent_id="agent-1",
+            project_id="development",
+            correlation_id="task-bootstrap-requeue",
+        )
+        await run_store.save_worker_request(
+            BrowserTaskRequestRecord(
+                action_id="action-bootstrap-requeue",
+                request_id="request-bootstrap-requeue",
+                run_id=run.run_id,
+                worker_id="controller-1:browser-worker-1",
+                action="create_session",
+                session_id="session-bootstrap-requeue",
+                task_id="task-bootstrap-requeue",
+                agent_id="agent-1",
+                status="abandoned",
+                status_reason="session bootstrap was claimed by a worker but did not enter execution before timeout; requeueing bootstrap on another worker",
+            )
+        )
+
+        items = await run_store.list_worker_request_health(run_id=run.run_id)
+        assert len(items) == 1
+        assert items[0].health_state == "abandoned"
+        assert items[0].recovery_class == "bootstrap_requeue"
+        assert items[0].recovery_summary is not None
+        assert "requeue" in items[0].recovery_summary
+
+    asyncio.run(scenario())
+
+
 def test_worker_request_health_classifies_operator_required_requests() -> None:
     async def scenario() -> None:
         store = InMemoryRuntimeStateStore()

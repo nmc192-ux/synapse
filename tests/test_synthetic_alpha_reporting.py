@@ -271,6 +271,7 @@ def test_normalize_worker_request_health_to_telemetry_maps_abandoned_and_operato
             },
             'result': None,
             'health_state': 'abandoned',
+            'recovery_class': 'abandoned',
             'has_result': False,
             'is_active': False,
         },
@@ -290,6 +291,7 @@ def test_normalize_worker_request_health_to_telemetry_maps_abandoned_and_operato
             },
             'result': None,
             'health_state': 'operator_required',
+            'recovery_class': 'operator_required',
             'has_result': False,
             'is_active': True,
         },
@@ -300,6 +302,7 @@ def test_normalize_worker_request_health_to_telemetry_maps_abandoned_and_operato
 
     assert [event['event_type'] for event in abandoned_events] == ['browser.request_health.abandoned']
     assert [event['event_type'] for event in operator_events] == ['browser.request_health.operator_required']
+    assert abandoned_events[0]['details']['recovery_class'] == 'abandoned'
 
 
 def test_sync_project_request_health_records_deduped_request_health_events(monkeypatch) -> None:
@@ -470,6 +473,29 @@ def test_request_backlog_subtype_summary_classifies_operator_review_and_unresolv
 
     assert summary['operator_required:bootstrap_stalled'] == 1
     assert summary['unresolved:started_no_durable_progress'] == 1
+
+
+def test_request_backlog_subtype_summary_classifies_bootstrap_requeue_abandonment() -> None:
+    telemetry_events = [
+        {
+            'event_type': 'browser.request_health.abandoned',
+            'project_alias': 'steady',
+            'timestamp': '2026-03-28T00:00:43+00:00',
+            'run_id': 'run-1',
+            'details': {
+                'request_signal_key': 'run-1:action-3:abandoned:t-3',
+                'action': 'create_session',
+                'recovery_class': 'bootstrap_requeue',
+                'status_reason': 'session bootstrap was claimed by a worker but did not enter execution before timeout; requeueing bootstrap on another worker',
+                'started_at': None,
+                'last_progress_at': '2026-03-28T00:00:41+00:00',
+            },
+        }
+    ]
+
+    summary = common.request_backlog_subtype_summary(telemetry_events)
+
+    assert summary['abandoned:bootstrap_requeue_claimed_not_entered'] == 1
 
 
 def test_stale_ownership_metrics_only_count_explicit_stale_signals() -> None:

@@ -56,6 +56,9 @@ class BrowserRuntime:
     def set_event_publisher(self, event_publisher) -> None:
         self.session_manager.set_event_publisher(event_publisher)
 
+    def set_request_milestone_callback(self, callback) -> None:
+        self.session_manager.set_request_milestone_callback(callback)
+
     @property
     def _pages(self):
         return self.session_manager._pages

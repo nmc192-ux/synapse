@@ -26,6 +26,20 @@ class WorkerHealthStatus(str, Enum):
     UNAVAILABLE = "unavailable"
 
 
+class BootstrapLifecycleStage(str, Enum):
+    DISPATCHED = "dispatched"
+    CLAIMED = "claimed"
+    STARTED = "started"
+    RUNTIME_ENTERED = "runtime_entered"
+    BROWSER_CONTEXT_CREATED = "browser_context_created"
+    PAGE_CREATED = "page_created"
+    PROFILE_APPLIED = "profile_applied"
+    SESSION_STATE_SAVED = "session_state_saved"
+    SNAPSHOT_CAPTURED = "snapshot_captured"
+    PROGRESSING = "progressing"
+    SLOW = "slow"
+
+
 class AgentRuntimeRecord(BaseModel):
     agent_id: str
     organization_id: str | None = None

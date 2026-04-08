@@ -6,6 +6,7 @@ from synapse.models.browser import BrowserState, StructuredPageModel
 from synapse.models.run import RunStatus
 from synapse.models.runtime_event import EventType
 from synapse.models.runtime_state import (
+    BootstrapLifecycleStage,
     BrowserSessionOwnershipRecord,
     BrowserSessionState,
     BrowserTaskRequestRecord,
@@ -29,6 +30,7 @@ class _FakeBrowserRuntime:
         self.worker_name = worker_name
         self.started = False
         self.sessions: dict[str, str | None] = {}
+        self._request_milestone_callback = None
 
     async def start(self) -> None:
         self.started = True
@@ -39,8 +41,21 @@ class _FakeBrowserRuntime:
     def set_state_store(self, state_store) -> None:
         self.state_store = state_store
 
+    def set_request_milestone_callback(self, callback) -> None:
+        self._request_milestone_callback = callback
+
+    async def _emit_request_milestone(self, milestone: str, payload: dict[str, object] | None = None) -> None:
+        if self._request_milestone_callback is None:
+            return
+        await self._request_milestone_callback(milestone, payload)
+
     async def create_session(self, session_id: str, agent_id: str | None = None, run_id: str | None = None) -> BrowserSession:
+        await self._emit_request_milestone("runtime_entered", {"session_id": session_id, "run_id": run_id})
         self.sessions[session_id] = None
+        await self._emit_request_milestone("browser_context_created", {"session_id": session_id, "run_id": run_id})
+        await self._emit_request_milestone("page_created", {"session_id": session_id, "run_id": run_id})
+        await self._emit_request_milestone("session_state_saved", {"session_id": session_id, "run_id": run_id})
+        await self._emit_request_milestone("snapshot_captured", {"session_id": session_id, "run_id": run_id})
         return BrowserSession(session_id=session_id, current_url=None, page=StructuredPageModel(title="Blank", url="about:blank"))
 
     async def open(self, session_id: str, url: str) -> BrowserState:
@@ -1147,13 +1162,15 @@ def test_browser_worker_pool_records_worker_claim_before_execution_start() -> No
         assert stored is not None
         assert stored.started_at is None
         assert stored.payload["lifecycle_stage"] == "claimed"
+        assert stored.payload["bootstrap_stage"] == BootstrapLifecycleStage.CLAIMED.value
+        assert isinstance(stored.payload["bootstrap_stage_updated_at"], str)
         assert isinstance(stored.payload["worker_claimed_at"], str)
         assert stored.payload["execution_started_at"] is None
 
     asyncio.run(scenario())
 
 
-def test_browser_worker_pool_records_execution_start_after_claim() -> None:
+def test_browser_worker_pool_records_execution_start_after_runtime_entry_milestone() -> None:
     async def scenario() -> None:
         store = InMemoryRuntimeStateStore()
         run_store = RunStore(store)
@@ -1194,7 +1211,7 @@ def test_browser_worker_pool_records_execution_start_after_claim() -> None:
                 action="create_session",
             ),
         )
-        await pool._on_request_started(
+        await pool._on_request_milestone(
             worker_id,
             BrowserTaskEnvelope(
                 action_id="action-create-session-entry",
@@ -1203,14 +1220,124 @@ def test_browser_worker_pool_records_execution_start_after_claim() -> None:
                 session_id="s1",
                 action="create_session",
             ),
+            "runtime_entered",
+            {"session_id": "s1", "run_id": "run-1"},
         )
 
         stored = await run_store.get_worker_request("run-1", "action-create-session-entry")
         assert stored is not None
         assert stored.started_at is not None
-        assert stored.payload["lifecycle_stage"] == "started"
+        assert stored.payload["lifecycle_stage"] == "bootstrap_runtime_entered"
+        assert stored.payload["bootstrap_stage"] == BootstrapLifecycleStage.RUNTIME_ENTERED.value
+        assert isinstance(stored.payload["bootstrap_stage_updated_at"], str)
         assert isinstance(stored.payload["worker_claimed_at"], str)
         assert isinstance(stored.payload["execution_started_at"], str)
+        assert stored.payload["bootstrap_current_milestone"] == "runtime_entered"
+        assert isinstance(stored.payload["bootstrap_milestones"]["runtime_entered"], str)
+
+    asyncio.run(scenario())
+
+
+def test_browser_worker_pool_records_bootstrap_progress_milestones() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        controller_id = "controller-create-session-milestones"
+        worker_id = f"{controller_id}:browser-worker-1"
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            heartbeat_interval_seconds=0.2,
+            lease_timeout_seconds=0.05,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id=controller_id,
+        )
+
+        stale_time = datetime.now(timezone.utc) - timedelta(seconds=0.1)
+        await run_store.save_worker_request(
+            BrowserTaskRequestRecord(
+                action_id="action-create-session-milestones",
+                request_id="request-create-session-milestones",
+                run_id="run-1",
+                worker_id=worker_id,
+                action="create_session",
+                session_id="s1",
+                status="running",
+                payload={
+                    "session_id": "s1",
+                    "agent_id": "agent-1",
+                    "run_id": "run-1",
+                    "worker_claimed_at": stale_time.isoformat(),
+                    "execution_started_at": stale_time.isoformat(),
+                    "bootstrap_milestones": {
+                        "dispatched": stale_time.isoformat(),
+                        "claimed": stale_time.isoformat(),
+                        "runtime_entered": stale_time.isoformat(),
+                    },
+                    "bootstrap_current_milestone": "runtime_entered",
+                    "progress_heartbeat_count": 0,
+                    "first_progress_at": None,
+                },
+                dispatched_at=stale_time,
+                started_at=stale_time,
+                last_progress_at=stale_time,
+            )
+        )
+
+        await pool._on_request_milestone(
+            worker_id,
+            BrowserTaskEnvelope(
+                action_id="action-create-session-milestones",
+                request_id="request-create-session-milestones",
+                run_id="run-1",
+                session_id="s1",
+                action="create_session",
+            ),
+            "browser_context_created",
+            {"session_id": "s1", "run_id": "run-1"},
+        )
+
+        stored = await run_store.get_worker_request("run-1", "action-create-session-milestones")
+        assert stored is not None
+        assert stored.payload["bootstrap_current_milestone"] == "browser_context_created"
+        assert stored.payload["bootstrap_stage"] == BootstrapLifecycleStage.BROWSER_CONTEXT_CREATED.value
+        assert isinstance(stored.payload["bootstrap_stage_updated_at"], str)
+        assert isinstance(stored.payload["bootstrap_milestones"]["browser_context_created"], str)
+        assert stored.payload["progress_heartbeat_count"] == 1
+        assert isinstance(stored.payload["first_progress_at"], str)
+        assert stored.payload["lifecycle_stage"] == "bootstrap_browser_context_created"
+
+    asyncio.run(scenario())
+
+
+def test_browser_worker_pool_records_final_bootstrap_stage_after_create_session_completion() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            heartbeat_interval_seconds=0.05,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id="controller-create-session-final-stage",
+        )
+
+        await pool.start()
+        try:
+            session = await pool.create_session("s1", agent_id="agent-1", run_id="run-1")
+            assert session.session_id == "s1"
+        finally:
+            await pool.stop()
+
+        requests = await run_store.list_worker_requests(run_id="run-1", session_id="s1")
+        create_request = next(item for item in requests if item.action == "create_session")
+        assert create_request.status == "completed"
+        assert create_request.payload["bootstrap_stage"] == BootstrapLifecycleStage.SNAPSHOT_CAPTURED.value
+        assert create_request.payload["bootstrap_current_milestone"] == "snapshot_captured"
+        assert isinstance(create_request.payload["bootstrap_stage_updated_at"], str)
+        assert isinstance(create_request.payload["bootstrap_milestones"]["snapshot_captured"], str)
 
     asyncio.run(scenario())
 

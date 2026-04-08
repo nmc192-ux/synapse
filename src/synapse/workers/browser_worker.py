@@ -14,6 +14,8 @@ ResultHandler = Callable[[BrowserTaskResult], Awaitable[None]]
 EventPublisher = Callable[[RuntimeEvent], Awaitable[None]]
 HeartbeatCallback = Callable[[str], Awaitable[None]]
 RequestLifecycleCallback = Callable[[str, BrowserTaskEnvelope], Awaitable[None]]
+RequestMilestoneCallback = Callable[[str, BrowserTaskEnvelope, str, dict[str, object] | None], Awaitable[None]]
+RuntimeMilestoneCallback = Callable[[str, dict[str, object] | None], Awaitable[None]]
 
 
 class BrowserWorker:
@@ -29,6 +31,7 @@ class BrowserWorker:
         request_claimed_callback: RequestLifecycleCallback | None = None,
         request_started_callback: RequestLifecycleCallback | None = None,
         request_progress_callback: RequestLifecycleCallback | None = None,
+        request_milestone_callback: RequestMilestoneCallback | None = None,
     ) -> None:
         self.worker_id = worker_id
         self.queue = queue
@@ -40,6 +43,7 @@ class BrowserWorker:
         self.request_claimed_callback = request_claimed_callback
         self.request_started_callback = request_started_callback
         self.request_progress_callback = request_progress_callback
+        self.request_milestone_callback = request_milestone_callback
         self.runtime: Any | None = None
         self.state = BrowserWorkerState(worker_id=worker_id, queue_name=queue.name)
         self._loop_task: asyncio.Task[None] | None = None
@@ -98,10 +102,14 @@ class BrowserWorker:
                 self._current_item = item
                 if self.request_claimed_callback is not None:
                     await self.request_claimed_callback(self.worker_id, item)
-                if self.request_started_callback is not None:
+                handler = getattr(self.runtime, item.action)
+                if hasattr(self.runtime, "set_request_milestone_callback"):
+                    self.runtime.set_request_milestone_callback(
+                        self._bind_runtime_milestones(item)
+                    )
+                if self.request_started_callback is not None and item.action != "create_session":
                     await self.request_started_callback(self.worker_id, item)
                 await self._emit_status_event()
-                handler = getattr(self.runtime, item.action)
                 payload = await handler(**item.arguments)
                 await self.result_handler(
                     BrowserTaskResult(
@@ -133,11 +141,22 @@ class BrowserWorker:
                 )
                 await self._emit_task_completed(item, success=False, error=str(exc))
             finally:
+                if hasattr(self.runtime, "set_request_milestone_callback"):
+                    self.runtime.set_request_milestone_callback(None)
                 self.state.status = WorkerRuntimeStatus.IDLE if self._running else WorkerRuntimeStatus.OFFLINE
                 self.state.current_request_id = None
                 self._current_item = None
                 self.state.last_heartbeat = datetime.now(timezone.utc)
                 await self._emit_status_event()
+
+    def _bind_runtime_milestones(self, item: BrowserTaskEnvelope) -> RuntimeMilestoneCallback | None:
+        if self.request_milestone_callback is None:
+            return None
+
+        async def emit(milestone: str, payload: dict[str, object] | None = None) -> None:
+            await self.request_milestone_callback(self.worker_id, item, milestone, payload)
+
+        return emit
 
     async def _heartbeat_loop(self) -> None:
         while self._running:

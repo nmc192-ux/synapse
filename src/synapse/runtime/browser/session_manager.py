@@ -45,6 +45,7 @@ class SessionManager:
         self._downloads: dict[str, list[dict[str, object]]] = {}
         self._last_urls: dict[str, str | None] = {}
         self._event_publisher = event_publisher
+        self._request_milestone_callback = None
 
     def set_state_store(self, state_store: RuntimeStateStore) -> None:
         self._state_store = state_store
@@ -53,6 +54,9 @@ class SessionManager:
 
     def set_event_publisher(self, event_publisher) -> None:
         self._event_publisher = event_publisher
+
+    def set_request_milestone_callback(self, callback) -> None:
+        self._request_milestone_callback = callback
 
     async def start(self) -> None:
         if self._browser is not None:
@@ -84,8 +88,23 @@ class SessionManager:
     ) -> BrowserSession:
         if self._browser is None:
             raise RuntimeError("Browser runtime is not started.")
+        await self._emit_request_milestone(
+            "runtime_entered",
+            session_id=session_id,
+            run_id=run_id,
+        )
         context = await self._browser.new_context()
+        await self._emit_request_milestone(
+            "browser_context_created",
+            session_id=session_id,
+            run_id=run_id,
+        )
         page = await context.new_page()
+        await self._emit_request_milestone(
+            "page_created",
+            session_id=session_id,
+            run_id=run_id,
+        )
         self._contexts[session_id] = context
         self._pages[session_id] = page
         self._session_agents[session_id] = agent_id
@@ -95,8 +114,25 @@ class SessionManager:
         self._attach_runtime_listeners(session_id, page)
         if run_id is not None and self._profile_manager is not None:
             await self._profile_manager.apply_profile_to_browser(run_id, context, page)
+            await self._emit_request_milestone(
+                "profile_applied",
+                session_id=session_id,
+                run_id=run_id,
+            )
         await self.save_session_state(session_id, extractor, run_id=run_id)
-        return BrowserSession(session_id=session_id, page=await extractor.snapshot_page(page))
+        await self._emit_request_milestone(
+            "session_state_saved",
+            session_id=session_id,
+            run_id=run_id,
+        )
+        snapshot = await extractor.snapshot_page(page)
+        await self._emit_request_milestone(
+            "snapshot_captured",
+            session_id=session_id,
+            run_id=run_id,
+            payload={"current_url": snapshot.url},
+        )
+        return BrowserSession(session_id=session_id, page=snapshot)
 
     async def close_session(self, session_id: str) -> None:
         page = self._pages.pop(session_id, None)
@@ -353,6 +389,23 @@ class SessionManager:
                 correlation_id=self._session_runs.get(session_id) or session_id,
             )
         )
+
+    async def _emit_request_milestone(
+        self,
+        milestone: str,
+        *,
+        session_id: str,
+        run_id: str | None,
+        payload: dict[str, object] | None = None,
+    ) -> None:
+        if self._request_milestone_callback is None:
+            return
+        milestone_payload = {"session_id": session_id}
+        if run_id is not None:
+            milestone_payload["run_id"] = run_id
+        if payload:
+            milestone_payload.update(payload)
+        await self._request_milestone_callback(milestone, milestone_payload)
 
     @staticmethod
     def _failure_text(failure: Any) -> str:

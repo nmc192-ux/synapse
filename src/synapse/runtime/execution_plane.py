@@ -10,6 +10,7 @@ from synapse.runtime.tools import ToolRegistry
 
 
 RuntimeEventPublisher = Callable[[RuntimeEvent], Awaitable[None]]
+RuntimeMilestoneCallback = Callable[[str, dict[str, object] | None], Awaitable[None]]
 
 
 class ExecutionPlane(Protocol):
@@ -40,6 +41,10 @@ class ExecutionPlaneRuntime:
     def set_event_publisher(self, publisher: RuntimeEventPublisher | None) -> None:
         if hasattr(self.browser_runtime, "set_event_publisher"):
             self.browser_runtime.set_event_publisher(publisher)
+
+    def set_request_milestone_callback(self, callback: RuntimeMilestoneCallback | None) -> None:
+        if hasattr(self.browser_runtime, "set_request_milestone_callback"):
+            self.browser_runtime.set_request_milestone_callback(callback)
 
     async def create_session(self, session_id: str, agent_id: str | None = None, run_id: str | None = None):
         return await self.browser_runtime.create_session(session_id, agent_id=agent_id, run_id=run_id)

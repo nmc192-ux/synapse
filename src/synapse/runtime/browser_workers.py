@@ -10,6 +10,7 @@ from synapse.config import settings
 from synapse.models.run import RunStatus
 from synapse.models.runtime_event import EventSeverity, EventType, RuntimeEvent
 from synapse.models.runtime_state import (
+    BootstrapLifecycleStage,
     BrowserSessionState,
     BrowserSessionOwnershipRecord,
     BrowserTaskRequestRecord,
@@ -98,6 +99,7 @@ class BrowserWorkerPool:
                 request_claimed_callback=self._on_request_claimed,
                 request_started_callback=self._on_request_started,
                 request_progress_callback=self._on_request_progress,
+                request_milestone_callback=self._on_request_milestone,
             )
             self._workers[worker_id] = worker
             self._worker_dispatch_backlog[worker_id] = 0
@@ -662,11 +664,14 @@ class BrowserWorkerPool:
                 "lifecycle_action": item.action,
                 "progress_heartbeat_count": 0,
                 "bootstrap_degraded": False,
+                "bootstrap_milestones": {"dispatched": now.isoformat()} if item.action == "create_session" else {},
                 "worker_claimed_at": None,
                 "execution_started_at": None,
                 "first_progress_at": None,
             }
         )
+        if item.action == "create_session":
+            self._set_bootstrap_stage(payload, BootstrapLifecycleStage.DISPATCHED, now)
         await self._run_store.save_worker_request(
             BrowserTaskRequestRecord(
                 action_id=item.action_id,
@@ -684,7 +689,81 @@ class BrowserWorkerPool:
                 started_at=now if status in {"running", "slow", "stuck"} else None,
                 last_progress_at=now if status in {"dispatched", "running", "slow", "stuck"} else None,
             )
-        )
+            )
+
+    @staticmethod
+    def _set_bootstrap_stage(
+        payload: dict[str, object],
+        stage: BootstrapLifecycleStage,
+        now: datetime,
+    ) -> dict[str, object]:
+        payload["bootstrap_stage"] = stage.value
+        payload["bootstrap_stage_updated_at"] = now.isoformat()
+        payload["bootstrap_current_milestone"] = stage.value
+        return payload
+
+    async def _on_request_milestone(
+        self,
+        worker_id: str,
+        item: BrowserTaskEnvelope,
+        milestone: str,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        request = await self._load_existing_request(item.run_id, item.action_id)
+        if request is None or self._run_store is None:
+            return
+        now = datetime.now(timezone.utc)
+        payload = dict(request.payload)
+        existing_milestones = payload.get("bootstrap_milestones")
+        milestone_map = dict(existing_milestones) if isinstance(existing_milestones, dict) else {}
+        milestone_map[milestone] = now.isoformat()
+        payload["bootstrap_milestones"] = milestone_map
+        payload["lifecycle_stage"] = f"bootstrap_{milestone}"
+        if details:
+            payload.update(details)
+        self._set_bootstrap_stage(payload, BootstrapLifecycleStage(milestone), now)
+
+        update_fields: dict[str, object] = {
+            "worker_id": worker_id,
+            "payload": payload,
+            "updated_at": now,
+            "dispatched_at": request.dispatched_at or now,
+        }
+
+        if milestone == "runtime_entered":
+            payload["worker_claimed_at"] = payload.get("worker_claimed_at") or now.isoformat()
+            payload["execution_started_at"] = payload.get("execution_started_at") or now.isoformat()
+            if bool(payload.get("bootstrap_dispatch_degraded")):
+                payload["bootstrap_degraded"] = True
+                payload["bootstrap_dispatch_degraded"] = False
+                payload["bootstrap_dispatch_cleared_at"] = now.isoformat()
+            update_fields["status"] = "running"
+            update_fields["started_at"] = request.started_at or now
+            update_fields["last_progress_at"] = now
+            update_fields["status_reason"] = None
+        else:
+            progress_count = self._progress_heartbeat_count(request) + 1
+            payload["progress_heartbeat_count"] = progress_count
+            payload["first_progress_at"] = payload.get("first_progress_at") or now.isoformat()
+            update_fields["last_progress_at"] = now
+            if request.status in {"slow", "stuck", "recovered"}:
+                update_fields["status"] = "running"
+                update_fields["status_reason"] = "session bootstrap resumed with explicit milestone progress"
+
+        await self._run_store.save_worker_request(request.model_copy(update=update_fields))
+        if milestone == "runtime_entered":
+            await self._emit_worker_event(
+                EventType.WORKER_REQUEST_RUNNING,
+                run_id=item.run_id,
+                session_id=item.session_id,
+                payload={
+                    "worker_id": worker_id,
+                    "action_id": item.action_id,
+                    "request_id": item.request_id,
+                    "action": item.action,
+                    "bootstrap_milestone": milestone,
+                },
+            )
 
     async def _on_request_claimed(self, worker_id: str, item: BrowserTaskEnvelope) -> None:
         self._release_dispatch_backlog(worker_id)
@@ -698,6 +777,12 @@ class BrowserWorkerPool:
                 "execution_started_at": request.payload.get("execution_started_at"),
                 "first_progress_at": request.payload.get("first_progress_at"),
             }
+            if request.action == "create_session":
+                existing_milestones = request.payload.get("bootstrap_milestones")
+                milestone_map = dict(existing_milestones) if isinstance(existing_milestones, dict) else {}
+                milestone_map["claimed"] = now.isoformat()
+                payload["bootstrap_milestones"] = milestone_map
+                self._set_bootstrap_stage(payload, BootstrapLifecycleStage.CLAIMED, now)
             await self._run_store.save_worker_request(
                 request.model_copy(
                     update={
@@ -719,6 +804,12 @@ class BrowserWorkerPool:
                 "worker_claimed_at": request.payload.get("worker_claimed_at") or now.isoformat(),
                 "execution_started_at": request.payload.get("execution_started_at") or now.isoformat(),
             }
+            if request.action == "create_session":
+                existing_milestones = request.payload.get("bootstrap_milestones")
+                milestone_map = dict(existing_milestones) if isinstance(existing_milestones, dict) else {}
+                milestone_map["started"] = now.isoformat()
+                payload["bootstrap_milestones"] = milestone_map
+                self._set_bootstrap_stage(payload, BootstrapLifecycleStage.STARTED, now)
             if request.action == "create_session" and bool(request.payload.get("bootstrap_dispatch_degraded")):
                 payload["bootstrap_degraded"] = True
                 payload["bootstrap_dispatch_degraded"] = False
@@ -769,6 +860,10 @@ class BrowserWorkerPool:
                 "first_progress_at": request.payload.get("first_progress_at") or now.isoformat(),
             },
         }
+        if request.action == "create_session":
+            progress_payload = dict(updates["payload"])
+            self._set_bootstrap_stage(progress_payload, BootstrapLifecycleStage.PROGRESSING, now)
+            updates["payload"] = progress_payload
         emitted_event: tuple[EventType, dict[str, object]] | None = None
         if request.status == "slow":
             if request.action == "create_session":
@@ -996,6 +1091,8 @@ class BrowserWorkerPool:
                 ),
             }
         )
+        if request.action == "create_session":
+            self._set_bootstrap_stage(payload, BootstrapLifecycleStage.SLOW, now)
         updated = request.model_copy(
             update={
                 "status": "slow",
@@ -1367,6 +1464,9 @@ class BrowserWorkerPool:
     ) -> str | None:
         if not success:
             return error or request.status_reason
+        payload = request.payload if isinstance(request.payload, dict) else {}
+        if request.action == "create_session" and bool(payload.get("bootstrap_degraded")):
+            return "completed after slow progress gap"
         if request.status == "slow":
             return "completed after slow progress gap"
         if request.status == "stuck":

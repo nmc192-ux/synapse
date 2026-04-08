@@ -1784,6 +1784,39 @@ def test_browser_worker_pool_quarantines_worker_after_repeated_bootstrap_pre_sta
     asyncio.run(scenario())
 
 
+def test_browser_worker_pool_rejects_create_session_when_no_bootstrap_ready_worker_exists() -> None:
+    async def scenario() -> None:
+        store = InMemoryRuntimeStateStore()
+        run_store = RunStore(store)
+        controller_id = "controller-bootstrap-no-slot"
+        worker_id = f"{controller_id}:browser-worker-1"
+        pool = BrowserWorkerPool(
+            state_store=store,
+            worker_count=1,
+            heartbeat_interval_seconds=0.05,
+            lease_timeout_seconds=0.1,
+            runtime_factory=lambda: _FakeBrowserRuntime(worker_name="worker-1"),
+            run_store=run_store,
+            controller_id=controller_id,
+        )
+
+        await pool.start()
+        try:
+            pool._workers[worker_id].state.status = WorkerRuntimeStatus.BUSY
+            pool._workers[worker_id].state.current_request_id = "request-busy"
+
+            try:
+                await pool.create_session("s1", agent_id="agent-1", run_id="run-1")
+            except RuntimeError as exc:
+                assert str(exc) == "No bootstrap-ready browser workers available."
+            else:
+                raise AssertionError("expected create_session to fail when no bootstrap-ready worker exists")
+        finally:
+            await pool.stop()
+
+    asyncio.run(scenario())
+
+
 def test_browser_worker_pool_records_first_progress_timestamp() -> None:
     async def scenario() -> None:
         store = InMemoryRuntimeStateStore()

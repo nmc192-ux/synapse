@@ -508,7 +508,7 @@ class BrowserWorkerPool:
             return self._session_workers[session_id]
         workers = await self._wait_for_idle_create_session_worker()
         if not workers:
-            return self._choose_worker_id(session_id=session_id)
+            raise RuntimeError("No bootstrap-ready browser workers available.")
         workers.sort(key=self._dispatch_score)
         return workers[0].worker_id
 

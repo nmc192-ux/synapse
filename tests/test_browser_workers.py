@@ -1545,7 +1545,7 @@ def test_browser_worker_pool_marks_claimed_create_session_slow_with_specific_rea
     asyncio.run(scenario())
 
 
-def test_browser_worker_pool_escalates_claimed_create_session_that_never_entered_execution() -> None:
+def test_browser_worker_pool_requeues_claimed_create_session_that_never_entered_execution() -> None:
     async def scenario() -> None:
         store = InMemoryRuntimeStateStore()
         run_store = RunStore(store)
@@ -1600,15 +1600,15 @@ def test_browser_worker_pool_escalates_claimed_create_session_that_never_entered
                 )
             )
             event = await asyncio.wait_for(queue.get(), timeout=0.2)
-            assert event.event_type == EventType.BROWSER_HUMAN_INTERVENTION_REQUIRED
+            assert event.event_type == EventType.WORKER_UNAVAILABLE
             assert event.payload["reason_code"] == "session_bootstrap_claimed_not_entered"
 
         stored = await run_store.get_worker_request("run-1", "action-create-session-claimed-operator")
         assert stored is not None
-        assert stored.status == "operator_required"
+        assert stored.status == "abandoned"
         assert (
             stored.status_reason
-            == "session bootstrap was claimed by a worker but did not enter execution before timeout and requires operator intervention"
+            == "session bootstrap was claimed by a worker but did not enter execution before timeout; requeueing bootstrap on another worker"
         )
 
     asyncio.run(scenario())

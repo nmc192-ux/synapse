@@ -1118,6 +1118,8 @@ class BrowserWorkerPool:
             if request is not None:
                 if request.status == "operator_required":
                     raise TimeoutError(request.status_reason or f"Request requires operator intervention: {action_id}")
+                if request.status == "abandoned":
+                    raise TimeoutError(request.status_reason or f"Durable worker result abandoned: {action_id}")
                 abandoned = await self._maybe_finalize_abandoned_request(request)
                 if abandoned is not None:
                     raise TimeoutError(abandoned.status_reason or f"Durable worker result abandoned: {action_id}")
@@ -1220,11 +1222,13 @@ class BrowserWorkerPool:
             return
         if request.action == "create_session" and (request.started_at is None or bootstrap_dispatch_degraded):
             if self._worker_claimed_at(request) is not None and self._execution_started_at(request) is None:
-                await self._mark_request_operator_required(
+                await self._abandon_request_for_requeue(
                     request,
-                    reason="session bootstrap was claimed by a worker but did not enter execution before timeout and requires operator intervention",
+                    reason=(
+                        "session bootstrap was claimed by a worker but did not enter execution before timeout; "
+                        "requeueing bootstrap on another worker"
+                    ),
                     reason_code="session_bootstrap_claimed_not_entered",
-                    age_seconds=age_seconds,
                 )
                 return
             await self._mark_request_operator_required(
@@ -1405,6 +1409,45 @@ class BrowserWorkerPool:
             }
         )
         await self._run_store.save_worker_request(updated)
+        if request.started_at is None:
+            self._release_dispatch_backlog(request.worker_id)
+        self._request_alerts.discard((request.action_id, EventType.WORKER_REQUEST_SLOW))
+        self._request_alerts.discard((request.action_id, EventType.WORKER_REQUEST_STUCK))
+        await self._emit_worker_event(
+            EventType.WORKER_UNAVAILABLE,
+            run_id=request.run_id,
+            session_id=request.session_id,
+            payload={
+                "worker_id": request.worker_id,
+                "action_id": request.action_id,
+                "request_id": request.request_id,
+                "reason_code": reason_code,
+                "reason": reason,
+            },
+            severity=EventSeverity.WARNING,
+        )
+        return updated
+
+    async def _abandon_request_for_requeue(
+        self,
+        request: BrowserTaskRequestRecord,
+        *,
+        reason: str,
+        reason_code: str,
+    ) -> BrowserTaskRequestRecord | None:
+        if self._run_store is None:
+            return None
+        now = datetime.now(timezone.utc)
+        updated = request.model_copy(
+            update={
+                "status": "abandoned",
+                "status_reason": reason,
+                "updated_at": now,
+                "completed_at": request.completed_at or now,
+            }
+        )
+        await self._run_store.save_worker_request(updated)
+        self._record_worker_bootstrap_failure(request.worker_id, reason_code=reason_code)
         if request.started_at is None:
             self._release_dispatch_backlog(request.worker_id)
         self._request_alerts.discard((request.action_id, EventType.WORKER_REQUEST_SLOW))
